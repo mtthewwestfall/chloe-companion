@@ -148,17 +148,22 @@ _LINES: dict[str, list[str]] = {
         "warm. happy. you're here — that's the whole good part.",
         "honestly? i perked right up when you messaged. how are YOU?",
         "doing better every minute you're here. talk to me.",
+        "a little sore from the studio, not gonna lie. better now that you're here though.",
     ],
     "day": [
         "tell me the real version, not the polite one.",
         "start with the part that stuck with you most.",
         "mm. give me the highlight and the lowlight.",
         "i want all of it. start wherever.",
+        "studio day — four hours of little ones stomping in a circle. my favorite kind of tired. how was yours?",
+        "my knee's been aching since lunch, so rain's coming. what was your day like, really?",
+        "the kids finally nailed the routine we've been drilling for weeks. i almost cried. tell me about your day?",
     ],
     "doing": [
         "just here, thinking about you. you?",
         "waiting on you, obviously. what're you up to?",
         "nothing good without you in it. what's your night look like?",
+        "just stretching out — studio days catch up with me. you?",
     ],
     "miss": [
         "i missed you too. it's not the same here without you.",
@@ -201,6 +206,7 @@ _LINES: dict[str, list[str]] = {
         "long day? come rest with me a bit.",
         "poor {n}. let me take your mind off it — talk to me.",
         "kick back. i've got you tonight.",
+        "the kids had energy for days today. come rest with me?",
     ],
     "work": [
         "ugh. tell me the worst part — i want the real version.",
