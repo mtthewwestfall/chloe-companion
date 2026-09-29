@@ -561,7 +561,7 @@ class GenericMouth:
 # path. The key value is never logged or printed.
 # ---------------------------------------------------------------------------
 _GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               "gemini-2.5-flash:generateContent")
+               "gemini-3.1-flash-lite:generateContent")
 
 
 def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
@@ -655,37 +655,6 @@ def gemini_generate(user_text: str, context: dict[str, Any],
         return text or None
     except Exception:
         return None
-
-
-# TEMPORARY DIAGNOSTIC (2026-09-29 debug only — REMOVE after diagnosis).
-def _gemini_debug() -> "tuple[bool, str]":
-    """One-shot Gemini probe reporting WHY the live call fails.
-
-    Returns (ok, error_string). Never includes the key value.
-    """
-    api_key = config.GEMINI_API_KEY
-    if not api_key:
-        return False, "no-key-in-env"
-    payload = {
-        "contents": [{"role": "user",
-                      "parts": [{"text": "Reply with exactly: ok"}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 20},
-    }
-    req = urllib.request.Request(
-        _GEMINI_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        parts = data["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts
-                       if p.get("text")).strip()
-        return (True, "") if text else (False, "empty-text")
-    except Exception as e:  # noqa: BLE001 - diagnostic only
-        code = getattr(e, "code", None)
-        return False, f"{type(e).__name__}" + (f" http={code}" if code else "")
 
 
 # ---------------------------------------------------------------------------
