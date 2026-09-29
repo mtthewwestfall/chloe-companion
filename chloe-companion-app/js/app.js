@@ -325,6 +325,10 @@
       return;
     }
     list.innerHTML = '';
+    const promo = document.createElement('div');
+    promo.className = 'promo-banner';
+    promo.innerHTML = 'Launch special: buy one month, get the second free \u2014 enter code <b>BOGO2</b> at checkout.';
+    list.appendChild(promo);
     plans.forEach((p) => {
       const card = document.createElement('div');
       card.className = 'plan-card' + (p.key === currentTier ? ' current' : '');
