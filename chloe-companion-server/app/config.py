@@ -8,8 +8,10 @@ import os
 
 # ---------------------------------------------------------------------------
 # Tiers (updated 2026-09-28 per user: $9.99 / $19.99 / $29.99).
-# $9.99 -> 1,000 msgs; $19.99 -> 2,000 msgs + 60 voice + photos + proactive;
-# $29.99 -> 3,000 msgs + photos + proactive (voice count TBD by user).
+# $9.99 -> 1,000 msgs (text-only); $19.99 -> 2,000 msgs + 60 voice notes +
+# photos + proactive; $29.99 -> 3,000 msgs + 150 voice notes + photos +
+# proactive. Voice-note counts confirmed by user 2026-09-29
+# ("use the preset options for now").
 # Banks top up monthly, never stack: a renewal refills TO the allocation.
 # ---------------------------------------------------------------------------
 TIERS = {
@@ -33,8 +35,7 @@ TIERS = {
         "name": "Companion VIP",
         "price_usd": 29.99,
         "messages_per_month": 3000,
-        # UNCONFIRMED: user deciding voice-note count for this tier (was 150
-        # on the retired $39.99 tier). Do not treat as final.
+        # Confirmed by user 2026-09-29 ("use the preset options for now").
         "voice_notes_per_month": 150,
         "photo_drops": True,
         "proactive": True,

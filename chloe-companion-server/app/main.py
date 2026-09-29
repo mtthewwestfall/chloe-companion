@@ -180,8 +180,9 @@ def list_tiers():
             "interval": "month",
             "messages_per_month": t["messages_per_month"],
             "voice_notes_per_month": t["voice_notes_per_month"],
-            # True when config marks this tier's voice-note count unconfirmed.
-            "voice_notes_unconfirmed": key == "vip",
+            # All voice-note counts confirmed by user 2026-09-29; the field is
+            # kept (always false) so existing clients don't break.
+            "voice_notes_unconfirmed": False,
             "photo_drops": t["photo_drops"],
             "proactive": t["proactive"],
             "checkout_url": config.STRIPE_LIVE_CHECKOUT[key],
