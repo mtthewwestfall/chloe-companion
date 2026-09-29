@@ -168,13 +168,14 @@ def downgrade_to_basic(conn: sqlite3.Connection, user_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Memory — typed per Thoughtspace pattern
 # ---------------------------------------------------------------------------
-def write_memory(conn: sqlite3.Connection, user_id: str, mem_type: str, text: str) -> int:
+def write_memory(conn: sqlite3.Connection, user_id: str, mem_type: str, text: str,
+                 character_id: str = "chloe") -> int:
     if mem_type not in MEM_TYPES:
         raise ValueError(f"mem_type must be one of {MEM_TYPES}")
     get_or_create_user(conn, user_id)  # ensure row exists (memory belongs to a user)
     cur = conn.execute(
-        "INSERT INTO memories (user_id, mem_type, text) VALUES (?, ?, ?)",
-        (user_id, mem_type, text),
+        "INSERT INTO memories (user_id, character_id, mem_type, text) VALUES (?, ?, ?, ?)",
+        (user_id, character_id, mem_type, text),
     )
     conn.commit()
     return cur.lastrowid
@@ -186,10 +187,12 @@ def recall_memories(
     mem_type: str | None = None,
     keyword: str | None = None,
     limit: int = 20,
+    character_id: str = "chloe",
 ) -> list[dict[str, Any]]:
-    """Recall memories for ONE user. Never returns another user's rows."""
-    sql = "SELECT id, mem_type, text, created_at FROM memories WHERE user_id = ?"
-    params: list[Any] = [user_id]
+    """Recall memories for ONE user AND one character. Never returns another
+    user's rows — or another character's."""
+    sql = "SELECT id, mem_type, text, created_at FROM memories WHERE user_id = ? AND character_id = ?"
+    params: list[Any] = [user_id, character_id]
     if mem_type:
         sql += " AND mem_type = ?"
         params.append(mem_type)
@@ -201,13 +204,21 @@ def recall_memories(
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
-def export_memories(conn: sqlite3.Connection, user_id: str) -> list[dict[str, Any]]:
-    return recall_memories(conn, user_id, limit=100000)
+def export_memories(conn: sqlite3.Connection, user_id: str,
+                    character_id: str = "chloe") -> list[dict[str, Any]]:
+    return recall_memories(conn, user_id, limit=100000, character_id=character_id)
 
 
-def delete_all_memories(conn: sqlite3.Connection, user_id: str) -> int:
-    cur = conn.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM conversation WHERE user_id = ?", (user_id,))
+def delete_all_memories(conn: sqlite3.Connection, user_id: str,
+                        character_id: str = "chloe") -> int:
+    cur = conn.execute(
+        "DELETE FROM memories WHERE user_id = ? AND character_id = ?",
+        (user_id, character_id),
+    )
+    conn.execute(
+        "DELETE FROM conversation WHERE user_id = ? AND character_id = ?",
+        (user_id, character_id),
+    )
     conn.commit()
     return cur.rowcount
 
@@ -215,19 +226,22 @@ def delete_all_memories(conn: sqlite3.Connection, user_id: str) -> int:
 # ---------------------------------------------------------------------------
 # Conversation log (per user, for recall of "last conversation")
 # ---------------------------------------------------------------------------
-def log_turn(conn: sqlite3.Connection, user_id: str, role: str, text: str) -> None:
+def log_turn(conn: sqlite3.Connection, user_id: str, role: str, text: str,
+             character_id: str = "chloe") -> None:
     conn.execute(
-        "INSERT INTO conversation (user_id, role, text) VALUES (?, ?, ?)",
-        (user_id, role, text),
+        "INSERT INTO conversation (user_id, character_id, role, text) VALUES (?, ?, ?, ?)",
+        (user_id, character_id, role, text),
     )
     conn.commit()
 
 
-def recent_turns(conn: sqlite3.Connection, user_id: str, limit: int = 12) -> list[dict[str, Any]]:
+def recent_turns(conn: sqlite3.Connection, user_id: str, limit: int = 12,
+                 character_id: str = "chloe") -> list[dict[str, Any]]:
     return [
         dict(r)
         for r in conn.execute(
-            "SELECT role, text FROM conversation WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
+            "SELECT role, text FROM conversation WHERE user_id = ? AND character_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, character_id, limit),
         ).fetchall()
     ][::-1]

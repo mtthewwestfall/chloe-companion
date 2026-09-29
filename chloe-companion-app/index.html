@@ -68,6 +68,8 @@
     <button id="profileBtn" class="facetime-btn" aria-label="Profile">
       <video id="chloeVideo" class="facetime-video" muted playsinline preload="auto"
              poster="./img/chloe-poster.jpg"></video>
+      <img id="charAvatar" class="facetime-avatar hidden" alt="">
+      <span id="charInitial" class="facetime-initial hidden"></span>
       <span class="presence-dot"></span>
       <span id="videoTapHint" class="video-tap-hint hidden">tap to play</span>
     </button>
@@ -79,6 +81,10 @@
       <button id="showsBtn" class="btn-ghost">Shows</button>
     </div>
   </header>
+
+  <!-- Character picker: populated from GET /api/v1/characters. Hidden while
+       the roster is Chloe-only. -->
+  <div id="charPicker" class="char-picker hidden" role="tablist" aria-label="Choose who to talk to"></div>
 
   <main id="chatLog" class="chat-log" aria-live="polite"></main>
 

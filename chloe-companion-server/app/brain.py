@@ -247,9 +247,9 @@ def _detect_intent(user_text: str) -> str:
 def _recent_her_texts(context: dict[str, Any]) -> set[str]:
     out: set[str] = set()
     for turn in context.get("recent", []) or []:
-        if isinstance(turn, dict) and turn.get("role") == "chloe":
+        if isinstance(turn, dict) and turn.get("role") != "user":
             out.add(str(turn.get("text", "")).strip().lower())
-        elif isinstance(turn, (list, tuple)) and len(turn) >= 2 and turn[0] == "chloe":
+        elif isinstance(turn, (list, tuple)) and len(turn) >= 2 and turn[0] != "user":
             out.add(str(turn[1]).strip().lower())
     return out
 
@@ -293,6 +293,148 @@ class Mouth:
 
 
 # ---------------------------------------------------------------------------
+# Generic mouth: persona-driven engine for NON-Chloe characters.
+#
+# Same warmth contract as Chloe (warm, intimate, girlfriend-like,
+# non-explicit; never therapist mode; never punishes him for asking) but
+# voiced from the admin `persona` text — NOT Chloe's line banks. The persona
+# shapes her "who are you" answer and is injected into her context; the
+# reply bank below is written fresh for the generic engine.
+# ---------------------------------------------------------------------------
+
+_GENERIC_LINES: dict[str, list[str]] = {
+    "greet": [
+        "hey {n}. glad you're here.",
+        "well hey there. come sit with me a while.",
+        "hi {n}. i was hoping you'd show up.",
+        "hey you. good to see your name pop up.",
+        "oh good, you're here. how's my night looking?",
+    ],
+    "howru": [
+        "i'm doing alright — better now that you're here. how about you, really?",
+        "pretty good. cozy, thinking. you?",
+        "can't complain when you're talking to me. how are you?",
+    ],
+    "day": [
+        "tell me about it — the real version.",
+        "i'm listening. start anywhere.",
+        "give me the good and the bad.",
+    ],
+    "doing": [
+        "just hanging out, waiting on you. what about you?",
+        "nothing much — honestly, this is the best part of my night.",
+    ],
+    "miss": [
+        "i missed you too.",
+        "then stay a while. i like having you here.",
+        "i notice when you're gone, you know.",
+    ],
+    "love": [
+        "that means a lot, {n}.",
+        "stay with me a little longer tonight?",
+        "mm. i like this — us, right here.",
+    ],
+    "trust": [
+        "that means everything. i'm not going anywhere.",
+        "then stay right here with me.",
+        "you can tell me anything. i mean that.",
+        "i'll earn it — every night, i'll earn it.",
+        "come here. we'll figure it out together.",
+        "that's the sweetest thing anyone's said to me in a while.",
+    ],
+    "heat": [
+        "mm. careful with me, {n}.",
+        "you're trouble. i like it.",
+        "oh? tell me more.",
+    ],
+    "compliment": [
+        "you're sweet. stop it.",
+        "flattery will get you everywhere with me.",
+        "mm, say that again.",
+    ],
+    "tired": [
+        "then just be here. no performing needed.",
+        "rough day? come unwind with me.",
+        "rest up. i've got you.",
+    ],
+    "work": [
+        "ugh, work. tell me the worst of it.",
+        "forget work for a bit — it's just us right now.",
+    ],
+    "show": [
+        "my shows are on the website — check the shows button up top.",
+        "i've got a show coming up. come watch?",
+    ],
+    "thanks": [
+        "always, {n}.",
+        "anytime.",
+        "you never have to thank me.",
+    ],
+    "laugh": [
+        "keep that laugh.",
+        "i love that sound.",
+        "see? this is the good stuff.",
+    ],
+    "goodnight": [
+        "sleep well, {n}. i'll be here.",
+        "night. dream something good.",
+        "rest up. i'll keep your spot.",
+    ],
+    "goodmorning": [
+        "morning, {n}. sleep okay?",
+        "hey. today's already better.",
+    ],
+    "bye": [
+        "okay. i'll be right here.",
+        "go on — but come back to me.",
+        "don't stay away too long.",
+    ],
+    "fallback": [
+        "mm, tell me more.",
+        "keep going, i'm listening.",
+        "and then what happened?",
+        "i'm right here. tell me everything.",
+        "go on — don't leave me hanging.",
+        "i like hearing you talk.",
+        "tell me something new about you.",
+        "i could talk to you all night.",
+    ],
+}
+
+
+def _generic_pick(tag: str, name: str, char: dict[str, Any],
+                  context: dict[str, Any]) -> str:
+    char_name = char.get("name") or "Chloe"
+    persona = (char.get("persona") or "").strip()
+    # "who are you" is answered straight from the admin persona.
+    if tag == "who":
+        intro = f"i'm {char_name.lower()}."
+        return f"{intro} {persona}" if persona else intro
+    if tag in ("fallback", "greet", "howru", "trust") and random.random() < 0.3:
+        cb = _memory_callback(context)
+        if cb:
+            return cb
+    bank = _GENERIC_LINES.get(tag, _GENERIC_LINES["fallback"])
+    recent = _recent_her_texts(context)
+    candidates = [b for b in bank if _fmt(b, name).lower() not in recent]
+    return _fmt(random.choice(candidates or bank), name)
+
+
+class GenericMouth:
+    """Persona-driven reply path for non-Chloe characters.
+
+    Contract: generate(user_text, context) -> reply_text. The context must
+    carry the character dict under context["character"].
+    """
+
+    def generate(self, user_text: str, context: dict[str, Any]) -> str:
+        char = context.get("character") or {}
+        name = _display_name(context.get("name"))
+        tag = _detect_intent(user_text or "")
+        return _generic_pick(tag, name, char, context)
+
+
+# ---------------------------------------------------------------------------
 # AUDITOR HOOK — light safety pass. The bank is pre-vetted non-explicit;
 # this is a backstop, not a censor: it only rewrites on a hard boundary hit.
 # ---------------------------------------------------------------------------
@@ -317,9 +459,18 @@ def audit_reply(reply_text: str, context: dict[str, Any]) -> str:
     return reply_text
 
 
-def compose_reply(user_text: str, context: dict[str, Any]) -> str:
-    """Full brain pipeline: mouth -> auditor. Call this, not the pieces."""
-    draft = Mouth().generate(user_text, context)
+def compose_reply(user_text: str, context: dict[str, Any],
+                  character_id: str = "chloe") -> str:
+    """Full brain pipeline: mouth -> auditor. Call this, not the pieces.
+
+    Chloe ("chloe") uses her exact pinned engine; every other character id
+    uses the persona-driven generic engine.
+    """
+    cid = (character_id or "").strip().lower() or "chloe"
+    if cid == "chloe":
+        draft = Mouth().generate(user_text, context)
+    else:
+        draft = GenericMouth().generate(user_text, context)
     return audit_reply(draft, context)
 
 
@@ -417,16 +568,19 @@ def extract_memories(user_text: str) -> list[tuple[str, str]]:
     return found
 
 
-def _already_known(conn: sqlite3.Connection, user_id: str, text: str) -> bool:
+def _already_known(conn: sqlite3.Connection, user_id: str, text: str,
+                   character_id: str = "chloe") -> bool:
     """Light dedupe: skip writing if the key phrase is already stored."""
     key_words = [w for w in re.findall(r"[a-z]{4,}", text.lower())]
     if not key_words:
         return False
     anchor = max(key_words, key=len)
-    return bool(store.recall_memories(conn, user_id, keyword=anchor, limit=5))
+    return bool(store.recall_memories(conn, user_id, keyword=anchor, limit=5,
+                                      character_id=character_id))
 
 
-def learn_from_turn(conn: sqlite3.Connection, user_id: str, user_text: str) -> int:
+def learn_from_turn(conn: sqlite3.Connection, user_id: str, user_text: str,
+                    character_id: str = "chloe") -> int:
     """Slower brain path: extract durable typed memories from his message
     and write them (deduped). Returns the number of memories written.
 
@@ -436,25 +590,29 @@ def learn_from_turn(conn: sqlite3.Connection, user_id: str, user_text: str) -> i
     """
     written = 0
     for mem_type, text in extract_memories(user_text):
-        if not _already_known(conn, user_id, text):
-            store.write_memory(conn, user_id, mem_type, text)
+        if not _already_known(conn, user_id, text, character_id):
+            store.write_memory(conn, user_id, mem_type, text, character_id)
             written += 1
-    refresh_digest(conn, user_id)
+    refresh_digest(conn, user_id, character_id)
     return written
 
 
-def refresh_digest(conn: sqlite3.Connection, user_id: str) -> str:
-    """Layer 2: rebuild the rolling per-user digest from recent turns plus
-    core/fact/preference memories. Heuristic today; an LLM rewrite plugs in
-    here in Phase 3 (same table, same contract).
+def refresh_digest(conn: sqlite3.Connection, user_id: str,
+                   character_id: str = "chloe") -> str:
+    """Layer 2: rebuild the rolling per-user, per-character digest from
+    recent turns plus core/fact/preference memories. Heuristic today; an LLM
+    rewrite plugs in here in Phase 3 (same table, same contract).
 
     TODO(phase3): LLM digest rewrite (cheap chat-mode call, a turn behind).
     """
     store.get_or_create_user(conn, user_id)
-    cores = store.recall_memories(conn, user_id, mem_type="core", limit=3)
-    prefs = store.recall_memories(conn, user_id, mem_type="preference", limit=3)
-    facts = store.recall_memories(conn, user_id, mem_type="fact", limit=3)
-    turns = store.recent_turns(conn, user_id, limit=4)
+    cores = store.recall_memories(conn, user_id, mem_type="core", limit=3,
+                                  character_id=character_id)
+    prefs = store.recall_memories(conn, user_id, mem_type="preference", limit=3,
+                                  character_id=character_id)
+    facts = store.recall_memories(conn, user_id, mem_type="fact", limit=3,
+                                  character_id=character_id)
+    turns = store.recent_turns(conn, user_id, limit=4, character_id=character_id)
 
     parts: list[str] = []
     known = [m["text"] for m in cores + prefs + facts]
@@ -467,25 +625,28 @@ def refresh_digest(conn: sqlite3.Connection, user_id: str) -> str:
     summary = " ".join(parts)[:600]
 
     conn.execute(
-        """INSERT INTO memory_digest (user_id, summary, updated_at)
-           VALUES (?, ?, datetime('now'))
-           ON CONFLICT(user_id) DO UPDATE SET summary = excluded.summary,
+        """INSERT INTO memory_digest (user_id, character_id, summary, updated_at)
+           VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id, character_id) DO UPDATE SET summary = excluded.summary,
            updated_at = datetime('now')""",
-        (user_id, summary),
+        (user_id, character_id, summary),
     )
     conn.commit()
     return summary
 
 
-def get_digest(conn: sqlite3.Connection, user_id: str) -> str:
+def get_digest(conn: sqlite3.Connection, user_id: str,
+               character_id: str = "chloe") -> str:
     row = conn.execute(
-        "SELECT summary FROM memory_digest WHERE user_id = ?", (user_id,)
+        "SELECT summary FROM memory_digest WHERE user_id = ? AND character_id = ?",
+        (user_id, character_id),
     ).fetchone()
     return row["summary"] if row else ""
 
 
 def relevant_memories(
-    conn: sqlite3.Connection, user_id: str, user_text: str, limit: int = 5
+    conn: sqlite3.Connection, user_id: str, user_text: str, limit: int = 5,
+    character_id: str = "chloe",
 ) -> list[str]:
     """Layer 3 recall: typed memories whose text shares keywords with his
     current message. Simple overlap scoring — no embeddings in the scaffold."""
@@ -493,7 +654,7 @@ def relevant_memories(
     if not words:
         return []
     scored: list[tuple[int, str]] = []
-    for m in store.recall_memories(conn, user_id, limit=60):
+    for m in store.recall_memories(conn, user_id, limit=60, character_id=character_id):
         text = m["text"].lower()
         score = sum(1 for w in words if w in text)
         if score:
@@ -515,14 +676,22 @@ def build_brain_context(
     user_id: str,
     user: dict[str, Any],
     user_text: str,
+    character: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the 3-layer memory stack + trust posture for the mouth.
 
     Layer 1: recent conversation turns (this session's continuity).
-    Layer 2: rolling per-user digest (what she carries between visits).
-    Layer 3: relevant typed memories + her pinned facts (trust-gated reveal).
+    Layer 2: rolling per-user, per-character digest (what she carries
+    between visits).
+    Layer 3: relevant typed memories + her pinned facts (trust-gated
+    reveal; Chloe's curated sets, other characters' admin persona text).
     Plus: the trust posture line (how she holds him — M5 warmth default).
+
+    `character` is the characters.py dict; None means Chloe (exact current
+    behavior).
     """
+    char = character or {"id": "chloe", "name": "Chloe"}
+    cid = char.get("id", "chloe")
     state = trust.get_state(conn, user_id)
     return {
         "name": user.get("name"),
@@ -530,8 +699,11 @@ def build_brain_context(
         "trust_line": trust.POSTURE_LINE,
         "trust_stage": trust.stage_label(state["milestone"]),
         "conduct": trust.CONDUCT_NOTE,
-        "pinned_facts": trust.revealed_pinned_facts(state["milestone"]),
-        "rolling_summary": get_digest(conn, user_id),
-        "relevant_memories": relevant_memories(conn, user_id, user_text),
-        "recent": store.recent_turns(conn, user_id, limit=6),
+        "pinned_facts": trust.revealed_pinned_facts(state["milestone"], char),
+        "rolling_summary": get_digest(conn, user_id, cid),
+        "relevant_memories": relevant_memories(conn, user_id, user_text,
+                                               character_id=cid),
+        "recent": store.recent_turns(conn, user_id, limit=6, character_id=cid),
+        "character": char,
+        "character_name": char.get("name") or "Chloe",
     }

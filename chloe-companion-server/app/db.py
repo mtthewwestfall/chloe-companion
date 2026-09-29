@@ -4,6 +4,10 @@ Isolation rule (enforced by construction): EVERY row carries user_id, and
 EVERY read/write goes through a store function that takes user_id as a
 required argument. There is no code path that reads memories or banks
 without a user_id filter — see tests/test_memory_isolation.py.
+
+Character namespacing (2026-09-29): memory, conversation, and digest rows
+also carry character_id (default 'chloe'), so each character remembers him
+separately. Banks and trust state stay per-user (shared across characters).
 """
 from __future__ import annotations
 
@@ -31,21 +35,25 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS memories (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    TEXT NOT NULL,
+    character_id TEXT NOT NULL DEFAULT 'chloe',
     mem_type   TEXT NOT NULL,   -- core | fact | preference | boundary | tone
     text       TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_memories_user_char ON memories(user_id, character_id);
 
 CREATE TABLE IF NOT EXISTS conversation (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    TEXT NOT NULL,
-    role       TEXT NOT NULL,   -- user | chloe
+    character_id TEXT NOT NULL DEFAULT 'chloe',
+    role       TEXT NOT NULL,   -- user | <character_id>
     text       TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_user ON conversation(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_user_char ON conversation(user_id, character_id);
 
 -- Purchase fulfillment (2026-09-29): Stripe webhook idempotency + identity.
 CREATE TABLE IF NOT EXISTS stripe_events (
@@ -77,15 +85,77 @@ CREATE TABLE IF NOT EXISTS trust_state (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
--- Layer 2 of the memory stack: one short rolling digest per user, refreshed
--- by the slower brain path after each turn. Injected into chat context.
+-- Layer 2 of the memory stack: one short rolling digest per user AND
+-- character, refreshed by the slower brain path after each turn. Injected
+-- into chat context.
 CREATE TABLE IF NOT EXISTS memory_digest (
-    user_id    TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    character_id TEXT NOT NULL DEFAULT 'chloe',
     summary    TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, character_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 """
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(
+        r["name"] == column
+        for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    )
+
+
+def _migrate_character_columns(conn: sqlite3.Connection) -> None:
+    """2026-09-29: namespace memory per character. Existing installs get
+    character_id added with DEFAULT 'chloe' (existing rows belong to Chloe).
+    memory_digest's PK becomes (user_id, character_id), so the table is
+    rebuilt; existing digests carry over as Chloe's.
+
+    Runs BEFORE the SCHEMA script (whose new indexes reference
+    character_id); on fresh installs the tables don't exist yet and the
+    schema script creates them with the column directly.
+    """
+    for table in ("memories", "conversation"):
+        if _table_exists(conn, table) and not _column_exists(conn, table, "character_id"):
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN character_id "
+                "TEXT NOT NULL DEFAULT 'chloe'"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_user_char "
+                f"ON {table}(user_id, character_id)"
+            )
+    if _table_exists(conn, "memory_digest") and not _column_exists(
+        conn, "memory_digest", "character_id"
+    ):
+        conn.execute("ALTER TABLE memory_digest RENAME TO memory_digest_old")
+        conn.execute(
+            """CREATE TABLE memory_digest (
+                user_id    TEXT NOT NULL,
+                character_id TEXT NOT NULL DEFAULT 'chloe',
+                summary    TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, character_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO memory_digest (user_id, character_id, summary, updated_at)
+               SELECT user_id, 'chloe', summary, updated_at FROM memory_digest_old"""
+        )
+        conn.execute("DROP TABLE memory_digest_old")
+    conn.commit()
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -100,6 +170,11 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 def init_db(db_path: str | None = None) -> None:
     conn = connect(db_path)
     try:
+        # Migration first: on existing installs it adds character_id before
+        # the schema script's new indexes reference the column. On fresh
+        # installs the tables don't exist yet and the schema script creates
+        # them with the column directly.
+        _migrate_character_columns(conn)
         conn.executescript(SCHEMA)
         conn.commit()
     finally:

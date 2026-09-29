@@ -336,6 +336,43 @@ body {
 }
 .video-tap-hint.hidden { display: none; }
 
+/* Non-Chloe character tile: avatar image or initial tile in place of video */
+.facetime-avatar {
+  width: 100%; height: 100%; object-fit: cover; display: block; background: #0a1128;
+}
+.facetime-initial {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  font-size: 34px; font-weight: 700; color: #e8a94c; background: #101a3d;
+}
+
+/* Character picker: chips under the header (hidden while roster is Chloe-only) */
+.char-picker {
+  display: flex; gap: 8px; padding: 8px 12px 2px; overflow-x: auto; flex: none;
+  scrollbar-width: none;
+}
+.char-picker::-webkit-scrollbar { display: none; }
+.char-picker.hidden { display: none; }
+.char-chip {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px;
+  border-radius: 999px; border: 1px solid rgba(232,169,76,.25);
+  background: rgba(16,26,61,.6); color: var(--ink); cursor: pointer; flex: none;
+  font-size: 14px;
+}
+.char-chip.selected {
+  border-color: rgba(232,169,76,.8);
+  background: rgba(232,169,76,.14);
+  box-shadow: 0 0 0 1px rgba(232,169,76,.4);
+}
+.char-chip-face {
+  width: 30px; height: 30px; border-radius: 50%; object-fit: cover; flex: none;
+  background: #101a3d;
+}
+.char-chip-initial {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; color: #e8a94c; font-size: 15px;
+}
+.char-chip-name { white-space: nowrap; }
+
 .promo-banner {
   background: linear-gradient(135deg, rgba(232,169,76,.18), rgba(232,169,76,.05));
   border: 1px solid rgba(232,169,76,.45); border-radius: 14px; padding: 12px 14px;

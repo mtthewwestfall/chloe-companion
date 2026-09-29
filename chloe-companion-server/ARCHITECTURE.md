@@ -3,6 +3,32 @@
 Decided with the user 2026-09-28. Implemented in this server (`app/trust.py`,
 `app/brain.py`, `app/store.py`, `app/db.py`).
 
+## Multi-character support (2026-09-29)
+
+The roster is admin-managed on the Keyhole backend (`GET
+{KEYHOLE_BACKEND_URL}/keyhole/characters`, public). `app/characters.py`
+fetches it, caches ~5 minutes, and filters to `kh_companion=true`. Chloe is
+always first and always present (built-in fallback when the Keyhole backend
+is unreachable). `GET /api/v1/characters` serves `[{id, name, avatar_url}]`.
+
+- Chat/memory/memory-write APIs accept `character_id` (default `"chloe"`;
+  unknown ids fall back to Chloe). Memory, conversation turns, and the
+  rolling digest are namespaced per `(user_id, character_id)` — each
+  character remembers him separately. Banks and trust state stay per-user.
+- Chloe (`"chloe"`) keeps her EXACT pinned engine: curated line banks,
+  `CHLOE_PINNED` facts, Liora voice. Other characters use the
+  persona-driven generic engine (`GenericMouth` in `app/brain.py`): same
+  warmth contract (warm, intimate, girlfriend-like, non-explicit; never
+  therapist mode; never punishes asking), voiced from the admin `persona`
+  text with a separately written reply bank. Their pinned facts are the
+  persona sentences; their voice notes use their `companion_voice`
+  (`app/voice.py`, Chloe stays `liora`).
+- Photo drops are Chloe-only (never Chloe's photos on another character).
+- The app (`chloe-companion-app`) renders a character picker from
+  `/api/v1/characters` (hidden while the roster is Chloe-only), sends
+  `character_id` with chat, and swaps the FaceTime tile: Chloe's video for
+  Chloe, avatar/initial tile for others.
+
 ## The split
 
 **MEMORY SCALE is the foundation.** She gets closer because she *remembers* —

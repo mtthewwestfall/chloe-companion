@@ -20,6 +20,7 @@ user_id; there is no cross-user path (tested).
 from __future__ import annotations
 
 import sqlite3
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -192,12 +193,23 @@ def maybe_advance(
     return get_state(conn, user_id), True
 
 
-def revealed_pinned_facts(milestone: int) -> list[str]:
-    """All of her pinned facts unlocked at or below this milestone."""
-    facts: list[str] = []
-    for m in range(START_MILESTONE, min(milestone, MAX_MILESTONE) + 1):
-        facts.extend(CHLOE_PINNED.get(m, []))
-    return facts
+def revealed_pinned_facts(milestone: int, character: dict[str, Any] | None = None) -> list[str]:
+    """All of her pinned facts unlocked at or below this milestone.
+
+    Chloe: her curated CHLOE_PINNED sets (unchanged). Other characters: her
+    admin `persona` text, split into sentences — the everyday surface he'd
+    notice on night one. Cumulative across milestones (persona facts are
+    all M5 surface).
+    """
+    if character is None or character.get("id", "chloe") == "chloe":
+        facts: list[str] = []
+        for m in range(START_MILESTONE, min(milestone, MAX_MILESTONE) + 1):
+            facts.extend(CHLOE_PINNED.get(m, []))
+        return facts
+    persona = (character.get("persona") or "").strip()
+    if not persona:
+        return []
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", persona) if s.strip()]
 
 
 def stage_label(milestone: int) -> str:

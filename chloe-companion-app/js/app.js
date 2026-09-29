@@ -46,7 +46,7 @@
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   function addText(who, text) {
-    addMsg(who, esc(text), { caption: who === 'her' ? 'Chloe · ' + timeNow() : timeNow() });
+    addMsg(who, esc(text), { caption: who === 'her' ? charDisplayName() + ' · ' + timeNow() : timeNow() });
   }
 
   // Voice-note bubble UI. In demo mode the URL is `demo:voice` and we play a
@@ -97,7 +97,7 @@
   // Photo-drop bubble UI. Demo renders a tasteful night-window scene
   // placeholder (real photo curation happens later with the user).
   function addPhotoDrop(url, caption) {
-    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: 'Chloe · ' + timeNow() });
+    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: charDisplayName() + ' · ' + timeNow() });
     const b = wrap.firstChild;
     const isDemo = url === 'demo:photo';
     b.innerHTML = `
@@ -124,6 +124,91 @@
       </div>`;
   }
 
+  /* ---------- character picker ---------- */
+
+  const DEFAULT_CHAR = { id: 'chloe', name: 'Chloe', avatar_url: '' };
+  let currentChar = { ...DEFAULT_CHAR };
+  try {
+    const savedId = localStorage.getItem('chloe_char_id');
+    if (savedId) currentChar = { id: savedId, name: savedId === 'chloe' ? 'Chloe' : savedId, avatar_url: '' };
+  } catch (e) {}
+
+  function charDisplayName() { return currentChar.name || 'Chloe'; }
+
+  // FaceTime tile: Chloe gets her live video tile; other characters show
+  // their avatar (or an initial tile when no avatar is set).
+  function updateCharTile() {
+    const video = $('chloeVideo'), avatar = $('charAvatar'), initial = $('charInitial');
+    if (currentChar.id === 'chloe') {
+      video.classList.remove('hidden'); avatar.classList.add('hidden'); initial.classList.add('hidden');
+      vidIdle();
+    } else {
+      try { video.pause(); } catch (e) {}
+      video.classList.add('hidden');
+      clearTimeout(idleTimer);
+      if (currentChar.avatar_url) {
+        avatar.src = currentChar.avatar_url;
+        avatar.classList.remove('hidden'); initial.classList.add('hidden');
+      } else {
+        initial.textContent = (currentChar.name || '?').charAt(0).toUpperCase();
+        initial.classList.remove('hidden'); avatar.classList.add('hidden');
+      }
+    }
+    document.querySelector('.header-name').textContent = charDisplayName();
+  }
+
+  function charGreeting() {
+    const name = localStorage.getItem('chloe_name') || 'friend';
+    if (currentChar.id === 'chloe') {
+      return `hey ${name}. i'm chloe. this is my little corner of the night — come talk to me anytime.`;
+    }
+    return `hey ${name}. i'm ${charDisplayName().toLowerCase()} — come talk to me.`;
+  }
+
+  async function renderCharPicker() {
+    const bar = $('charPicker');
+    let roster = null;
+    try { roster = await ApiClient.characters(); } catch (e) { roster = null; }
+    if (!roster || !roster.length) roster = [DEFAULT_CHAR];
+    // Keep the saved selection if it's still on the roster.
+    if (!roster.some((c) => c.id === currentChar.id)) {
+      currentChar = { ...roster[0] };
+      try { localStorage.setItem('chloe_char_id', currentChar.id); } catch (e) {}
+    } else {
+      const full = roster.find((c) => c.id === currentChar.id);
+      currentChar = { ...full };
+    }
+    bar.innerHTML = '';
+    roster.forEach((c) => {
+      const chip = document.createElement('button');
+      chip.className = 'char-chip' + (c.id === currentChar.id ? ' selected' : '');
+      const face = c.avatar_url
+        ? `<img class="char-chip-face" src="${esc(c.avatar_url)}" alt="">`
+        : `<span class="char-chip-face char-chip-initial">${esc((c.name || '?').charAt(0).toUpperCase())}</span>`;
+      chip.innerHTML = `${face}<span class="char-chip-name">${esc(c.name || c.id)}</span>`;
+      chip.addEventListener('click', () => switchCharacter(c.id, roster));
+      bar.appendChild(chip);
+    });
+    bar.classList.toggle('hidden', roster.length < 2);
+    updateCharTile();
+  }
+
+  function switchCharacter(id, roster) {
+    if (id === currentChar.id) return;
+    const next = (roster || []).find((c) => c.id === id) || { ...DEFAULT_CHAR, id };
+    currentChar = { ...next };
+    try { localStorage.setItem('chloe_char_id', currentChar.id); } catch (e) {}
+    document.querySelectorAll('.char-chip').forEach((chip) => {
+      chip.classList.toggle('selected',
+        chip.querySelector('.char-chip-name').textContent === (next.name || next.id));
+    });
+    updateCharTile();
+    chatLog.innerHTML = '';
+    dayDividerIfNeeded();
+    addText('her', charGreeting());
+    showToast('Now talking to ' + charDisplayName());
+  }
+
   /* ---------- chat flow ---------- */
 
   let sending = false;
@@ -134,7 +219,7 @@
     sending = true;
     addText('him', text);
     msgInput.value = '';
-    vidTyping();
+    if (currentChar.id === 'chloe') vidTyping();
     lastUserMsgAt = Date.now();
     consecutiveProactive = 0;
     typingRow.classList.remove('hidden');
@@ -144,9 +229,9 @@
     await new Promise((r) => setTimeout(r, 900 + Math.random() * 900));
 
     try {
-      const res = await ApiClient.chat(text);
+      const res = await ApiClient.chat(text, currentChar.id);
       typingRow.classList.add('hidden');
-      vidIdle();
+      if (currentChar.id === 'chloe') vidIdle();
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);
       } else {
@@ -157,7 +242,7 @@
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
-      vidIdle();
+      if (currentChar.id === 'chloe') vidIdle();
       addText('her', 'hmm, lost you for a second. say that again?');
     }
     sending = false;
@@ -440,11 +525,14 @@
   }
 
   async function bootChat(isFirstHello) {
-    vidIdle();
+    if (currentChar.id === 'chloe') vidIdle();
     armQuietNudge();
     dayDividerIfNeeded();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';
+
+    // Character roster (admin-managed). Chloe-only until the server lists more.
+    renderCharPicker();
 
     // Probe for the real server in the background; demo works regardless.
     ApiClient.probe().then(updateConnLine);
@@ -459,8 +547,7 @@
     typingRow.classList.add('hidden');
 
     if (isFirstHello) {
-      const name = localStorage.getItem('chloe_name') || 'friend';
-      addText('her', `hey ${name}. i'm chloe. this is my little corner of the night — come talk to me anytime.`);
+      addText('her', charGreeting());
     } else if (returning) {
       addText('her', MockEngine.returnOpener());
     }

@@ -19,8 +19,12 @@ LIORA_VOICE = "liora"  # voice name per user's live setup
 EST_COST_PER_NOTE_USD = 0.0045
 
 
-def maybe_generate_voice_note(text: str, user_id: str) -> str | None:
+def maybe_generate_voice_note(text: str, user_id: str,
+                              voice_name: str = "liora") -> str | None:
     """Return a voice_note_url, or None when voice is unavailable/disabled.
+
+    `voice_name` is the character's xAI voice (companion_voice from the
+    Keyhole admin roster; Chloe is "liora").
 
     STUB: no network calls. Returns None unless BOTH the key and the flag
     are set; when both are set it returns a placeholder URL (still no
@@ -31,6 +35,8 @@ def maybe_generate_voice_note(text: str, user_id: str) -> str | None:
     if not config.VOICE_NOTES_ENABLED:
         return None
     # TODO(phase3, needs user approval): POST to XAI_TTS_ENDPOINT with the
-    # key, store the MP3, return its URL. Never call without approval.
+    # key and voice_name, store the MP3, return its URL. Never call without
+    # approval.
     safe = "".join(c if c.isalnum() else "_" for c in user_id)[:16]
-    return f"STUB_TTS_DISABLED://voice/{safe}/note.mp3"
+    vname = "".join(c if c.isalnum() else "_" for c in (voice_name or "liora"))[:24]
+    return f"STUB_TTS_DISABLED://voice/{vname}/{safe}/note.mp3"

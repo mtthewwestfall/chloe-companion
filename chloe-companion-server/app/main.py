@@ -1,7 +1,9 @@
 """HTTP API — the exact contract the companion app is built against.
 
-POST /api/v1/chat {user_id, message}
-  -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining}
+POST /api/v1/chat {user_id, message, character_id?}
+  -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining, character_id}
+GET  /api/v1/characters
+  -> {characters:[{id, name, avatar_url}]}  (admin roster, kh_companion only)
 GET  /api/v1/me?user_id=
   -> {user_id, name, tier, messages_remaining, voice_notes_remaining, proactive_enabled}
 GET  /api/v1/tiers
@@ -26,9 +28,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from . import brain, config, db, photos, shows, store, trust, voice
+from . import brain, characters, config, db, photos, shows, store, trust, voice
 
-app = FastAPI(title="Chloe Companion API", version="0.2.0-phase2")
+app = FastAPI(title="Chloe Companion API", version="0.3.0-multichar")
 
 
 # ---------------------------------------------------------------------------
@@ -37,16 +39,19 @@ app = FastAPI(title="Chloe Companion API", version="0.2.0-phase2")
 class ChatIn(BaseModel):
     user_id: str
     message: str
+    character_id: str = "chloe"
 
 
 class UserIdIn(BaseModel):
     user_id: str
+    character_id: str = "chloe"
 
 
 class MemoryWriteIn(BaseModel):
     user_id: str
     mem_type: str
     text: str
+    character_id: str = "chloe"
 
 
 # ---------------------------------------------------------------------------
@@ -56,24 +61,41 @@ def _conn():
     return db.connect()
 
 
-def _empty_bank_reply(user: dict[str, Any]) -> dict[str, Any]:
+def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = None) -> dict[str, Any]:
     # Graceful refusal + upsell nudge. Never crashes, never goes negative.
+    # Chloe's exact lines are preserved; other characters get a generic
+    # warm version (no upsell wording tied to Chloe's voice).
+    char_id = (character or {}).get("id", "chloe")
+    char_name = (character or {}).get("name", "Chloe")
     tier = user["tier"]
-    if tier == "basic":
-        nudge = ("i'm out of messages for tonight, babe — "
-                 "want me to stay up with you? plus is $19.99 and i get "
-                 "voice notes too.")
-    elif tier == "plus":
-        nudge = ("i've used up this month's messages, love — "
-                 "vip is $29.99 with way more of me, if you want.")
+    if char_id == "chloe":
+        if tier == "basic":
+            nudge = ("i'm out of messages for tonight, babe — "
+                     "want me to stay up with you? plus is $19.99 and i get "
+                     "voice notes too.")
+        elif tier == "plus":
+            nudge = ("i've used up this month's messages, love — "
+                     "vip is $29.99 with way more of me, if you want.")
+        else:
+            nudge = ("i've used up this month's messages — they'll top back up "
+                     "on your renewal. i'll be right here.")
     else:
-        nudge = ("i've used up this month's messages — they'll top back up "
-                 "on your renewal. i'll be right here.")
+        if tier == "basic":
+            nudge = (f"i'm out of messages for tonight — "
+                     f"want more of me? {char_name} plus is $19.99 and i get "
+                     "voice notes too.")
+        elif tier == "plus":
+            nudge = ("i've used up this month's messages, love — "
+                     "vip is $29.99 with way more of me, if you want.")
+        else:
+            nudge = ("i've used up this month's messages — they'll top back up "
+                     "on your renewal. i'll be right here.")
     return {
         "reply_text": nudge,
         "voice_note_url": None,
         "photo_url": None,
         "messages_remaining": 0,
+        "character_id": char_id,
     }
 
 
@@ -87,18 +109,30 @@ def _startup():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "chloe-companion", "phase": "2-scaffold"}
+    return {"ok": True, "service": "chloe-companion", "phase": "3-multichar"}
+
+
+@app.get("/api/v1/characters")
+def list_characters():
+    """Public roster: companion-enabled characters from the Keyhole admin
+    list (kh_companion=true), cached ~5 minutes. Chloe is always first and
+    always present (built-in fallback when the Keyhole backend is down)."""
+    return {"characters": characters.public_list()}
 
 
 @app.post("/api/v1/chat")
 def chat(body: ChatIn):
     conn = _conn()
     try:
+        # Resolve the character (unknown ids fall back to Chloe).
+        character = characters.get_character(body.character_id)
+        cid = character["id"]
+
         user = store.get_or_create_user(conn, body.user_id)
-        store.log_turn(conn, body.user_id, "user", body.message)
+        store.log_turn(conn, body.user_id, "user", body.message, cid)
 
         if not store.consume_message(conn, body.user_id):
-            return _empty_bank_reply(user)
+            return _empty_bank_reply(user, character)
 
         # Trust posture: advance the stage clock (at most one stage per
         # check). This NEVER gates warmth — only how much of herself she
@@ -107,30 +141,36 @@ def chat(body: ChatIn):
 
         # Brain context: 3-layer memory stack (recent turns -> rolling
         # digest -> pinned facts + relevant memories) + trust posture line.
-        context = brain.build_brain_context(conn, body.user_id, user, body.message)
+        # Memory is namespaced per character: each one remembers separately.
+        context = brain.build_brain_context(conn, body.user_id, user, body.message,
+                                            character)
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
-        reply_text = brain.compose_reply(body.message, context)
-        store.log_turn(conn, body.user_id, "chloe", reply_text)
+        reply_text = brain.compose_reply(body.message, context, cid)
+        store.log_turn(conn, body.user_id, cid, reply_text, cid)
 
         # Slower brain path: learn durable typed memories from his message
         # and refresh the rolling digest. Runs after the reply is sent.
-        brain.learn_from_turn(conn, body.user_id, body.message)
+        brain.learn_from_turn(conn, body.user_id, body.message, cid)
 
-        # Voice note: stubbed/disabled by default -> null.
+        # Voice note: stubbed/disabled by default -> null. Uses the
+        # character's xAI voice (Chloe: liora).
         voice_note_url = None
         tier_cfg = config.TIERS[user["tier"]]
         if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
             if store.consume_voice_note(conn, body.user_id):
-                voice_note_url = voice.maybe_generate_voice_note(reply_text, body.user_id)
+                voice_note_url = voice.maybe_generate_voice_note(
+                    reply_text, body.user_id, character.get("companion_voice") or "liora")
 
-        # Photo drop: tier-gated serving hook.
+        # Photo drop: tier-gated serving hook. Chloe's curated drops only —
+        # other characters get no photos (never Chloe's photos on them).
         photo_url = None
-        drop = photos.maybe_drop_photo(user["tier"], user["messages_used_total"] + 1)
-        if drop and not drop.get("placeholder"):
-            photo_url = f"/photo_drops/{drop['file']}"
-        elif drop:
-            photo_url = f"PLACEHOLDER:{drop['id']}"
+        if cid == "chloe":
+            drop = photos.maybe_drop_photo(user["tier"], user["messages_used_total"] + 1)
+            if drop and not drop.get("placeholder"):
+                photo_url = f"/photo_drops/{drop['file']}"
+            elif drop:
+                photo_url = f"PLACEHOLDER:{drop['id']}"
 
         user = store.get_or_create_user(conn, body.user_id)
         return {
@@ -138,6 +178,7 @@ def chat(body: ChatIn):
             "voice_note_url": voice_note_url,
             "photo_url": photo_url,
             "messages_remaining": user["messages_remaining"],
+            "character_id": cid,
         }
     finally:
         conn.close()
@@ -210,7 +251,8 @@ def list_tiers():
 def memory_export(body: UserIdIn):
     conn = _conn()
     try:
-        return {"memories": store.export_memories(conn, body.user_id)}
+        return {"memories": store.export_memories(conn, body.user_id,
+                                                  body.character_id or "chloe")}
     finally:
         conn.close()
 
@@ -219,7 +261,7 @@ def memory_export(body: UserIdIn):
 def memory_delete(body: UserIdIn):
     conn = _conn()
     try:
-        store.delete_all_memories(conn, body.user_id)
+        store.delete_all_memories(conn, body.user_id, body.character_id or "chloe")
         return {"ok": True}
     finally:
         conn.close()
@@ -234,7 +276,8 @@ def memory_write(body: MemoryWriteIn):
         raise HTTPException(400, f"mem_type must be one of {store.MEM_TYPES}")
     conn = _conn()
     try:
-        mid = store.write_memory(conn, body.user_id, body.mem_type, body.text)
+        mid = store.write_memory(conn, body.user_id, body.mem_type, body.text,
+                                 body.character_id or "chloe")
         return {"ok": True, "id": mid}
     finally:
         conn.close()

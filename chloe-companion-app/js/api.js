@@ -78,11 +78,12 @@ const ApiClient = (() => {
     return connected;
   }
 
-  async function chat(message) {
+  async function chat(message, characterId) {
     try {
       const data = await request('POST', '/api/v1/chat', {
         user_id: userId(),
         message,
+        character_id: characterId || 'chloe',
       });
       setConnected(true);
       return data;
@@ -128,5 +129,19 @@ const ApiClient = (() => {
     }
   }
 
-  return { probe, chat, me, shows, tiers, userId, onStatus, isConnected: () => connected };
+  // Character roster from the live server (admin-managed Keyhole list,
+  // kh_companion only). Chloe first, always present. Null when offline —
+  // the app falls back to a Chloe-only roster.
+  async function characters() {
+    try {
+      const data = await request('GET', '/api/v1/characters');
+      setConnected(true);
+      return data && data.characters ? data.characters : null;
+    } catch (e) {
+      setConnected(false);
+      return null;
+    }
+  }
+
+  return { probe, chat, me, shows, tiers, characters, userId, onStatus, isConnected: () => connected };
 })();
