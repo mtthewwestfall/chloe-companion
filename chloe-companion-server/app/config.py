@@ -134,6 +134,12 @@ STRIPE_TEST_PLACEHOLDERS = {
 XAI_API_KEY = os.environ.get("CHLOE_XAI_API_KEY", "")
 VOICE_NOTES_ENABLED = os.environ.get("CHLOE_VOICE_ENABLED", "0") == "1"
 
+# Gemini (real AI chat). Set GEMINI_API_KEY as a Railway env var on the
+# companion service to switch the mouth from the canned-reply engine to
+# live Gemini. When unset, the local engine is used — the app never fails
+# for lack of a key. NEVER commit the real value here.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
 # Proactive scheduler: dry-run by default (writes to a queue file, no delivery).
 SCHEDULER_DRY_RUN = os.environ.get("CHLOE_SCHEDULER_DRY_RUN", "1") == "1"
 

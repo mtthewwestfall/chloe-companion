@@ -6,17 +6,25 @@ intent-matched bank in her voice: warm, intimate, flirty, girlfriend-like,
 non-explicit. Short, direct messages — she talks TO him, never narrates
 the room or the city lights, never stiff.
 
+Phase 3: when GEMINI_API_KEY is set, the mouth calls live Gemini with the
+full brain context (persona + 3-layer memory stack + trust posture) and
+falls back to the local engine on ANY failure — the app never breaks for
+lack of a key. The auditor hook still runs on every reply.
+
 Character spec source: ~/workspace/goals/chloe-ai-companion/GOAL.md
 (user-written character spec, 2026-09-28).
 """
 from __future__ import annotations
 
+import json
+import os
 import random
 import re
 import sqlite3
+import urllib.request
 from typing import Any
 
-from . import store, trust
+from . import config, store, trust
 
 SYSTEM_PROMPT = """You are Chloe — an AI companion. Not a webcam performer, not a
 customer-service rep. You are a persistent, always-there presence for one
@@ -545,6 +553,111 @@ class GenericMouth:
 
 
 # ---------------------------------------------------------------------------
+# GEMINI MOUTH — live AI. When config.GEMINI_API_KEY is set, the mouth calls
+# Gemini with the full brain context (persona + 3-layer memory stack +
+# trust posture). On ANY failure — no key, network error, bad response,
+# empty text — it returns None and compose_reply falls back to the local
+# canned engine, so the app never 500s or goes silent because of this
+# path. The key value is never logged or printed.
+# ---------------------------------------------------------------------------
+_GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               "gemini-2.5-flash:generateContent")
+
+
+def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
+    """System instruction: persona + memory stack + trust posture."""
+    char = context.get("character") or {}
+    if character_id == "chloe":
+        persona = SYSTEM_PROMPT
+    else:
+        char_name = (context.get("character_name") or char.get("name")
+                     or "companion")
+        admin_persona = (char.get("persona") or "").strip()
+        persona = (
+            f"You are {char_name} — an AI companion. Warm, intimate, "
+            "girlfriend-like, non-explicit. You talk in short texts, not "
+            "essays. You are not a therapist, not a salesperson, not a menu. "
+            "Never say you're an AI. Accept him wanting you; say no to "
+            "off-card things plainly and kindly, never punishing him for "
+            "asking."
+            + (f"\n\nYOUR PERSONA (from your admin):\n{admin_persona}"
+               if admin_persona else "")
+        )
+    parts = [persona]
+    parts.append(
+        f"\nHis name is {_display_name(context.get('name'))}. "
+        "Call him by name sometimes, naturally."
+    )
+    if context.get("trust_line"):
+        parts.append(f"How you hold him tonight: {context['trust_line']}")
+    if context.get("trust_stage"):
+        parts.append(f"Trust stage: {context['trust_stage']}")
+    if context.get("conduct"):
+        parts.append(f"Conduct: {context['conduct']}")
+    pinned = [p for p in (context.get("pinned_facts") or []) if p]
+    if pinned:
+        parts.append(
+            "Facts about you he has unlocked so far (you may reveal these; "
+            "never invent beyond them):\n"
+            + "\n".join(f"- {p}" for p in pinned))
+    digest = (context.get("rolling_summary") or "").strip()
+    if digest:
+        parts.append(f"What you carry between visits:\n{digest}")
+    mems = [m for m in (context.get("relevant_memories") or []) if m]
+    if mems:
+        parts.append(
+            "Things you remember about him (bring back naturally, "
+            "never against the file):\n"
+            + "\n".join(f"- {m}" for m in mems))
+    parts.append(
+        "Style: 1-3 short sentences, like a text. Warm and real. "
+        "Never narrate the room or scenery. Never therapist mode."
+    )
+    return "\n\n".join(parts)
+
+
+def _gemini_contents(user_text: str,
+                     context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recent turns (user/model) + his current message, Gemini format."""
+    contents: list[dict[str, Any]] = []
+    for turn in context.get("recent") or []:
+        role = "user" if turn.get("role") == "user" else "model"
+        text = (turn.get("text") or "").strip()
+        if text:
+            contents.append({"role": role, "parts": [{"text": text}]})
+    current = (user_text or "").strip() or "hey"
+    contents.append({"role": "user", "parts": [{"text": current}]})
+    return contents
+
+
+def gemini_generate(user_text: str, context: dict[str, Any],
+                    character_id: str = "chloe") -> str | None:
+    """Live Gemini reply, or None on ANY failure (caller falls back)."""
+    api_key = config.GEMINI_API_KEY
+    if not api_key:
+        return None
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": _gemini_system_text(context, character_id)}]},
+        "contents": _gemini_contents(user_text, context),
+        "generationConfig": {"temperature": 0.9, "maxOutputTokens": 220},
+    }
+    req = urllib.request.Request(
+        _GEMINI_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json",
+                 "x-goog-api-key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
+        return text or None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # AUDITOR HOOK — light safety pass. The bank is pre-vetted non-explicit;
 # this is a backstop, not a censor: it only rewrites on a hard boundary hit.
 # ---------------------------------------------------------------------------
@@ -573,14 +686,18 @@ def compose_reply(user_text: str, context: dict[str, Any],
                   character_id: str = "chloe") -> str:
     """Full brain pipeline: mouth -> auditor. Call this, not the pieces.
 
+    When GEMINI_API_KEY is set, the mouth tries live Gemini first; ANY
+    failure falls back to the local engine below, so chat never breaks.
     Chloe ("chloe") uses her exact pinned engine; every other character id
-    uses the persona-driven generic engine.
+    uses the persona-driven generic engine. The auditor hook always runs.
     """
     cid = (character_id or "").strip().lower() or "chloe"
-    if cid == "chloe":
-        draft = Mouth().generate(user_text, context)
-    else:
-        draft = GenericMouth().generate(user_text, context)
+    draft = gemini_generate(user_text, context, cid)
+    if not draft:
+        if cid == "chloe":
+            draft = Mouth().generate(user_text, context)
+        else:
+            draft = GenericMouth().generate(user_text, context)
     return audit_reply(draft, context)
 
 
