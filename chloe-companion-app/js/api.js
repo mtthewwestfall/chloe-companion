@@ -1,0 +1,94 @@
+/* ============================================================
+   API client for the real companion backend.
+
+   Contract (implemented by the future companion server):
+     POST /api/v1/chat {user_id, message}
+       -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining}
+     GET  /api/v1/me?user_id=
+       -> {user_id, name, tier, messages_remaining, voice_notes_remaining, proactive_enabled}
+     GET  /api/v1/shows
+       -> {shows:[{id,title,starts_at,ticket_url}]}
+
+   Graceful fallback: if the server is unreachable (timeout/error),
+   every call falls back to MockEngine (DEMO) so the app stays
+   previewable. `connected` tracks the last known server state and
+   the UI can listen via onStatus().
+   ============================================================ */
+const ApiClient = (() => {
+  let connected = false;
+  const listeners = new Set();
+
+  function setConnected(v) {
+    if (v !== connected) {
+      connected = v;
+      listeners.forEach((fn) => { try { fn(v); } catch (e) {} });
+    }
+  }
+  function onStatus(fn) { listeners.add(fn); }
+
+  function withTimeout(promise, ms) {
+    const t = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
+    return Promise.race([promise, t]);
+  }
+
+  async function request(method, path, body) {
+    const url = CONFIG.API_BASE_URL + path;
+    const opts = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    };
+    const resp = await withTimeout(fetch(url, opts), CONFIG.REQUEST_TIMEOUT_MS);
+    if (!resp.ok) throw new Error('http ' + resp.status);
+    return resp.json();
+  }
+
+  // Probe the server once (called at boot and on manual retry).
+  async function probe() {
+    try {
+      await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(CONFIG.DEMO_USER_ID));
+      setConnected(true);
+    } catch (e) {
+      setConnected(false); // DEMO fallback — server not up yet
+    }
+    return connected;
+  }
+
+  async function chat(message) {
+    try {
+      const data = await request('POST', '/api/v1/chat', {
+        user_id: CONFIG.DEMO_USER_ID,
+        message,
+      });
+      setConnected(true);
+      return data;
+    } catch (e) {
+      setConnected(false);
+      return MockEngine.chat(message); // DEMO fallback
+    }
+  }
+
+  async function me() {
+    try {
+      const data = await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(CONFIG.DEMO_USER_ID));
+      setConnected(true);
+      return data;
+    } catch (e) {
+      setConnected(false);
+      return MockEngine.me(); // DEMO fallback
+    }
+  }
+
+  async function shows() {
+    try {
+      const data = await request('GET', '/api/v1/shows');
+      setConnected(true);
+      return data;
+    } catch (e) {
+      setConnected(false);
+      return MockEngine.shows(); // DEMO fallback
+    }
+  }
+
+  return { probe, chat, me, shows, onStatus, isConnected: () => connected };
+})();
