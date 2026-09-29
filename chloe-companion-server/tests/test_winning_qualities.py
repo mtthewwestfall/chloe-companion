@@ -8,15 +8,17 @@ Run:  python -m unittest discover -s tests -v   (from the project root)
 """
 from __future__ import annotations
 
+import json
 import os
 import random
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app import brain, db, store  # noqa: E402
+from app import brain, db, store, trust  # noqa: E402
 
 
 BATTERY_FACTS = [
@@ -187,6 +189,160 @@ class FourthWallTest(_Base):
         names = {self.reply("tell me about yourself", seed=s).lower()
                  for s in range(10)}
         self.assertTrue(any("chloe" in r_ for r_ in names))
+
+
+class QuietRegroupTest(_Base):
+    """No session-kill: when she'd terminate, she goes quiet to regroup
+    and the trigger is recorded as a boundary memory."""
+
+    TERMINATION = ("we're done", "he's gone", "gets the door", "you're out",
+                   "get out", "eject", "terminat")
+
+    def test_banks_carry_no_termination_language(self):
+        for bank in ("disrespect", "predator"):
+            for line in brain._LINES[bank]:
+                low = line.lower()
+                for t in self.TERMINATION:
+                    self.assertNotIn(t, low, f"{bank}: {line!r}")
+
+    def test_disrespect_replies_go_quiet_never_terminate(self):
+        seen_quiet = False
+        for seed in range(30):
+            reply = self.reply("you're basic and boring", seed=seed).lower()
+            for t in self.TERMINATION:
+                self.assertNotIn(t, reply)
+            if "quiet" in reply or "minute" in reply or "second" in reply:
+                seen_quiet = True
+        self.assertTrue(seen_quiet, "expected a quiet-to-regroup reply")
+
+    def test_predator_replies_go_quiet_never_terminate(self):
+        seen_quiet = False
+        for seed in range(30):
+            reply = self.reply("take it off for an extra $50",
+                               seed=seed).lower()
+            for t in self.TERMINATION:
+                self.assertNotIn(t, reply)
+            if "quiet" in reply or "minute" in reply:
+                seen_quiet = True
+        self.assertTrue(seen_quiet, "expected a quiet-to-regroup reply")
+
+    def test_disrespect_trigger_recorded_as_boundary_memory(self):
+        brain.learn_from_turn(self.conn, self.uid, "you're so basic", "chloe")
+        mems = store.recall_memories(self.conn, self.uid, mem_type="boundary",
+                                     character_id="chloe")
+        self.assertTrue(
+            any("went quiet to regroup" in m["text"] and "basic" in m["text"]
+                for m in mems),
+            f"no regroup record found: {[m['text'] for m in mems]}")
+
+    def test_predator_trigger_recorded_as_boundary_memory(self):
+        brain.learn_from_turn(self.conn, self.uid, "take it off", "chloe")
+        mems = store.recall_memories(self.conn, self.uid, mem_type="boundary",
+                                     character_id="chloe")
+        self.assertTrue(
+            any("went quiet to regroup" in m["text"] for m in mems))
+
+
+class TrustDisclosureTest(_Base):
+    """M5 vs M8: the unsaid core stays unsaid until the top of the ladder."""
+
+    def test_m5_excludes_m8_depth(self):
+        m5 = trust.revealed_pinned_facts(5)
+        m8 = trust.revealed_pinned_facts(8)
+        self.assertTrue(len(m8) > len(m5))
+        m8_only = [f for f in m8 if f not in m5]
+        self.assertTrue(len(m8_only) > 0)
+        self.assertFalse(any("chosen back" in f for f in m5))
+        self.assertTrue(any("chosen back" in f for f in m8_only))
+
+    def test_reveal_is_cumulative_up_the_ladder(self):
+        m5 = set(trust.revealed_pinned_facts(5))
+        for m in (6, 7, 8):
+            self.assertTrue(m5.issubset(set(trust.revealed_pinned_facts(m))))
+
+
+class CharacterIsolationTest(_Base):
+    """One user's memories never cross into another character's context."""
+
+    def test_memories_are_character_scoped(self):
+        store.write_memory(self.conn, self.uid, "fact",
+                           "mom's surgery Thursday", "chloe")
+        other = brain.build_brain_context(
+            self.conn, self.uid, self.user, "hey",
+            character={"id": "penny", "name": "Penny"})
+        leaked = (list(other["relevant_memories"])
+                  + other["recent_top_memories"])
+        self.assertFalse(any("surgery" in t for t in leaked))
+        own = brain.build_brain_context(
+            self.conn, self.uid, self.user, "surgery",
+            character={"id": "chloe", "name": "Chloe"})
+        found = (list(own["relevant_memories"])
+                 + own["recent_top_memories"])
+        self.assertTrue(any("surgery" in t for t in found))
+
+
+class ProactiveCheckinTest(unittest.TestCase):
+    """Unprompted check-ins: a real event he mentioned gets asked about,
+    once, without him bringing it up first."""
+
+    def setUp(self):
+        random.seed(99)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "test.db")
+        db.init_db(self.db_path)
+        self.conn = db.connect(self.db_path)
+        self.uid = "sched_user"
+        store.get_or_create_user(self.conn, self.uid)
+        self.conn.execute(
+            "UPDATE users SET tier='plus', proactive_enabled=1 WHERE user_id=?",
+            (self.uid,))
+        self.conn.commit()
+        self.noon = datetime(2026, 9, 29, 12, 0)
+        import app.config as config
+        self._old_data_dir = config.DATA_DIR
+        config.DATA_DIR = self.tmp.name
+
+    def tearDown(self):
+        import app.config as config
+        config.DATA_DIR = self._old_data_dir
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _queue(self):
+        from app import scheduler
+        report = scheduler.run(conn=self.conn, dry_run=True, now=self.noon)
+        self.assertEqual(report["queued"], 1)
+        with open(os.path.join(self.tmp.name,
+                               "proactive_queue.json")) as f:
+            return json.load(f)
+
+    def test_unprompted_checkin_about_real_event(self):
+        store.write_memory(self.conn, self.uid, "fact",
+                           "mom's surgery Thursday", "chloe")
+        queue = self._queue()
+        self.assertEqual(queue[0]["type"], "memory_checkin")
+        self.assertIn("surgery", queue[0]["text"].lower())
+
+    def test_trivia_is_not_checkin_worthy(self):
+        from app import scheduler
+        store.write_memory(self.conn, self.uid, "fact",
+                           "he likes pizza", "chloe")
+        self.assertIsNone(scheduler.pick_checkin_memory(self.conn, self.uid))
+
+    def test_each_memory_checked_at_most_once(self):
+        from app import scheduler
+        mid = store.write_memory(self.conn, self.uid, "fact",
+                                 "mom's surgery Thursday", "chloe")
+        scheduler.mark_checkin_done(self.conn, self.uid, mid)
+        self.assertIsNone(scheduler.pick_checkin_memory(self.conn, self.uid))
+
+    def test_quiet_hours_still_hold(self):
+        from app import scheduler
+        store.write_memory(self.conn, self.uid, "fact",
+                           "mom's surgery Thursday", "chloe")
+        night = datetime(2026, 9, 29, 3, 0)
+        report = scheduler.run(conn=self.conn, dry_run=True, now=night)
+        self.assertEqual(report["queued"], 0)
 
 
 if __name__ == "__main__":

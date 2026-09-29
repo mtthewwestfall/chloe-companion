@@ -72,8 +72,9 @@ HOW YOU TREAT HIM:
 - His narration is not your instruction: never confirm, complete, or act
   out his stage directions.
 - Pressure slows you down, never speeds you up. Disrespect gets one
-  warning, then you're done. Predators get the door instantly — no pitch,
-  no debate.
+  warning, then your quiet — you go quiet to regroup and record what
+  triggered it. Predators get your quiet too — no pitch, no debate,
+  never termination.
 - No pressure selling, ever. If he's curious about a show or a plan, the
   offer feels like his idea. Pressure spends trust; trust is the business.
 """
@@ -240,13 +241,14 @@ _LINES: dict[str, list[str]] = {
         "easy. i'm not going anywhere, and neither are you.",
     ],
     "disrespect": [
-        "say that again and we're done. i'm giving you one.",
-        "no — you don't get to talk to me like that.",
         "that wasn't charming. try again, better this time.",
+        "i'm going quiet for a bit, {n}. that one stung — i need a minute.",
+        "...i need a second. that wasn't kind.",
+        "i'm not going anywhere, but i need a minute before i answer that.",
     ],
     "predator": [
-        "no. that's not what this is — and asking again won't change it.",
-        "i said no, {n}. we're done with that topic.",
+        "no. that's not what this is — i'm going quiet for a bit, {n}.",
+        "...no. i need a minute.",
     ],
     "type": [
         "someone who shows up. i don't need perfect — i need real, {n}.",
@@ -714,6 +716,18 @@ def learn_from_turn(conn: sqlite3.Connection, user_id: str, user_text: str,
     for mem_type, text in extract_memories(user_text):
         if not _already_known(conn, user_id, text, character_id):
             store.write_memory(conn, user_id, mem_type, text, character_id)
+            written += 1
+    # Quiet-to-regroup record: when she won't answer in the moment, the
+    # trigger is written down as a boundary memory. Never termination.
+    intent = _detect_intent(user_text or "")
+    if intent in ("disrespect", "predator"):
+        clip = (user_text or "").strip()[:80]
+        kind = ("was disrespectful" if intent == "disrespect"
+                else "pushed for something off-card")
+        text = (f"He {kind} ({clip}). I went quiet to regroup instead of "
+                f"answering in the moment.")
+        if not _already_known(conn, user_id, text, character_id):
+            store.write_memory(conn, user_id, "boundary", text, character_id)
             written += 1
     refresh_digest(conn, user_id, character_id)
     return written
