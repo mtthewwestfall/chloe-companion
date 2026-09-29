@@ -313,6 +313,19 @@
     renderPlans(me.tier, live);
   });
 
+  // Stripe fulfillment needs to know WHO paid: every checkout URL gets
+  // ?client_reference_id=<user_id> so the server webhook can credit the
+  // right account's banks (and the monthly Keyhole show).
+  function withClientRef(url) {
+    try {
+      const uid = ApiClient.userId();
+      if (!uid) return url;
+      return url + (url.includes('?') ? '&' : '?') + 'client_reference_id=' + encodeURIComponent(uid);
+    } catch (e) {
+      return url;
+    }
+  }
+
   // Plans: subscribe/upgrade cards from the live server (names, prices,
   // benefits, Stripe checkout links). Rendered once per profile-sheet open;
   // buttons open the checkout link in a new tab.
@@ -351,7 +364,7 @@
       } else {
         btn.className = 'btn-primary';
         btn.textContent = 'Subscribe · $' + p.price_usd.toFixed(2) + '/mo';
-        btn.addEventListener('click', () => window.open(p.checkout_url, '_blank', 'noopener'));
+        btn.addEventListener('click', () => window.open(withClientRef(p.checkout_url), '_blank', 'noopener'));
       }
       card.appendChild(btn);
       list.appendChild(card);

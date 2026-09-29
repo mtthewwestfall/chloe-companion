@@ -58,6 +58,47 @@ STRIPE_LIVE_CHECKOUT = {
 }
 
 # ---------------------------------------------------------------------------
+# Purchase fulfillment (live, 2026-09-29). The webhook at
+# POST /api/v1/stripe/webhook verifies Stripe signatures with
+# STRIPE_WEBHOOK_SECRET and credits banks automatically.
+# ---------------------------------------------------------------------------
+# Signing secret of the live Stripe webhook endpoint (whsec_...). Set as a
+# Railway env var on the companion service; the webhook refuses with 503
+# until it is set. NEVER commit the real value here.
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+# LIVE price -> tier, read from the Stripe dashboard 2026-09-29.
+STRIPE_PRICE_TIERS = {
+    "price_1UKjDn6qicU1CK4U7LwzZr9A": "basic",  # $9.99/mo Companion
+    "price_1UKiwL6qicU1CK4UBFqunzeH": "plus",   # $19.99/mo Companion Plus
+    "price_1UKqZl6qicU1CK4U5QNulgOY": "vip",    # $29.99/mo Companion VIP
+}
+
+# LIVE payment link -> tier (checkout.session.completed carries payment_link).
+STRIPE_LINK_TIERS = {
+    "plink_1UKjPK6qicU1CK4UJsgj7721": "basic",  # buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c
+    "plink_1UKjPv6qicU1CK4UpaV1VAHb": "plus",   # buy.stripe.com/bJecMYdHd38H81xfUldjO0d
+    "plink_1UKqaT6qicU1CK4UoO0GbptK": "vip",    # buy.stripe.com/4gM4gs8mT10zchN9vXdjO0e
+}
+
+TIER_RANK = {"basic": 1, "plus": 2, "vip": 3}
+
+# Companion -> Keyhole free-show grant. The companion webhook calls the
+# Keyhole backend's /internal/companion-show-grant with the shared secret;
+# inert until both env vars are set on the respective Railway services.
+KEYHOLE_BACKEND_URL = os.environ.get(
+    "KEYHOLE_BACKEND_URL",
+    "https://sorority-house-production-aeb5.up.railway.app",
+)
+COMPANION_GRANT_SECRET = os.environ.get("COMPANION_GRANT_SECRET", "")
+SHOW_GRANT_MINUTES = {"basic": 10, "plus": 15, "vip": 30}
+
+# $0.99 one-time trial -> 100 messages (Task 2 fills the live IDs).
+TRIAL_LINK_ID = ""
+TRIAL_PRICE_ID = ""
+TRIAL_MESSAGES = 100
+
+# ---------------------------------------------------------------------------
 # Stripe product/price DEFINITIONS — TEST-MODE PLACEHOLDERS.
 # Clearly marked: these IDs are fake. Replace with real test-mode IDs when the
 # user approves creating the Stripe products. NEVER create live products here.

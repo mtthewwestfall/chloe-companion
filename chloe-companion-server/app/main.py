@@ -12,10 +12,15 @@ GET  /api/v1/shows
   -> {shows:[{id,title,starts_at,ticket_url}]}
 POST /api/v1/memory/export {user_id} -> {memories:[...]}
 POST /api/v1/memory/delete {user_id} -> {ok:true}
-POST /api/v1/stripe/webhook  (STUB — test events only, no live keys)
+POST /api/v1/stripe/webhook  (live: Stripe-signature-verified; credits message banks on purchase/renewal)
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import time
+import urllib.request
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -225,45 +230,186 @@ def memory_write(body: MemoryWriteIn):
 
 
 # ---------------------------------------------------------------------------
-# Stripe webhook — STUB. Test events only. No live keys, no real charges, ever.
-# Handles: subscription created / renewed / canceled.
-# Renewal tops the banks back UP TO the tier allocation (no stacking).
+# Stripe webhook — LIVE purchase fulfillment (2026-09-29).
+#
+# Verifies the Stripe-Signature header with STRIPE_WEBHOOK_SECRET (HMAC-SHA256,
+# 5-minute tolerance). Refuses with 503 until the secret is configured so
+# Stripe keeps retrying rather than recording a failure.
+#
+# Identity: the app appends ?client_reference_id=<user_id> to the Stripe
+# Payment Link. checkout.session.completed stores the customer/subscription ->
+# user mapping; later invoices and cancellations resolve through it.
+#
+# Idempotency: every event id is recorded; replays are acknowledged as
+# duplicates. Renewals top banks back UP TO the tier allocation (no stacking).
 # ---------------------------------------------------------------------------
+WEBHOOK_MAX_BYTES = 1_000_000
+WEBHOOK_TOLERANCE_S = 300
+
+
+def _stripe_sig_ok(payload: bytes, header: str, secret: str) -> bool:
+    """Stripe's signature scheme: header 't=<ts>,v1=<hex>,...' where hex is
+    HMAC-SHA256(secret, '<ts>.' + payload)."""
+    try:
+        parts: dict[str, list[str]] = {}
+        for item in (header or "").split(","):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                parts.setdefault(k.strip(), []).append(v.strip())
+        ts = int(parts.get("t", [""])[0])
+        if abs(time.time() - ts) > WEBHOOK_TOLERANCE_S:
+            return False
+        signed = ("%d." % ts).encode() + payload
+        expect = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+        return any(hmac.compare_digest(expect, v) for v in parts.get("v1", []))
+    except (ValueError, IndexError):
+        return False
+
+
+def _as_id(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        v = value.get("id", "")
+        return v if isinstance(v, str) else ""
+    return ""
+
+
+def _rank(tier: str) -> int:
+    return config.TIER_RANK.get(tier, 0)
+
+
+def _grant_keyhole_show(tier: str, email: str, grant_key: str, user_id: str) -> None:
+    """Task 3: companion subscription -> free Keyhole private show each billing
+    month. Calls the Keyhole backend's internal grant endpoint (shared
+    secret). Never blocks message crediting: failures are logged, not raised."""
+    minutes = config.SHOW_GRANT_MINUTES.get(tier, 0)
+    url = config.KEYHOLE_BACKEND_URL
+    secret = config.COMPANION_GRANT_SECRET
+    if not (url and secret and minutes and email and grant_key):
+        print(f"[stripe] show grant skipped (config/email): tier={tier} user={user_id}",
+              flush=True)
+        return
+    body = json.dumps({"email": email, "minutes": minutes, "grant_key": grant_key}).encode()
+    req = urllib.request.Request(
+        url.rstrip("/") + "/internal/companion-show-grant",
+        data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Grant-Secret": secret},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            print(f"[stripe] show grant -> {resp.status} tier={tier} user={user_id}", flush=True)
+    except Exception as e:  # noqa: BLE001 — fulfillment must not fail on the grant call
+        print(f"[stripe] show grant FAILED tier={tier} user={user_id}: {e}", flush=True)
+
+
 @app.post("/api/v1/stripe/webhook")
 async def stripe_webhook(request: Request):
-    # NOTE: no signature verification in the stub. Phase 3 must verify the
-    # Stripe-Signature header before trusting any event.
+    secret = config.STRIPE_WEBHOOK_SECRET
+    if not secret:
+        raise HTTPException(503, "STRIPE_WEBHOOK_SECRET not configured")
+    if int(request.headers.get("content-length") or 0) > WEBHOOK_MAX_BYTES:
+        raise HTTPException(413, "payload too large")
+    raw = await request.body()
+    if len(raw) > WEBHOOK_MAX_BYTES:
+        raise HTTPException(413, "payload too large")
+    if not _stripe_sig_ok(raw, request.headers.get("stripe-signature", ""), secret):
+        raise HTTPException(401, "bad stripe signature")
     try:
-        event = await request.json()
-    except Exception:
-        raise HTTPException(400, "invalid JSON")
-    etype = event.get("type", "")
-    obj = event.get("data", {}).get("object", {}) or {}
-    user_id = obj.get("metadata", {}).get("user_id") or obj.get("client_reference_id")
-    price_id = (obj.get("items", {}).get("data", [{}])[0].get("price", {}) or {}).get("id")
+        event = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "bad JSON")
+    return _handle_stripe_event(event)
 
-    tier = _tier_for_price(price_id)
+
+def _handle_stripe_event(event: dict[str, Any]) -> dict[str, Any]:
+    eid = event.get("id") or ""
+    kind = event.get("type") or ""
+    obj = (event.get("data") or {}).get("object") or {}
     conn = _conn()
     try:
-        if etype in ("customer.subscription.created", "customer.subscription.updated"):
-            if user_id and tier:
-                # Renewal: top up TO allocation, never stack.
-                store.set_tier(conn, user_id, tier)
-                return {"ok": True, "action": f"topped_up:{tier}"}
-            return {"ok": False, "reason": "missing user_id or unknown price_id (stub)"}
-        if etype == "customer.subscription.deleted":
-            if user_id:
-                # Cancel: keep access to end of period in real Stripe; here we
-                # just note it. Banks are NOT zeroed by the stub.
-                return {"ok": True, "action": "canceled_noted"}
-            return {"ok": False, "reason": "missing user_id (stub)"}
-        return {"ok": True, "action": "ignored"}
+        if eid and not store.note_stripe_event(conn, eid, kind):
+            return {"ok": True, "duplicate": True}
+        if kind == "checkout.session.completed":
+            return _on_checkout_completed(conn, obj)
+        if kind == "invoice.paid":
+            return _on_invoice_paid(conn, obj, eid)
+        if kind == "customer.subscription.deleted":
+            return _on_subscription_deleted(conn, obj)
+        return {"ok": True, "ignored": kind}
     finally:
         conn.close()
 
 
-def _tier_for_price(price_id: str | None) -> str | None:
-    for tier, p in config.STRIPE_TEST_PLACEHOLDERS["products"].items():
-        if p["price_id"] == price_id:
-            return tier
-    return None
+def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
+    mode = obj.get("mode")
+    ref = ((obj.get("client_reference_id") or "").strip()
+           or ((obj.get("metadata") or {}).get("user_id") or "").strip())
+    if obj.get("payment_status") != "paid":
+        return {"ok": True, "ignored": "not paid yet"}
+    if mode == "subscription":
+        sub = _as_id(obj.get("subscription"))
+        cust = _as_id(obj.get("customer"))
+        tier = config.STRIPE_LINK_TIERS.get(obj.get("payment_link") or "")
+        if not tier:
+            return {"ok": True, "ignored": "unknown payment link"}
+        if not ref or not sub:
+            return {"ok": True, "ignored": "missing client_reference_id or subscription"}
+        # Remember the mapping so renewals/cancels resolve without the ref.
+        store.link_stripe_customer(conn, cust, sub, ref, tier)
+        # Initial top-up; the first invoice.paid (subscription_create) grants
+        # the monthly Keyhole show via the same grant key scheme.
+        store.set_tier(conn, ref, tier)
+        return {"ok": True, "user_id": ref, "tier": tier, "action": "subscribed"}
+    if mode == "payment":
+        # One-time purchases (the $0.99 trial) are handled in Task 2.
+        return {"ok": True, "ignored": "one-time payment: no handler yet"}
+    return {"ok": True, "ignored": f"mode {mode}"}
+
+
+def _on_invoice_paid(conn: Any, obj: dict[str, Any], eid: str) -> dict[str, Any]:
+    sub = _as_id(obj.get("subscription"))
+    if not sub:
+        sub = _as_id(((obj.get("parent") or {}).get("subscription_details") or {}))
+    if not sub:
+        return {"ok": True, "ignored": "no subscription"}
+    lines = (obj.get("lines") or {}).get("data") or []
+    tier = ""
+    for li in lines:
+        price = ((li.get("price") or {}).get("id")
+                 or (((li.get("pricing") or {}).get("price_details") or {}).get("price")) or "")
+        t = config.STRIPE_PRICE_TIERS.get(price, "")
+        if t and _rank(t) > _rank(tier):
+            tier = t
+    if not tier:
+        return {"ok": True, "ignored": "unknown price"}
+    user_id = store.user_for_stripe_subscription(conn, sub)
+    if not user_id:
+        user_id = store.user_for_stripe_customer(conn, _as_id(obj.get("customer")))
+    if not user_id:
+        return {"ok": True, "ignored": "unknown customer mapping"}
+    # Renewal (and the initial subscription_create invoice): top banks back UP
+    # TO the tier allocation — never stack.
+    store.set_tier(conn, user_id, tier)
+    billing_reason = obj.get("billing_reason") or ""
+    if billing_reason in ("subscription_create", "subscription_cycle", "subscription_update"):
+        period_end = 0
+        if lines:
+            period_end = int((lines[0].get("period") or {}).get("end") or 0)
+        email = (obj.get("customer_email") or "").strip()
+        _grant_keyhole_show(tier, email, f"companion-show:{sub}:{period_end or eid}", user_id)
+    return {"ok": True, "user_id": user_id, "tier": tier, "action": "invoice_topup"}
+
+
+def _on_subscription_deleted(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
+    sub = _as_id(obj.get("id"))
+    if not sub:
+        return {"ok": True, "ignored": "no subscription id"}
+    user_id = store.user_for_stripe_subscription(conn, sub)
+    if not user_id:
+        return {"ok": True, "ignored": "unknown subscription"}
+    # Cancel: tier back to the default; remaining banks drain naturally.
+    store.downgrade_to_basic(conn, user_id)
+    return {"ok": True, "user_id": user_id, "action": "downgraded_to_basic"}
+
+

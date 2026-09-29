@@ -47,6 +47,26 @@ CREATE TABLE IF NOT EXISTS conversation (
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_user ON conversation(user_id);
 
+-- Purchase fulfillment (2026-09-29): Stripe webhook idempotency + identity.
+CREATE TABLE IF NOT EXISTS stripe_events (
+    event_id   TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS stripe_customers (
+    stripe_customer_id     TEXT PRIMARY KEY,
+    stripe_subscription_id TEXT NOT NULL DEFAULT '',
+    user_id                TEXT NOT NULL,
+    tier                   TEXT NOT NULL DEFAULT '',
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_stripe_customers_sub ON stripe_customers(stripe_subscription_id);
+CREATE TABLE IF NOT EXISTS trial_grants (
+    user_id    TEXT PRIMARY KEY,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS trust_state (

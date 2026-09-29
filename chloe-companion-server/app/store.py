@@ -89,6 +89,83 @@ def consume_voice_note(conn: sqlite3.Connection, user_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Purchase fulfillment — Stripe webhook support (2026-09-29)
+# ---------------------------------------------------------------------------
+def note_stripe_event(conn: sqlite3.Connection, event_id: str, event_type: str = "") -> bool:
+    """Record a Stripe event id. Returns True when first seen, False on
+    replay (idempotency: Stripe may redeliver events)."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO stripe_events (event_id, event_type) VALUES (?, ?)",
+        (event_id, event_type),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def link_stripe_customer(conn: sqlite3.Connection, customer_id: str,
+                         subscription_id: str, user_id: str, tier: str) -> None:
+    """Remember which companion user owns a Stripe customer/subscription so
+    later invoices (renewals) and cancellations resolve without the checkout
+    session's client_reference_id."""
+    conn.execute(
+        """INSERT INTO stripe_customers
+               (stripe_customer_id, stripe_subscription_id, user_id, tier, updated_at)
+           VALUES (?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(stripe_customer_id) DO UPDATE SET
+               stripe_subscription_id = excluded.stripe_subscription_id,
+               user_id = excluded.user_id,
+               tier = excluded.tier,
+               updated_at = datetime('now')""",
+        (customer_id, subscription_id, user_id, tier),
+    )
+    conn.commit()
+
+
+def user_for_stripe_subscription(conn: sqlite3.Connection, subscription_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT user_id FROM stripe_customers WHERE stripe_subscription_id = ?",
+        (subscription_id,),
+    ).fetchone()
+    return row["user_id"] if row else None
+
+
+def user_for_stripe_customer(conn: sqlite3.Connection, customer_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT user_id FROM stripe_customers WHERE stripe_customer_id = ?",
+        (customer_id,),
+    ).fetchone()
+    return row["user_id"] if row else None
+
+
+def grant_trial_messages(conn: sqlite3.Connection, user_id: str, n: int) -> bool:
+    """One-time trial credit: adds n messages. Returns True when granted,
+    False when this user already used the trial (one per customer)."""
+    get_or_create_user(conn, user_id)  # ensure row exists
+    cur = conn.execute("INSERT OR IGNORE INTO trial_grants (user_id) VALUES (?)", (user_id,))
+    if cur.rowcount == 0:
+        conn.commit()
+        return False
+    conn.execute(
+        """UPDATE users SET messages_remaining = messages_remaining + ?,
+                              updated_at = datetime('now')
+           WHERE user_id = ?""",
+        (n, user_id),
+    )
+    conn.commit()
+    return True
+
+
+def downgrade_to_basic(conn: sqlite3.Connection, user_id: str) -> None:
+    """Subscription ended: tier back to the default; remaining banks drain
+    naturally instead of being zeroed."""
+    conn.execute(
+        "UPDATE users SET tier = 'basic', updated_at = datetime('now') WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Memory — typed per Thoughtspace pattern
 # ---------------------------------------------------------------------------
 def write_memory(conn: sqlite3.Connection, user_id: str, mem_type: str, text: str) -> int:

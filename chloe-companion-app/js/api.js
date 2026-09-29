@@ -15,6 +15,30 @@
    the UI can listen via onStatus().
    ============================================================ */
 const ApiClient = (() => {
+  // Per-device identity (2026-09-29): the server keys banks, memory, and
+  // Stripe fulfillment on user_id. First launch mints a stable id in
+  // localStorage; installs that predate identity keep the shared demo_user
+  // row so existing history/memories carry over.
+  function userId() {
+    try {
+      let id = localStorage.getItem('chloe_uid');
+      if (!id) {
+        if (localStorage.getItem('chloe_seen')) {
+          id = 'demo_user';
+        } else {
+          const b = new Uint8Array(8);
+          if (crypto.getRandomValues) crypto.getRandomValues(b);
+          else for (let i = 0; i < 8; i++) b[i] = Math.floor(Math.random() * 256);
+          id = 'u_' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+        }
+        localStorage.setItem('chloe_uid', id);
+      }
+      return id;
+    } catch (e) {
+      return 'demo_user';
+    }
+  }
+
   let connected = false;
   const listeners = new Set();
 
@@ -46,7 +70,7 @@ const ApiClient = (() => {
   // Probe the server once (called at boot and on manual retry).
   async function probe() {
     try {
-      await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(CONFIG.DEMO_USER_ID));
+      await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(userId()));
       setConnected(true);
     } catch (e) {
       setConnected(false); // DEMO fallback — server not up yet
@@ -57,7 +81,7 @@ const ApiClient = (() => {
   async function chat(message) {
     try {
       const data = await request('POST', '/api/v1/chat', {
-        user_id: CONFIG.DEMO_USER_ID,
+        user_id: userId(),
         message,
       });
       setConnected(true);
@@ -70,7 +94,7 @@ const ApiClient = (() => {
 
   async function me() {
     try {
-      const data = await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(CONFIG.DEMO_USER_ID));
+      const data = await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(userId()));
       setConnected(true);
       return data;
     } catch (e) {
@@ -104,5 +128,5 @@ const ApiClient = (() => {
     }
   }
 
-  return { probe, chat, me, shows, tiers, onStatus, isConnected: () => connected };
+  return { probe, chat, me, shows, tiers, userId, onStatus, isConnected: () => connected };
 })();
