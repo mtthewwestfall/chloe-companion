@@ -112,6 +112,14 @@ def health():
     return {"ok": True, "service": "chloe-companion", "phase": "3-multichar"}
 
 
+# TEMPORARY DIAGNOSTIC (2026-09-29 debug only — REMOVE after diagnosis).
+@app.get("/api/v1/diag/gemini")
+def diag_gemini():
+    ok, error = brain._gemini_debug()
+    return {"gemini_ok": ok, "error": error or None,
+            "key_present": bool(brain.config.GEMINI_API_KEY)}
+
+
 @app.get("/api/v1/characters")
 def list_characters():
     """Public roster: companion-enabled characters from the Keyhole admin
