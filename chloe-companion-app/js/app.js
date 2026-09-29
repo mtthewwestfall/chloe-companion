@@ -304,7 +304,7 @@
       vidMode = 'activity';
       actIdx = (actIdx + 1) % VID_ACTS.length;
       vidPlay(VID_ACTS[actIdx], false);
-    }, 45000);
+    }, 20000);
   }
   function vidTyping() { vidMode = 'typing'; clearTimeout(idleTimer); vidPlay(VID_TYPING, true); }
   chloeVideo.addEventListener('ended', () => { if (vidMode === 'activity') vidIdle(); });
