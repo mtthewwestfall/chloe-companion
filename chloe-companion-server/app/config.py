@@ -93,9 +93,11 @@ KEYHOLE_BACKEND_URL = os.environ.get(
 COMPANION_GRANT_SECRET = os.environ.get("COMPANION_GRANT_SECRET", "")
 SHOW_GRANT_MINUTES = {"basic": 10, "plus": 15, "vip": 30}
 
-# $0.99 one-time trial -> 100 messages (Task 2 fills the live IDs).
-TRIAL_LINK_ID = ""
-TRIAL_PRICE_ID = ""
+# $0.99 one-time trial -> 100 messages, one per customer (live, 2026-09-29).
+TRIAL_PRODUCT_ID = "prod_VLZInf7B1PDPRZ"
+TRIAL_PRICE_ID = "price_1UKs9f6qicU1CK4Ubf94Lmv7"
+TRIAL_LINK_ID = "plink_1UKs9h6qicU1CK4UhoKvOvl3"
+TRIAL_CHECKOUT_URL = "https://buy.stripe.com/3cI14ggTpfVtbdJ4bDdjO0f"
 TRIAL_MESSAGES = 100
 
 # ---------------------------------------------------------------------------

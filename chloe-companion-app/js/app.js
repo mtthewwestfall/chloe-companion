@@ -345,25 +345,28 @@
     plans.forEach((p) => {
       const card = document.createElement('div');
       card.className = 'plan-card' + (p.key === currentTier ? ' current' : '');
-      const benefits = [
-        p.messages_per_month.toLocaleString('en-US') + ' messages / month',
-        p.voice_notes_unconfirmed
-          ? 'Voice notes — count being finalized'
-          : (p.voice_notes_per_month > 0
-              ? p.voice_notes_per_month + ' voice notes / month'
-              : 'No voice notes'),
-      ];
+      const once = p.interval === 'once';
+      const benefits = once
+        ? [p.messages_per_month.toLocaleString('en-US') + ' messages · one-time', 'No voice notes']
+        : [
+            p.messages_per_month.toLocaleString('en-US') + ' messages / month',
+            p.voice_notes_unconfirmed
+              ? 'Voice notes — count being finalized'
+              : (p.voice_notes_per_month > 0
+                  ? p.voice_notes_per_month + ' voice notes / month'
+                  : 'No voice notes'),
+          ];
       if (p.photo_drops) benefits.push('Photo drops');
       if (p.proactive) benefits.push('Proactive check-ins');
       card.innerHTML = `
-        <div class="plan-head"><div class="plan-name">${esc(p.name)}</div><div class="plan-price">$${p.price_usd.toFixed(2)}<span>/mo</span></div></div>
+        <div class="plan-head"><div class="plan-name">${esc(p.name)}</div><div class="plan-price">$${p.price_usd.toFixed(2)}<span>${once ? 'one-time' : '/mo'}</span></div></div>
         <ul class="plan-benefits">${benefits.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>`;
       const btn = document.createElement('button');
       if (p.key === currentTier) {
         btn.className = 'btn-ghost'; btn.textContent = 'Current plan'; btn.disabled = true;
       } else {
         btn.className = 'btn-primary';
-        btn.textContent = 'Subscribe · $' + p.price_usd.toFixed(2) + '/mo';
+        btn.textContent = once ? 'Try · $' + p.price_usd.toFixed(2) + ' once' : 'Subscribe · $' + p.price_usd.toFixed(2) + '/mo';
         btn.addEventListener('click', () => window.open(withClientRef(p.checkout_url), '_blank', 'noopener'));
       }
       card.appendChild(btn);

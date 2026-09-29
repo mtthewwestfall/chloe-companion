@@ -175,7 +175,18 @@ def list_tiers():
     no signature verification; a checkout redirect is NOT fulfillment on our
     side.
     """
-    plans = []
+    plans = [{
+        "key": "trial",
+        "name": "Companion Trial",
+        "price_usd": 0.99,
+        "interval": "once",
+        "messages_per_month": config.TRIAL_MESSAGES,
+        "voice_notes_per_month": 0,
+        "voice_notes_unconfirmed": False,
+        "photo_drops": False,
+        "proactive": False,
+        "checkout_url": config.TRIAL_CHECKOUT_URL,
+    }]
     for key in ("basic", "plus", "vip"):
         t = config.TIERS[key]
         plans.append({
@@ -362,8 +373,12 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
         store.set_tier(conn, ref, tier)
         return {"ok": True, "user_id": ref, "tier": tier, "action": "subscribed"}
     if mode == "payment":
-        # One-time purchases (the $0.99 trial) are handled in Task 2.
-        return {"ok": True, "ignored": "one-time payment: no handler yet"}
+        # One-time $0.99 trial -> 100 messages, one per customer (no tier change).
+        if (obj.get("payment_link") or "") == config.TRIAL_LINK_ID and ref:
+            granted = store.grant_trial_messages(conn, ref, config.TRIAL_MESSAGES)
+            return {"ok": True, "user_id": ref,
+                    "action": "trial_granted" if granted else "trial_already_used"}
+        return {"ok": True, "ignored": "unknown one-time link"}
     return {"ok": True, "ignored": f"mode {mode}"}
 
 
