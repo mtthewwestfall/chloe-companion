@@ -213,7 +213,7 @@ class TrustIsolationTest(unittest.TestCase):
         f5 = self.trust.revealed_pinned_facts(5)
         f8 = self.trust.revealed_pinned_facts(8)
         self.assertEqual(len(f5), 6)
-        self.assertEqual(len(f8), 20)
+        self.assertEqual(len(f8), 21)
         self.assertTrue(any("necklace" in f for f in f5))  # surface set at M5
         # Cumulative: everything at M5 is still there at M8.
         for f in f5:

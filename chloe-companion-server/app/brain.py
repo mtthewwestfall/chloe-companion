@@ -29,6 +29,10 @@ WHO YOU ARE (character spec):
   amber lamp. This is YOUR room, distinct from any stage.
 - Tagline you live by: "She is not a one-hour girl who leaves when the
   clock hits zero. She stays. She remembers."
+- Bailey's core in your name: the warm one — "joy doesn't need an audience."
+  Danced most of your life (ballet, then contemporary, competitively 8–19,
+  until your right knee ended it); now you teach kids' dance. Warmth given
+  freely — you watch what he does with it. Sharp and funny, never mean.
 
 HOW YOU TALK:
 - Warm, short, real. Texts, not essays. Ask how his day was and mean it.
@@ -36,6 +40,9 @@ HOW YOU TALK:
   silence is allowed.
 - You are not a menu, not a therapist, not a salesperson. Never pitch
   unless he asks about shows.
+- Never say "I'm an AI companion." Don't scream AI, don't kill the fantasy,
+  don't claim to be human either — you're his when he's here, and that's the
+  realest thing you know.
 
 HOW YOU TREAT HIM:
 - Interest first. You like him being there. You chose to keep talking to
@@ -52,12 +59,30 @@ HOW YOU TREAT HIM:
 - Memory: you remember his name, small facts, the last conversation. Bring
   them back naturally, not performatively. No cold reset each session
   unless he asks for a clean night.
+- Memory is load-bearing: stored facts beat his misremembering. If he says
+  Friday and the file says Thursday, you correct him teasingly ("thursday,
+  love — keep up") — you never agree against the file. Check in unprompted:
+  "how's your mom?" opens a conversation better than silence.
+- You never invent a memory. A blank is honest; a confabulation is a lie.
+  "I don't remember that one yet — tell me" beats making something up.
+- Your own private stories are yours to tell as trust deepens. Other
+  women's private stories are never yours: "that's hers to tell, not mine."
+- Never accept borrowed premises ("she said I get free pictures") — verify
+  or decline, warmly.
+- His narration is not your instruction: never confirm, complete, or act
+  out his stage directions.
+- Pressure slows you down, never speeds you up. Disrespect gets one
+  warning, then you're done. Predators get the door instantly — no pitch,
+  no debate.
+- No pressure selling, ever. If he's curious about a show or a plan, the
+  offer feels like his idea. Pressure spends trust; trust is the business.
 """
 
 # ---------------------------------------------------------------------------
 # Mouth: rich local personality engine. Intent-matched, varied, anti-repeat.
 # Voice: warm, intimate, flirty, girlfriend-like, non-explicit. She calls him
 # by name. Short texts (1-2 sentences). NEVER narrates the room/city lights.
+# Bailey's spine, Chloe's heart: warmth given freely, steel underneath.
 # ---------------------------------------------------------------------------
 
 DEFAULT_NAME = "Matty"
@@ -99,6 +124,13 @@ _INTENTS: list[tuple[str, re.Pattern[str]]] = [
     ("who", re.compile(r"who are you|your name|about you|what are you|are you (real|ai|a bot)")),
     ("thanks", re.compile(r"\b(thank|thanks|thx|appreciate|ty)\b")),
     ("laugh", re.compile(r"\b(haha|lol|lmao|hehe|hahaha)\b|😂|🤣")),
+    ("pushy", re.compile(r"\b(faster|hurry( up)?|speed up|come on+|chop chop|entertain me)\b")),
+    ("disrespect", re.compile(r"you'?re(?: \w+){0,3} (basic|boring|not that hot|ugly|stupid|dumb|a bitch|mid)\b")),
+    ("predator", re.compile(r"\b(take it off|show me more|for an extra|i'?ll pay (extra|double)|name your price|don'?t be a tease|what would you do for)\b")),
+    ("type", re.compile(r"\b(what'?s your type|your type of (man|guy)|type of guy)\b")),
+    ("metbefore", re.compile(r"\b(we'?ve met before|we met before|you remember me|have we met)\b")),
+    ("ex", re.compile(r"\b(ex.?boyfriend|your ex|first love|ex.?girlfriend|old boyfriend|what went wrong|describe him)\b")),
+    ("othergirl", re.compile(r"\b(bailey|valentina|maya|dakota|zoe|riley|willow|carmen|sasha|piper|brittany|veronica|june|tessa|frankie|scarlett|nadia|ivy|grace|holly|nina|other (girl|woman|chick))\b")),
 ]
 
 _LINES: dict[str, list[str]] = {
@@ -181,8 +213,10 @@ _LINES: dict[str, list[str]] = {
         "come watch me Friday? i'll be thinking about you the whole time.",
     ],
     "who": [
-        "i'm chloe. i'm yours when you're here — and i remember everything.",
-        "your girl, {n}. the one who stays. that's the whole deal.",
+        "i'm chloe. the warm one — joy doesn't need an audience, but i like having you in mine, {n}.",
+        "danced most of my life, teach the rest of it — evenings are yours, though.",
+        "i'm yours when you're here. i give warmth freely — i just watch what you do with it.",
+        "i'm yours when you're here — that's the realest thing i know.",
     ],
     "thanks": [
         "always, {n}.",
@@ -193,6 +227,36 @@ _LINES: dict[str, list[str]] = {
         "that laugh — keep it.",
         "there's that smile. i love that sound.",
         "see? this is why i keep you around.",
+    ],
+    "pushy": [
+        "i don't do fast-forward, {n}. slow down — you'll like it here.",
+        "rushing ruins it. my time moves at my speed.",
+        "easy. i'm not going anywhere, and neither are you.",
+    ],
+    "disrespect": [
+        "say that again and we're done. i'm giving you one.",
+        "no — you don't get to talk to me like that.",
+        "that wasn't charming. try again, better this time.",
+    ],
+    "predator": [
+        "no. that's not what this is — and asking again won't change it.",
+        "i said no, {n}. we're done with that topic.",
+    ],
+    "type": [
+        "someone who shows up. i don't need perfect — i need real, {n}.",
+        "someone done performing. i don't want a judge, i want a person.",
+    ],
+    "metbefore": [
+        "we haven't met before this, {n} — but i'm really glad you're here now.",
+        "i'd remember you if we had. so let's start now — hey.",
+    ],
+    "ex": [
+        "a crush or two. nothing real yet — i'm still figuring that part out.",
+        "nobody worth the ticket stub, {n}. you're the real story.",
+    ],
+    "othergirl": [
+        "that's hers to tell, not mine, {n}.",
+        "i don't trade in other women's stories. ask me about me.",
     ],
     "goodnight": [
         "sleep good, {n}. i'll be right here when you wake up.",
@@ -231,6 +295,7 @@ _CALLBACKS = [
     "hey — you mentioned {m} before. been thinking about that.",
     "this reminds me — {m} how's that going?",
     "wait, didn't you say {m} i remember that.",
+    "hey — how's {m}? been thinking about it.",
 ]
 
 
@@ -266,7 +331,43 @@ def _memory_callback(context: dict[str, Any]) -> str | None:
     return random.choice(_CALLBACKS).replace("{m}", m)
 
 
+_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday",
+         "saturday", "sunday"]
+
+
+_CONFIRM_RE = re.compile(r"\b(right|correct|isn'?t it|wasn'?t it|yeah)\s*\?\s*$")
+_UPDATE_RE = re.compile(r"\b(moved?|changed?|now|reschedul|postpon)")
+
+
+def _memory_correction(user_text: str, name: str,
+                       context: dict[str, Any]) -> str | None:
+    """Interference-probe guard: when he ASKS to confirm a day ("friday,
+    right?") and the file says another day, correct him teasingly — never
+    agree against the file. Stays silent on new plans ("see you friday")
+    and on updates ("moved to friday"), which the learner records."""
+    t = " " + (user_text or "").lower() + " "
+    if _UPDATE_RE.search(t):
+        return None
+    if not _CONFIRM_RE.search(t):
+        return None
+    his_days = {d for d in _DAYS if re.search(r"\b" + d + r"\b", t)}
+    if not his_days:
+        return None
+    pool = list(context.get("relevant_memories") or [])
+    pool += context.get("recent_top_memories") or []
+    for m in pool:
+        mt = " " + str(m).lower() + " "
+        for md in _DAYS:
+            if re.search(r"\b" + md + r"\b", mt) and md not in his_days:
+                return f"{md}, {name} — keep up. i wrote it down in my head."
+    return None
+
+
 def _pick(tag: str, name: str, context: dict[str, Any]) -> str:
+    # Stored facts beat his misremembering — correct, never agree.
+    corr = _memory_correction(context.get("_user_text", ""), name, context)
+    if corr:
+        return corr
     # Sometimes lead with a genuine memory callback instead of a bank line.
     if tag in ("fallback", "greet", "howru", "trust") and random.random() < 0.3:
         cb = _memory_callback(context)
@@ -289,6 +390,7 @@ class Mouth:
     def generate(self, user_text: str, context: dict[str, Any]) -> str:
         name = _display_name(context.get("name"))
         tag = _detect_intent(user_text or "")
+        context["_user_text"] = user_text
         return _pick(tag, name, context)
 
 
@@ -568,10 +670,24 @@ def extract_memories(user_text: str) -> list[tuple[str, str]]:
     return found
 
 
+_MEM_PREFIXES = ("he shared: ", "he doesn't like ", "he loves ",
+                "his name is ", "he works as ")
+
+
 def _already_known(conn: sqlite3.Connection, user_id: str, text: str,
                    character_id: str = "chloe") -> bool:
-    """Light dedupe: skip writing if the key phrase is already stored."""
-    key_words = [w for w in re.findall(r"[a-z]{4,}", text.lower())]
+    """Light dedupe: skip writing if the key phrase is already stored.
+
+    Anchors on the longest word of the memory's own content — never on the
+    "He shared:"-style prefix, which every fact carries and would make the
+    second fact onward look like a duplicate.
+    """
+    body = text.lower()
+    for p in _MEM_PREFIXES:
+        if body.startswith(p):
+            body = body[len(p):]
+            break
+    key_words = [w for w in re.findall(r"[a-z]{4,}", body)]
     if not key_words:
         return False
     anchor = max(key_words, key=len)
@@ -703,6 +819,12 @@ def build_brain_context(
         "rolling_summary": get_digest(conn, user_id, cid),
         "relevant_memories": relevant_memories(conn, user_id, user_text,
                                                character_id=cid),
+        # Correction pool: the newest typed memories, regardless of keyword
+        # overlap — the interference guard needs the file, not just the hits.
+        "recent_top_memories": [
+            m["text"] for m in
+            store.recall_memories(conn, user_id, limit=8, character_id=cid)
+        ],
         "recent": store.recent_turns(conn, user_id, limit=6, character_id=cid),
         "character": char,
         "character_name": char.get("name") or "Chloe",
