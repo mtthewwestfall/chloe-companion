@@ -4,6 +4,10 @@ POST /api/v1/chat {user_id, message}
   -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining}
 GET  /api/v1/me?user_id=
   -> {user_id, name, tier, messages_remaining, voice_notes_remaining, proactive_enabled}
+GET  /api/v1/tiers
+  -> {plans:[{key,name,price_usd,interval,messages_per_month,
+              voice_notes_per_month,voice_notes_unconfirmed,
+              photo_drops,proactive,checkout_url}]}
 GET  /api/v1/shows
   -> {shows:[{id,title,starts_at,ticket_url}]}
 POST /api/v1/memory/export {user_id} -> {memories:[...]}
@@ -56,7 +60,7 @@ def _empty_bank_reply(user: dict[str, Any]) -> dict[str, Any]:
                  "voice notes too.")
     elif tier == "plus":
         nudge = ("i've used up this month's messages, love — "
-                 "vip is $39.99 with way more of me, if you want.")
+                 "vip is $29.99 with way more of me, if you want.")
     else:
         nudge = ("i've used up this month's messages — they'll top back up "
                  "on your renewal. i'll be right here.")
@@ -154,6 +158,35 @@ def me(user_id: str):
 @app.get("/api/v1/shows")
 def list_shows():
     return {"shows": shows.get_shows()}
+
+
+@app.get("/api/v1/tiers")
+def list_tiers():
+    """Public pricing: tier names, prices, benefits, and Stripe checkout links.
+
+    Links are the user-supplied live Stripe Payment Links (see
+    config.STRIPE_LIVE_CHECKOUT) — they open in a new tab and redirect to
+    Stripe for the actual purchase. NOTE: the /api/v1/stripe/webhook stub has
+    no signature verification; a checkout redirect is NOT fulfillment on our
+    side.
+    """
+    plans = []
+    for key in ("basic", "plus", "vip"):
+        t = config.TIERS[key]
+        plans.append({
+            "key": key,
+            "name": t["name"],
+            "price_usd": t["price_usd"],
+            "interval": "month",
+            "messages_per_month": t["messages_per_month"],
+            "voice_notes_per_month": t["voice_notes_per_month"],
+            # True when config marks this tier's voice-note count unconfirmed.
+            "voice_notes_unconfirmed": key == "vip",
+            "photo_drops": t["photo_drops"],
+            "proactive": t["proactive"],
+            "checkout_url": config.STRIPE_LIVE_CHECKOUT[key],
+        })
+    return {"plans": plans}
 
 
 @app.post("/api/v1/memory/export")

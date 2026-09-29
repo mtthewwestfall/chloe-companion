@@ -90,5 +90,19 @@ const ApiClient = (() => {
     }
   }
 
-  return { probe, chat, me, shows, onStatus, isConnected: () => connected };
+  // Subscription plans from the live server (names, prices, benefits,
+  // Stripe checkout links). Null when offline — plans UI renders a
+  // "connect to subscribe" note instead.
+  async function tiers() {
+    try {
+      const data = await request('GET', '/api/v1/tiers');
+      setConnected(true);
+      return data;
+    } catch (e) {
+      setConnected(false);
+      return null;
+    }
+  }
+
+  return { probe, chat, me, shows, tiers, onStatus, isConnected: () => connected };
 })();

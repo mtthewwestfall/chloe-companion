@@ -238,6 +238,23 @@ body {
 .tier-name { font-weight: 700; font-size: 16px; color: var(--amber-soft); }
 .tier-sub { font-size: 12.5px; color: var(--ink-dim); }
 
+/* --- subscription plans (profile sheet) --- */
+.sub-section { margin: 0 0 16px; }
+.sub-title { font-weight: 700; font-size: 15px; margin: 2px 0 10px; color: var(--ink); }
+.plan-list { display: flex; flex-direction: column; gap: 10px; }
+.plan-list .sheet-sub { margin: 0; }
+.plan-card { background: var(--navy-2); border: 1px solid rgba(232,169,76,.18); border-radius: 14px; padding: 13px 14px; }
+.plan-card.current { border-color: rgba(232,169,76,.55); background: linear-gradient(135deg, rgba(232,169,76,.14), rgba(232,169,76,.03)); }
+.plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.plan-name { font-weight: 700; font-size: 15.5px; color: var(--amber-soft); }
+.plan-price { font-weight: 700; font-size: 18px; white-space: nowrap; }
+.plan-price span { font-size: 12.5px; color: var(--ink-dim); font-weight: 400; }
+.plan-benefits { list-style: none; margin: 0 0 12px; padding: 0; font-size: 13.5px; color: var(--ink-dim); }
+.plan-benefits li { padding: 2px 0; }
+.plan-benefits li::before { content: "✦ "; color: var(--amber); }
+.plan-card .btn-primary { font-size: 15px; padding: 12px; }
+.plan-card .btn-ghost[disabled] { opacity: .55; cursor: default; }
+
 .stat-row { display: flex; gap: 10px; margin-bottom: 16px; }
 .stat { flex: 1; background: var(--navy-2); border-radius: 14px; padding: 12px; text-align: center; }
 .stat-num { font-size: 22px; font-weight: 700; color: var(--amber-soft); }

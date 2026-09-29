@@ -216,7 +216,49 @@
     $('modePill').textContent = live ? 'Live' : 'Demo mode';
     $('modeBlurb').textContent = live ? 'real memory on the companion server.' : 'connect the companion server for real memory.';
     updateConnLine();
+    renderPlans(me.tier, live);
   });
+
+  // Plans: subscribe/upgrade cards from the live server (names, prices,
+  // benefits, Stripe checkout links). Rendered once per profile-sheet open;
+  // buttons open the checkout link in a new tab.
+  async function renderPlans(currentTier, live) {
+    const list = $('planList');
+    const data = live ? await ApiClient.tiers() : null;
+    const plans = data && data.plans;
+    if (!plans || !plans.length) {
+      list.innerHTML = '<div class="sheet-sub">Plans appear here once you\'re connected to the companion server.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    plans.forEach((p) => {
+      const card = document.createElement('div');
+      card.className = 'plan-card' + (p.key === currentTier ? ' current' : '');
+      const benefits = [
+        p.messages_per_month.toLocaleString('en-US') + ' messages / month',
+        p.voice_notes_unconfirmed
+          ? 'Voice notes — count being finalized'
+          : (p.voice_notes_per_month > 0
+              ? p.voice_notes_per_month + ' voice notes / month'
+              : 'No voice notes'),
+      ];
+      if (p.photo_drops) benefits.push('Photo drops');
+      if (p.proactive) benefits.push('Proactive check-ins');
+      card.innerHTML = `
+        <div class="plan-head"><div class="plan-name">${esc(p.name)}</div><div class="plan-price">$${p.price_usd.toFixed(2)}<span>/mo</span></div></div>
+        <ul class="plan-benefits">${benefits.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>`;
+      const btn = document.createElement('button');
+      if (p.key === currentTier) {
+        btn.className = 'btn-ghost'; btn.textContent = 'Current plan'; btn.disabled = true;
+      } else {
+        btn.className = 'btn-primary';
+        btn.textContent = 'Subscribe · $' + p.price_usd.toFixed(2) + '/mo';
+        btn.addEventListener('click', () => window.open(p.checkout_url, '_blank', 'noopener'));
+      }
+      card.appendChild(btn);
+      list.appendChild(card);
+    });
+  }
 
   $('proactiveToggle').addEventListener('change', (e) => {
     localStorage.setItem('chloe_proactive', e.target.checked ? 'on' : 'off');

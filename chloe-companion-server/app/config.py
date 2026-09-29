@@ -44,10 +44,11 @@ TIERS = {
 # ---------------------------------------------------------------------------
 # LIVE Stripe checkout links — provided by the user 2026-09-28.
 # basic -> the $9.99/mo recurring link, plus -> the $19.99/mo recurring link,
-# vip -> the new $29.99/mo recurring link. NOTE: the $9.99/$19.99 products
-# still carry their old "BOGO" names in the Stripe dashboard until renamed;
-# the $29.99 link did not resolve from the assistant's network at wiring
-# time (user re-confirmed it — verify in the Stripe dashboard).
+# vip -> the $29.99/mo recurring link. All three verified resolving to live
+# Stripe Checkout pages on 2026-09-28 (HTTP 200, title "Stripe Checkout").
+# NOTE: the $9.99/$19.99 products still carry their old "BOGO" names in the
+# Stripe dashboard until renamed. Price/interval is taken on the user's word —
+# Stripe renders it via JS, so it can't be read from the checkout page HTML.
 # ---------------------------------------------------------------------------
 STRIPE_LIVE_CHECKOUT = {
     "basic": "https://buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c",
