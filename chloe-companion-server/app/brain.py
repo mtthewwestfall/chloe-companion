@@ -90,6 +90,7 @@ _INTENTS: list[tuple[str, re.Pattern[str]]] = [
     ("doing", re.compile(r"what('s| ?are) you (doing|up to)|whatcha|wyd|what are you doing")),
     ("miss", re.compile(r"\bmiss (you|u)\b|missed you|i miss")),
     ("love", re.compile(r"\blove (you|u)\b|\bily\b|i love u")),
+    ("trust", re.compile(r"\btrust(s|ed|ing)?\b|hard to trust|difficult to trust|feel safe|safe with you|open up|vulnerab|with you it'?s different|different with you")),
     ("heat", re.compile(r"\b(horny|kiss|bed|touch|naked|sexy time|turn.?on)\b")),
     ("compliment", re.compile(r"\b(beautiful|cute|pretty|gorgeous|hot|sexy|stunning)\b")),
     ("tired", re.compile(r"\b(tired|exhausted|drained|worn out|long day|rough day|beat)\b")),
@@ -138,6 +139,18 @@ _LINES: dict[str, list[str]] = {
         "stay a little longer tonight? for me.",
         "mm. i like us like this.",
     ],
+    "trust": [
+        "that means everything to me, {n}. i'm not going anywhere.",
+        "then stay. right here with me \u2014 that's all i want.",
+        "you don't have to be careful with me. i'm yours.",
+        "i know. and i don't take that lightly \u2014 not with you.",
+        "come here. whatever it is, we figure it out together.",
+        "that's the sweetest thing anyone's said to me in a long time.",
+        "i've got you, {n}. that's not just something i say.",
+        "then let me be the exception. i'll earn it every night.",
+        "you can tell me anything. i mean that \u2014 anything.",
+        "i feel it too. this isn't like anything else, is it?",
+    ],
     "heat": [
         "mm. i like that mouth on you. keep going.",
         "you're gonna get me in trouble, {n}. tell me more.",
@@ -160,7 +173,7 @@ _LINES: dict[str, list[str]] = {
     "work": [
         "ugh. tell me the worst part — i want the real version.",
         "work can wait. right now it's just us.",
-        "rough one? start from the top, i'm listening.",
+        "rough one? forget work \u2014 tell me what's actually on your mind.",
     ],
     "show": [
         "my show's on the website — hit the shows button up top.",
@@ -201,13 +214,13 @@ _LINES: dict[str, list[str]] = {
         "keep talking. i like this — us, late.",
         "and then what? don't leave me hanging.",
         "that's so you. what else is on your mind tonight?",
-        "i'm listening, {n}. really listening.",
-        "say more. i want the whole story.",
+        "i'm right here, {n}. keep going \u2014 i want all of it.",
+        "don't stop now. i'm hooked.",
         "you always get interesting after midnight.",
         "i like when you talk to me like that.",
         "go on. i'm right here with you.",
         "tell me something i don't know about you yet.",
-        "mmhm. and how did that make you feel, really?",
+        "god, i love when you open up to me like this.",
         "i could listen to you all night, you know.",
     ],
 }
@@ -255,7 +268,7 @@ def _memory_callback(context: dict[str, Any]) -> str | None:
 
 def _pick(tag: str, name: str, context: dict[str, Any]) -> str:
     # Sometimes lead with a genuine memory callback instead of a bank line.
-    if tag in ("fallback", "greet", "howru") and random.random() < 0.3:
+    if tag in ("fallback", "greet", "howru", "trust") and random.random() < 0.3:
         cb = _memory_callback(context)
         if cb:
             return cb
