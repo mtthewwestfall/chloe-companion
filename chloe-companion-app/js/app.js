@@ -134,6 +134,9 @@
     sending = true;
     addText('him', text);
     msgInput.value = '';
+    vidTyping();
+    lastUserMsgAt = Date.now();
+    consecutiveProactive = 0;
     typingRow.classList.remove('hidden');
     scrollBottom();
 
@@ -143,6 +146,7 @@
     try {
       const res = await ApiClient.chat(text);
       typingRow.classList.add('hidden');
+      vidIdle();
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);
       } else {
@@ -153,6 +157,7 @@
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
+      vidIdle();
       addText('her', 'hmm, lost you for a second. say that again?');
     }
     sending = false;
@@ -169,6 +174,95 @@
       ? 'Hold to record (coming with the companion server)'
       : 'Voice messages unlock when the companion server is connected');
   });
+
+
+  /* ---------- FaceTime video tile ---------- */
+  const MEDIA_BASE = 'https://keyhole-latest-production.up.railway.app/media/files/';
+  const VID_IDLE = 'chloe_3bcbf88d987b7621.mp4';
+  const VID_TYPING = 'chloe_6f26366653c891fc.mp4';
+  const VID_ACTS = [
+    'chloe_8dc35b0d286f75c8.mp4', 'chloe_d7f526d8e173b8c1.mp4', 'chloe_b6e63f643b5d65b8.mp4',
+    'chloe_f0444b783021a49b.mp4', 'chloe_af1ad9f4bdd4e640.mp4', 'chloe_d7916e4c02a3623d.mp4',
+    'chloe_fb752057230ea48e.mp4', 'chloe_b7892a8396f0906b.mp4', 'chloe_2a699be08f3afa13.mp4',
+    'chloe_951d4f3caa7d7c8b.mp4', 'chloe_9d1a71eaa989e464.mp4', 'chloe_e29224a69d9b8483.mp4',
+    'chloe_cf36372b31ad8399.mp4', 'chloe_4e7fb93e53370b6a.mp4', 'chloe_526ff559f269109a.mp4',
+    'chloe_da384645830fac4e.mp4', 'chloe_1f071cf867c8a3f0.mp4', 'chloe_e21c51182afc8381.mp4',
+    'chloe_3cc3f88cc0051442.mp4', 'chloe_7fbf98e99a93841c.mp4', 'chloe_dbd46d293b36133e.mp4',
+    'chloe_8727c4518ffea2c3.mp4', 'chloe_6ede839a2eb89a8e.mp4', 'chloe_7b45d3e668715e56.mp4',
+    'chloe_1266ef81c5771819.mp4',
+  ];
+  const chloeVideo = $('chloeVideo'), videoTapHint = $('videoTapHint');
+  let vidMode = 'idle';   // idle | typing | activity
+  let actIdx = Math.floor(Math.random() * VID_ACTS.length);
+  let idleTimer = null;
+
+  function vidShowTapHint() { videoTapHint.classList.remove('hidden'); }
+  function vidHideTapHint() { videoTapHint.classList.add('hidden'); }
+
+  function vidPlay(src, loop) {
+    const url = MEDIA_BASE + src;
+    chloeVideo.loop = !!loop;
+    if (chloeVideo.dataset.src !== url) {
+      chloeVideo.dataset.src = url;
+      chloeVideo.src = url;
+    }
+    const pr = chloeVideo.play();
+    if (pr && pr.then) pr.then(vidHideTapHint).catch(vidShowTapHint);
+  }
+  function vidIdle() {
+    vidMode = 'idle';
+    vidPlay(VID_IDLE, true);
+    clearTimeout(idleTimer);
+    // One activity at a time during idle, then back to idle.
+    idleTimer = setTimeout(() => {
+      if (vidMode !== 'idle' || document.hidden) { vidIdle(); return; }
+      vidMode = 'activity';
+      actIdx = (actIdx + 1) % VID_ACTS.length;
+      vidPlay(VID_ACTS[actIdx], false);
+    }, 45000);
+  }
+  function vidTyping() { vidMode = 'typing'; clearTimeout(idleTimer); vidPlay(VID_TYPING, true); }
+  chloeVideo.addEventListener('ended', () => { if (vidMode === 'activity') vidIdle(); });
+  chloeVideo.addEventListener('error', vidShowTapHint, true);
+  videoTapHint.addEventListener('click', (e) => { e.stopPropagation(); vidPlay(chloeVideo.dataset.src ? chloeVideo.dataset.src.slice(MEDIA_BASE.length) : VID_IDLE, vidMode !== 'activity'); });
+  // iOS: retry autoplay on first touch and when the tab becomes visible.
+  document.addEventListener('touchend', function once() {
+    document.removeEventListener('touchend', once);
+    if (chloeVideo.paused) vidPlay(chloeVideo.dataset.src ? chloeVideo.dataset.src.slice(MEDIA_BASE.length) : VID_IDLE, vidMode !== 'activity');
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && chloeVideo.paused) vidIdle();
+  });
+
+  /* ---------- proactive: she takes the lead when he's quiet ---------- */
+  const QUIET_MS = 90000;   // 90s of silence before she reaches out
+  let lastUserMsgAt = Date.now();
+  let consecutiveProactive = 0;
+  const PROACTIVE_LINES = [
+    (n) => 'hey. still with me?',
+    (n) => 'you went quiet — everything okay?',
+    (n) => `i'm still here, ${n}. talk to me.`,
+    (n) => 'mm. i miss your messages. come back?',
+    (n) => `don't leave me hanging, ${n}. what's on your mind?`,
+  ];
+  function armQuietNudge() {
+    setInterval(() => {
+      if (localStorage.getItem('chloe_proactive') === 'off') return;
+      if (document.hidden || sending) return;
+      if (Date.now() - lastUserMsgAt < QUIET_MS) return;
+      if (consecutiveProactive >= 2) return;   // never pushy: max two in a row
+      consecutiveProactive++;
+      lastUserMsgAt = Date.now();
+      const nm = localStorage.getItem('chloe_name') || 'you';
+      const line = PROACTIVE_LINES[Math.floor(Math.random() * PROACTIVE_LINES.length)](nm);
+      typingRow.classList.remove('hidden'); scrollBottom(); vidTyping();
+      setTimeout(() => {
+        typingRow.classList.add('hidden');
+        addText('her', line);
+        vidIdle();
+      }, 1600);
+    }, 15000);
+  }
 
   /* ---------- onboarding-lite ---------- */
 
@@ -326,6 +420,8 @@
   }
 
   async function bootChat(isFirstHello) {
+    vidIdle();
+    armQuietNudge();
     dayDividerIfNeeded();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';

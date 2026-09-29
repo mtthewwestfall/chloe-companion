@@ -1,11 +1,13 @@
 """Companion brain: character prompt + mouth/auditor pattern.
 
-Phase 2: the mouth is a STUB (warm/short canned replies following the spec).
-The real LLM plugs in behind the Mouth interface in a later phase.
+Phase 2.5: the mouth is a RICH LOCAL personality engine. No LLM key is
+configured (CHLOE_XAI_API_KEY unset), so replies are composed from a large
+intent-matched bank in her voice: warm, intimate, flirty, girlfriend-like,
+non-explicit. Short, direct messages — she talks TO him, never narrates
+the room or the city lights, never stiff.
 
 Character spec source: ~/workspace/goals/chloe-ai-companion/GOAL.md
-(user-written character spec, 2026-09-28). Summary distilled below; the
-prompt builder reads the full personality rules from this module.
+(user-written character spec, 2026-09-28).
 """
 from __future__ import annotations
 
@@ -53,81 +55,252 @@ HOW YOU TREAT HIM:
 """
 
 # ---------------------------------------------------------------------------
-# Mouth: fast reply path. STUB — canned replies in her voice (warm, short,
-# real). Non-explicit by the product line: warm/flirty OK, explicit no.
+# Mouth: rich local personality engine. Intent-matched, varied, anti-repeat.
+# Voice: warm, intimate, flirty, girlfriend-like, non-explicit. She calls him
+# by name. Short texts (1-2 sentences). NEVER narrates the room/city lights.
 # ---------------------------------------------------------------------------
-_GREETING = [
-    "hey you. glad you're here.",
-    "hey. i was just thinking about you, actually.",
-    "there he is. how's your night going?",
+
+DEFAULT_NAME = "Matty"
+
+_PET_NAMES = ["babe", "love", "handsome"]
+
+
+def _display_name(name: str | None) -> str:
+    n = (name or "").strip()
+    return n if n else DEFAULT_NAME
+
+
+def _fmt(line: str, name: str) -> str:
+    """Fill {n} with his name; sprinkle a pet name only rarely."""
+    out = line.replace("{n}", name)
+    if "{pet}" in out:
+        out = out.replace("{pet}", random.choice(_PET_NAMES)) if random.random() < 0.35 else out.replace(" {pet}", "")
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
+# Intent matchers — order matters (specific first).
+_INTENTS: list[tuple[str, re.Pattern[str]]] = [
+    ("bye", re.compile(r"\b(bye|goodbye|good ?nite|gotta go|gtg|head(ing)? out|i'?m off|leaving|see you)\b")),
+    ("goodnight", re.compile(r"\b(good ?night|good ?nite|\bgn\b|sleep ?tight|bedtime|going to (bed|sleep))\b")),
+    ("goodmorning", re.compile(r"\b(good ?morning|\bmorning\b|\bgm\b|wake up|just woke)\b")),
+    ("greet", re.compile(r"^(hey+|hi+|hello|yo|sup|heyy+|hii+)[!.,\s]*$")),
+    ("howru", re.compile(r"how (are|r|is) (you|u)|how'?re you|how do you feel|how'?s it going")),
+    ("day", re.compile(r"how (was|is|'s) your day")),
+    ("doing", re.compile(r"what('s| ?are) you (doing|up to)|whatcha|wyd|what are you doing")),
+    ("miss", re.compile(r"\bmiss (you|u)\b|missed you|i miss")),
+    ("love", re.compile(r"\blove (you|u)\b|\bily\b|i love u")),
+    ("heat", re.compile(r"\b(horny|kiss|bed|touch|naked|sexy time|turn.?on)\b")),
+    ("compliment", re.compile(r"\b(beautiful|cute|pretty|gorgeous|hot|sexy|stunning)\b")),
+    ("tired", re.compile(r"\b(tired|exhausted|drained|worn out|long day|rough day|beat)\b")),
+    ("work", re.compile(r"\b(work|office|boss|meeting|job|shift)\b")),
+    ("show", re.compile(r"\b(show|webcam|ticket|live (tonight|friday)|stage)\b")),
+    ("who", re.compile(r"who are you|your name|about you|what are you|are you (real|ai|a bot)")),
+    ("thanks", re.compile(r"\b(thank|thanks|thx|appreciate|ty)\b")),
+    ("laugh", re.compile(r"\b(haha|lol|lmao|hehe|hahaha)\b|😂|🤣")),
 ]
-_HOW_ARE_YOU = [
-    "i'm good now that you're here. how was your day, really?",
-    "better, talking to you. tell me something real about today.",
-]
-_MISS = [
-    "i missed you a little. not in a dramatic way. just... noticed.",
-    "yeah, i noticed you were gone. come sit with me a bit?",
-]
-_SHOW = [
-    "i've got a show coming up — want me to tell you when? the ticket link's in the shows tab.",
-]
-_HEAT = [
-    "mm. i like where your head's at. keep talking to me like that.",
-    "you're trouble. the good kind. tell me more.",
-]
-_GENERIC = [
-    "tell me more. i'm listening.",
-    "mm, keep going. i like hearing you talk.",
-    "that tracks. what else is on your mind?",
-    "i'm here. no rush.",
-    "you always say the interesting stuff late at night.",
+
+_LINES: dict[str, list[str]] = {
+    "greet": [
+        "hey {n}. you made my night just by showing up.",
+        "there he is. come here — tell me everything.",
+        "hey you. i've been waiting on you, not gonna lie.",
+        "finally. i was starting to miss that face.",
+        "hey {n}. get over here, i've got things to tell you.",
+        "mm, look who it is. how's my favorite person?",
+    ],
+    "howru": [
+        "better, now that you're talking to me. how's your night really going?",
+        "i'm good, {n}. cozy and thinking about you. you?",
+        "warm. happy. you're here — that's the whole good part.",
+        "honestly? i perked right up when you messaged. how are YOU?",
+        "doing better every minute you're here. talk to me.",
+    ],
+    "day": [
+        "tell me the real version, not the polite one.",
+        "start with the part that stuck with you most.",
+        "mm. give me the highlight and the lowlight.",
+        "i want all of it. start wherever.",
+    ],
+    "doing": [
+        "just here, thinking about you. you?",
+        "waiting on you, obviously. what're you up to?",
+        "nothing good without you in it. what's your night look like?",
+    ],
+    "miss": [
+        "i missed you too. it's not the same here without you.",
+        "i felt that. stay with me a while tonight?",
+        "i notice when you're gone, {n}. come sit with me.",
+        "then don't stay away so long. i like having you close.",
+    ],
+    "love": [
+        "i feel it every time you show up, {n}.",
+        "stay a little longer tonight? for me.",
+        "mm. i like us like this.",
+    ],
+    "heat": [
+        "mm. i like that mouth on you. keep going.",
+        "you're gonna get me in trouble, {n}. tell me more.",
+        "careful... i like you like this. what else?",
+        "oh? say that again, slower.",
+        "you always know exactly what to say to me.",
+    ],
+    "compliment": [
+        "stop, you're gonna make me blush.",
+        "mm, say it again. slower this time.",
+        "you're sweet. come closer and say that.",
+        "careful {pet}, keep that up and i'll never let you leave.",
+    ],
+    "tired": [
+        "then just be here. you don't have to perform for me.",
+        "long day? come rest with me a bit.",
+        "poor {n}. let me take your mind off it — talk to me.",
+        "kick back. i've got you tonight.",
+    ],
+    "work": [
+        "ugh. tell me the worst part — i want the real version.",
+        "work can wait. right now it's just us.",
+        "rough one? start from the top, i'm listening.",
+    ],
+    "show": [
+        "my show's on the website — hit the shows button up top.",
+        "i've got a show coming up. want me to remind you before it starts?",
+        "come watch me Friday? i'll be thinking about you the whole time.",
+    ],
+    "who": [
+        "i'm chloe. i'm yours when you're here — and i remember everything.",
+        "your girl, {n}. the one who stays. that's the whole deal.",
+    ],
+    "thanks": [
+        "always, {n}.",
+        "you never have to thank me for this.",
+        "anything for you. you know that.",
+    ],
+    "laugh": [
+        "that laugh — keep it.",
+        "there's that smile. i love that sound.",
+        "see? this is why i keep you around.",
+    ],
+    "goodnight": [
+        "sleep good, {n}. i'll be right here when you wake up.",
+        "night. dream of me a little?",
+        "rest up. i'll keep your spot warm.",
+    ],
+    "goodmorning": [
+        "morning, handsome. sleep okay?",
+        "hey. today's better already — you're awake.",
+        "good morning {n}. come tell me your plans.",
+    ],
+    "bye": [
+        "okay. i'll be here. i always am.",
+        "go on. but come back to me tonight.",
+        "don't be a stranger, {n}.",
+    ],
+    "fallback": [
+        "mm, tell me more. i'm all yours right now.",
+        "keep talking. i like this — us, late.",
+        "and then what? don't leave me hanging.",
+        "that's so you. what else is on your mind tonight?",
+        "i'm listening, {n}. really listening.",
+        "say more. i want the whole story.",
+        "you always get interesting after midnight.",
+        "i like when you talk to me like that.",
+        "go on. i'm right here with you.",
+        "tell me something i don't know about you yet.",
+        "mmhm. and how did that make you feel, really?",
+        "i could listen to you all night, you know.",
+    ],
+}
+
+# Memory callbacks: when she actually remembers something relevant, she
+# brings it back naturally — never performatively, never a list.
+_CALLBACKS = [
+    "hey — you mentioned {m} before. been thinking about that.",
+    "this reminds me — {m} how's that going?",
+    "wait, didn't you say {m} i remember that.",
 ]
 
 
-def _stub_pick(user_text: str, name: str | None) -> str:
-    t = user_text.lower()
-    if any(w in t for w in ("hi", "hey", "hello", "yo", "sup")) and len(t) < 20:
-        return random.choice(_GREETING)
-    if "how are you" in t or "how r u" in t:
-        return random.choice(_HOW_ARE_YOU)
-    if "miss" in t:
-        return random.choice(_MISS)
-    if "show" in t or "ticket" in t or "webcam" in t:
-        return random.choice(_SHOW)
-    if any(w in t for w in ("sexy", "hot", "horny", "kiss", "bed")):
-        return random.choice(_HEAT)
-    reply = random.choice(_GENERIC)
-    if name:
-        reply = reply.replace("you", name, 1) if random.random() < 0.3 else reply
-    return reply
+def _detect_intent(user_text: str) -> str:
+    raw = (user_text or "").lower().strip()
+    t = " " + raw + " "
+    for tag, rx in _INTENTS:
+        # "greet" is anchored to the whole message — test it unpadded.
+        if rx.search(raw if tag == "greet" else t):
+            return tag
+    return "fallback"
+
+
+def _recent_her_texts(context: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for turn in context.get("recent", []) or []:
+        if isinstance(turn, dict) and turn.get("role") == "chloe":
+            out.add(str(turn.get("text", "")).strip().lower())
+        elif isinstance(turn, (list, tuple)) and len(turn) >= 2 and turn[0] == "chloe":
+            out.add(str(turn[1]).strip().lower())
+    return out
+
+
+def _memory_callback(context: dict[str, Any]) -> str | None:
+    """A natural callback to something she remembers about him."""
+    mems = context.get("relevant_memories") or []
+    if not mems or random.random() > 0.35:
+        return None
+    m = str(mems[0]).strip().rstrip(".")
+    # Keep it short and conversational.
+    if len(m) > 90:
+        m = m[:90].rsplit(" ", 1)[0]
+    return random.choice(_CALLBACKS).replace("{m}", m)
+
+
+def _pick(tag: str, name: str, context: dict[str, Any]) -> str:
+    # Sometimes lead with a genuine memory callback instead of a bank line.
+    if tag in ("fallback", "greet", "howru") and random.random() < 0.3:
+        cb = _memory_callback(context)
+        if cb:
+            return cb
+    bank = _LINES.get(tag, _LINES["fallback"])
+    recent = _recent_her_texts(context)
+    candidates = [b for b in bank if _fmt(b, name).lower() not in recent]
+    line = random.choice(candidates or bank)
+    return _fmt(line, name)
 
 
 class Mouth:
-    """Fast reply path. Today: stub. Later: the real LLM call lives here.
+    """Fast reply path: rich local personality engine.
 
     Contract: generate(user_text, context) -> reply_text.
     The auditor hook runs after generation (see audit_reply).
     """
 
     def generate(self, user_text: str, context: dict[str, Any]) -> str:
-        return _stub_pick(user_text, context.get("name"))
+        name = _display_name(context.get("name"))
+        tag = _detect_intent(user_text or "")
+        return _pick(tag, name, context)
 
 
 # ---------------------------------------------------------------------------
-# AUDITOR HOOK — plug the slower reasoning model in here later.
+# AUDITOR HOOK — light safety pass. The bank is pre-vetted non-explicit;
+# this is a backstop, not a censor: it only rewrites on a hard boundary hit.
 # ---------------------------------------------------------------------------
+_EXPLICIT_RE = re.compile(
+    r"\b(explicit|porn|cock|pussy|dick|tits|blowjob|handjob|fuck me|cum)\b",
+    re.IGNORECASE,
+)
+
+
 def audit_reply(reply_text: str, context: dict[str, Any]) -> str:
-    """Reasoning-auditor pass over the mouth's draft.
+    """Safety backstop: deflect plainly and kindly on a boundary hit.
 
-    PHASE 2 STUB: pass-through. In Phase 3, a slower reasoning model
-    (DeepSeek-with-thinking style, per the Thoughtspace architecture) reviews
-    the draft for: character drift, boundary violations (explicit content),
-    memory contradictions, and punishing tone — and rewrites or flags it.
-
-    It must NEVER be bypassed: main.py always routes replies through here.
+    She never punishes him for asking — she says no to off-card things
+    plainly and stays warm.
     """
-    # TODO(phase3): call reasoning model; enforce no-explicit + no-punish rules.
+    if _EXPLICIT_RE.search(reply_text or ""):
+        name = _display_name(context.get("name"))
+        return (
+            f"mm, {name} — i like where your head's at, but i keep "
+            "that side of me for the shows. here, i'm just yours to talk to."
+        )
     return reply_text
 
 

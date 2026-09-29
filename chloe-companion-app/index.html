@@ -65,9 +65,11 @@
 <div id="app" class="hidden">
 
   <header class="chat-header">
-    <button id="profileBtn" class="avatar-btn" aria-label="Profile">
-      <svg viewBox="0 0 96 96" class="avatar"><circle cx="48" cy="48" r="46" fill="#101a3d"/><circle cx="48" cy="48" r="46" fill="none" stroke="#e8a94c" stroke-width="3"/><circle cx="48" cy="48" r="33" fill="#f4d9a0"/><circle cx="40" cy="40" r="29" fill="#101a3d"/><circle cx="74" cy="28" r="2.4" fill="#f4d9a0" opacity="0.85"/></svg>
+    <button id="profileBtn" class="facetime-btn" aria-label="Profile">
+      <video id="chloeVideo" class="facetime-video" muted playsinline preload="auto"
+             poster="./img/chloe-poster.jpg"></video>
       <span class="presence-dot"></span>
+      <span id="videoTapHint" class="video-tap-hint hidden">tap to play</span>
     </button>
     <div class="header-titles">
       <div class="header-name">Chloe</div>
