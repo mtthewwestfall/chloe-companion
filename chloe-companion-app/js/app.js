@@ -401,6 +401,18 @@
     $('authScreen').classList.remove('hidden');
     $('onboarding').classList.add('hidden');
     $('app').classList.add('hidden');
+    refreshFreePromo();
+  }
+  async function refreshFreePromo() {
+    const el = $('freeSpots');
+    if (!el) return;
+    try {
+      const r = await fetch(CONFIG.API_BASE_URL + '/api/v1/free-spots');
+      const d = await r.json();
+      el.textContent = d.spots_left > 0
+        ? ` — ${d.spots_left} of ${d.cap} left`
+        : ' — all claimed';
+    } catch (e) { el.textContent = ''; }
   }
   function hideAuth() { $('authScreen').classList.add('hidden'); }
 

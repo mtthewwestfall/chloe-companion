@@ -155,6 +155,36 @@ def grant_trial_messages(conn: sqlite3.Connection, user_id: str, n: int) -> bool
     return True
 
 
+def grant_free_signup_messages(conn: sqlite3.Connection, user_id: str, n: int,
+                               cap: int) -> bool:
+    """Free verified-signup grant (2026-09-30): the first `cap` verified users
+    each get `n` messages, once. Returns True when granted, False when this
+    user already received it or the cap is reached. The single-statement
+    INSERT ... WHERE keeps the cap exact under concurrent verifications."""
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO free_grants (user_id)
+           SELECT ? WHERE (SELECT COUNT(*) FROM free_grants) < ?""",
+        (user_id, cap),
+    )
+    if cur.rowcount == 0:
+        conn.commit()
+        return False
+    conn.execute(
+        """UPDATE users SET messages_remaining = messages_remaining + ?,
+                              updated_at = datetime('now')
+           WHERE user_id = ?""",
+        (n, user_id),
+    )
+    conn.commit()
+    return True
+
+
+def free_spots_left(conn: sqlite3.Connection, cap: int) -> int:
+    """How many of the first-`cap` free verified-signup grants remain."""
+    row = conn.execute("SELECT COUNT(*) AS c FROM free_grants").fetchone()
+    return max(0, cap - (row["c"] if row else 0))
+
+
 def downgrade_to_basic(conn: sqlite3.Connection, user_id: str) -> None:
     """Subscription ended: tier back to the default; remaining banks drain
     naturally instead of being zeroed."""

@@ -100,6 +100,12 @@ TRIAL_LINK_ID = "plink_1UKs9h6qicU1CK4UhoKvOvl3"
 TRIAL_CHECKOUT_URL = "https://buy.stripe.com/3cI14ggTpfVtbdJ4bDdjO0f"
 TRIAL_MESSAGES = 100
 
+# Free verified-signup grant (2026-09-30, per user): the first
+# FREE_SIGNUP_CAP verified signups each get FREE_SIGNUP_MESSAGES free
+# messages, granted once at email-verification time.
+FREE_SIGNUP_MESSAGES = 100
+FREE_SIGNUP_CAP = 200
+
 # ---------------------------------------------------------------------------
 # Stripe product/price DEFINITIONS — TEST-MODE PLACEHOLDERS.
 # Clearly marked: these IDs are fake. Replace with real test-mode IDs when the

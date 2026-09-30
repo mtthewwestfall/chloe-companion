@@ -8,7 +8,10 @@ POST /api/v1/auth/logout [auth] -> {ok}
 GET  /api/v1/auth/me [auth] -> {user_id, name, tier, messages_remaining, ...}
 POST /api/v1/auth/name [auth] {name} -> {ok, name}
 GET  /api/v1/auth/verify?token= -> 303 redirect to the app with #session=
+  (first 200 verified signups also get 100 free messages, once)
 POST /api/v1/auth/resend-verification {email} -> {ok}
+GET  /api/v1/free-spots -> {cap, spots_left, messages} (public: powers the
+  "100 free messages" promo on the signup/signin screen)
 
 POST /api/v1/chat [auth] {message, character_id?}
   -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining, character_id}
@@ -357,6 +360,11 @@ def auth_verify(token: str = ""):
         if not user_id:
             raise HTTPException(status_code=400, detail="invalid_or_expired_link")
         store.set_email_verified(conn, user_id)
+        # Free verified-signup grant (2026-09-30): the first 200 verified
+        # signups get 100 free messages, once. Silent no-op afterwards.
+        store.grant_free_signup_messages(conn, user_id,
+                                        config.FREE_SIGNUP_MESSAGES,
+                                        config.FREE_SIGNUP_CAP)
         session = auth.new_token()
         store.create_session(conn, user_id, session)
     finally:
@@ -487,6 +495,23 @@ def list_tiers():
             "checkout_url": config.STRIPE_LIVE_CHECKOUT[key],
         })
     return {"plans": plans}
+
+
+@app.get("/api/v1/free-spots")
+def free_spots():
+    """Public: how many of the first-FREE_SIGNUP_CAP free verified-signup
+    grants remain. Powers the "100 free messages" promo on the
+    signup/signin screen."""
+    conn = _conn()
+    try:
+        left = store.free_spots_left(conn, config.FREE_SIGNUP_CAP)
+    finally:
+        conn.close()
+    return {
+        "cap": config.FREE_SIGNUP_CAP,
+        "spots_left": left,
+        "messages": config.FREE_SIGNUP_MESSAGES,
+    }
 
 
 @app.post("/api/v1/memory/export")

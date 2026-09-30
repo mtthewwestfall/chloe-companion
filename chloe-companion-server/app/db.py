@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS trial_grants (
     granted_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Free verified-signup grant (2026-09-30): one row per user that received
+-- the first-FREE_SIGNUP_CAP free 100-message grant.
+CREATE TABLE IF NOT EXISTS free_grants (
+    user_id    TEXT PRIMARY KEY,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS trust_state (
