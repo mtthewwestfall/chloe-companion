@@ -368,11 +368,13 @@
   /* ---------- proactive: she takes the lead when he's quiet ----------
      Stage 1: 90s of silence -> "hey. still with me?" (text, once).
      Stage 2: an hour after that, still nothing -> her video nudge
-     (video only, once). Then she leaves him alone until he talks. */
+     (video + exactly what she says in it, as a text message, once).
+     Then she leaves him alone until he talks. */
   const QUIET_MS = 90000;          // 90s of silence before she reaches out
   const VIDEO_NUDGE_MS = 3600000;  // 1h after stage 1 before she sends the video
   const VID_NUDGE = 'chloe_a5f216d755722372.mp4';  // quiet-nudge video (user pick 2026-09-30)
   const STAGE1_LINE = 'hey. still with me?';
+  const STAGE2_LINE = "Hey, I was hoping you'd call. Yeah, I'm just in bed. Wish you were here. Sweet dreams.";  // her exact words in the quiet-nudge video (transcribed 2026-09-30)
   let lastUserMsgAt = Date.now();
   let stage1At = 0;          // timestamp of the stage-1 text nudge (0 = not sent)
   let videoNudgeSent = false;
@@ -380,11 +382,19 @@
     setInterval(() => {
       if (localStorage.getItem('chloe_proactive') === 'off') return;
       if (document.hidden || sending) return;
-      // Stage 2: an hour after the text nudge and still quiet — the video, no text.
+      // Stage 2: an hour after the text nudge and still quiet — the video,
+      // plus exactly what she says in it as a chat message.
       if (stage1At && !videoNudgeSent && Date.now() - stage1At >= VIDEO_NUDGE_MS) {
         videoNudgeSent = true;
         vidMode = 'activity';
         vidPlay(VID_NUDGE, false);   // plays once, 'ended' drops back to idle
+        const myStage2 = stage1At;
+        typingRow.classList.remove('hidden'); scrollBottom();
+        setTimeout(() => {
+          if (stage1At !== myStage2) return;  // he talked while she was typing — stand down on the text
+          typingRow.classList.add('hidden');
+          addText('her', STAGE2_LINE);
+        }, 1600);
         return;
       }
       // Stage 1: 90s of silence — one text line, once.
