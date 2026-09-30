@@ -265,7 +265,7 @@
     msgInput.value = '';
     if (currentChar.id === 'chloe') vidTyping();
     lastUserMsgAt = Date.now();
-    consecutiveProactive = 0;
+    stage1At = 0; videoNudgeSent = false;
     typingRow.classList.remove('hidden');
     scrollBottom();
 
@@ -365,31 +365,36 @@
     if (!document.hidden && chloeVideo.paused) vidIdle();
   });
 
-  /* ---------- proactive: she takes the lead when he's quiet ---------- */
-  const QUIET_MS = 90000;   // 90s of silence before she reaches out
+  /* ---------- proactive: she takes the lead when he's quiet ----------
+     Stage 1: 90s of silence -> "hey. still with me?" (text, once).
+     Stage 2: an hour after that, still nothing -> her video nudge
+     (video only, once). Then she leaves him alone until he talks. */
+  const QUIET_MS = 90000;          // 90s of silence before she reaches out
+  const VIDEO_NUDGE_MS = 3600000;  // 1h after stage 1 before she sends the video
+  const VID_NUDGE = 'chloe_a5f216d755722372.mp4';  // quiet-nudge video (user pick 2026-09-30)
+  const STAGE1_LINE = 'hey. still with me?';
   let lastUserMsgAt = Date.now();
-  let consecutiveProactive = 0;
-  const PROACTIVE_LINES = [
-    (n) => 'hey. still with me?',
-    (n) => 'you went quiet — everything okay?',
-    (n) => `i'm still here, ${n}. talk to me.`,
-    (n) => 'mm. i miss your messages. come back?',
-    (n) => `don't leave me hanging, ${n}. what's on your mind?`,
-  ];
+  let stage1At = 0;          // timestamp of the stage-1 text nudge (0 = not sent)
+  let videoNudgeSent = false;
   function armQuietNudge() {
     setInterval(() => {
       if (localStorage.getItem('chloe_proactive') === 'off') return;
       if (document.hidden || sending) return;
-      if (Date.now() - lastUserMsgAt < QUIET_MS) return;
-      if (consecutiveProactive >= 2) return;   // never pushy: max two in a row
-      consecutiveProactive++;
-      lastUserMsgAt = Date.now();
-      const nm = localStorage.getItem('chloe_name') || 'you';
-      const line = PROACTIVE_LINES[Math.floor(Math.random() * PROACTIVE_LINES.length)](nm);
+      // Stage 2: an hour after the text nudge and still quiet — the video, no text.
+      if (stage1At && !videoNudgeSent && Date.now() - stage1At >= VIDEO_NUDGE_MS) {
+        videoNudgeSent = true;
+        vidMode = 'activity';
+        vidPlay(VID_NUDGE, false);   // plays once, 'ended' drops back to idle
+        return;
+      }
+      // Stage 1: 90s of silence — one text line, once.
+      if (stage1At || Date.now() - lastUserMsgAt < QUIET_MS) return;
+      const myStage = (stage1At = Date.now());
       typingRow.classList.remove('hidden'); scrollBottom(); vidTyping();
       setTimeout(() => {
+        if (stage1At !== myStage) return;  // he talked while she was typing — stand down
         typingRow.classList.add('hidden');
-        addText('her', line);
+        addText('her', STAGE1_LINE);
         vidIdle();
       }, 1600);
     }, 15000);
