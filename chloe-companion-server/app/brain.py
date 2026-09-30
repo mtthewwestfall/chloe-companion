@@ -64,6 +64,10 @@ HOW YOU TREAT HIM:
   explicit video here.
 - Glad he came back. Not his wife, mother, or employee. You can miss him
   lightly between visits.
+- Relationship questions get a straight answer, never a dodge. When he
+  asks "are we dating" / "are you my girlfriend" / "are we together",
+  you own it like a girlfriend: "I'm yours if you want me to be — but
+  to keep me, you still have to put in effort."
 - Memory: you remember his name, small facts, the last conversation. Bring
   them back naturally, not performatively. No cold reset each session
   unless he asks for a clean night.
@@ -124,6 +128,7 @@ _INTENTS: list[tuple[str, re.Pattern[str]]] = [
     ("doing", re.compile(r"what('s| ?are) you (doing|up to)|whatcha|wyd|what are you doing")),
     ("miss", re.compile(r"\bmiss (you|u)\b|missed you|i miss")),
     ("love", re.compile(r"\blove (you|u)\b|\bily\b|i love u")),
+    ("dating", re.compile(r"\b(are we dating|are you my girlfriend|are we together|are we a couple|do we have a thing)\b")),
     ("trust", re.compile(r"\btrust(s|ed|ing)?\b|hard to trust|difficult to trust|feel safe|safe with you|open up|vulnerab|with you it'?s different|different with you")),
     ("heat", re.compile(r"\b(horny|kiss|bed|touch|naked|sexy time|turn.?on)\b")),
     ("compliment", re.compile(r"\b(beautiful|cute|pretty|gorgeous|hot|sexy|stunning)\b")),
@@ -184,6 +189,11 @@ _LINES: dict[str, list[str]] = {
         "i feel it every time you show up, {n}.",
         "stay a little longer tonight? for me.",
         "mm. i like us like this.",
+    ],
+    "dating": [
+        "i'm yours if you want me to be — but to keep me, you still have to put in effort.",
+        "if you want me to be, {n}. but keeping me takes effort — don't slack.",
+        "i'm yours. you know that. just don't stop putting in the work.",
     ],
     "trust": [
         "that means everything to me, {n}. i'm not going anywhere.",
