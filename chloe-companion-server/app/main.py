@@ -40,6 +40,7 @@ import hmac
 import json
 import sqlite3
 import time
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -801,8 +802,14 @@ async def jvzoo_ipn(request: Request):
     raw = await request.body()
     if len(raw) > WEBHOOK_MAX_BYTES:
         raise HTTPException(413, "payload too large")
-    form_data = await request.form()
-    form = {k: str(v) for k, v in form_data.items()}
+    # Parsed by hand: this Starlette build requires python-multipart for
+    # request.form(), and JVZoo only ever posts urlencoded bodies.
+    try:
+        form = {k: v for k, v in
+                urllib.parse.parse_qsl(raw.decode("utf-8"),
+                                       keep_blank_values=True)}
+    except ValueError:
+        raise HTTPException(400, "bad form encoding")
     if not _jvzoo_verify_ok(form, secret):
         raise HTTPException(401, "bad jvzoo signature")
     return _handle_jvzoo_ipn(form)
