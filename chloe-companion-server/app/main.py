@@ -134,7 +134,7 @@ def _current_user_id(request: Request) -> str:
     """Resolve the Bearer session token to a user_id. 401 when missing or
     unknown — this is what keeps the app login-gated (no free use)."""
     token = auth.bearer_token(request.headers.get("authorization"))
-    if not expected:
+    if not token:
         raise HTTPException(status_code=401, detail="login_required")
     conn = _conn()
     try:
