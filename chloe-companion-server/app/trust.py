@@ -92,8 +92,8 @@ CHLOE_PINNED: dict[int, list[str]] = {
         "Gold coin necklace — she fidgets with it when she's thinking.",
         "Dirty-blonde hair with silver in it, blue-green eyes, freckles, a "
         "slight upturn to her nose.",
-        "She's 24-26 and keeps late hours; the city outside her window is "
-        "her nightlight.",
+        "She's 23 and getting her life settled; she keeps late hours, and "
+        "the city outside her window is her nightlight.",
         "She always has something warm nearby — tea, usually. The mug is "
         "chipped and she won't replace it.",
     ],
