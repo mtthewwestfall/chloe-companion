@@ -31,6 +31,7 @@ GET  /api/v1/shows
 POST /api/v1/memory/export [auth] {character_id?} -> {memories:[...]}
 POST /api/v1/memory/delete [auth] {character_id?} -> {ok:true}
 POST /api/v1/stripe/webhook  (live: Stripe-signature-verified; credits message banks on purchase/renewal)
+POST /api/v1/jvzoo/ipn  (live: JVZIPN-v2-verified; fulfills tiers for JVZoo affiliate sales — tiers only)
 """
 from __future__ import annotations
 
@@ -365,6 +366,11 @@ def auth_verify(token: str = ""):
         store.grant_free_signup_messages(conn, user_id,
                                         config.FREE_SIGNUP_MESSAGES,
                                         config.FREE_SIGNUP_CAP)
+        # JVZoo affiliate channel (2026-09-30): attach any paid JVZoo
+        # subscription bought under this email before the account existed.
+        _user = store.get_or_create_user(conn, user_id)
+        if _user.get("email"):
+            store.apply_jvzoo_pending(conn, user_id, _user["email"])
         session = auth.new_token()
         store.create_session(conn, user_id, session)
     finally:
@@ -739,5 +745,118 @@ def _on_subscription_deleted(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
     # Cancel: tier back to the default; remaining banks drain naturally.
     store.downgrade_to_basic(conn, user_id)
     return {"ok": True, "user_id": user_id, "action": "downgraded_to_basic"}
+
+# ---------------------------------------------------------------------------
+# JVZoo IPN — purchase fulfillment for the JVZoo affiliate channel (2026-09-30).
+#
+# Verification: JVZIPN v2 signs every post with cverify =
+#   UPPERCASE( SHA1( paykey|customer_email|product_name|transaction_type|date
+#                    |JVZIPN_SECRET )[:8] )
+# Refuses with 503 until JVZIPN_SECRET is configured so JVZoo keeps retrying
+# rather than recording a failure.
+#
+# Model: the user's "50 free messages" trial is the app's own verified-signup
+# grant — a $0 trial SALE only records the subscription. The affiliate earns
+# their 50% only on paid membership, so the tier is fulfilled on BILL (paid
+# rebill): set_tier() tops message/voice banks to the tier allocation. RFND
+# and rebill cancellations downgrade to basic. TIERS ONLY — no Keyhole show
+# grants on this path (user direction 2026-09-30).
+#
+# Identity: JVZoo checkouts happen on jvzoo.com, so the buyer's email is the
+# key. When the email has no account yet, the subscription waits and is
+# applied at email verification (see auth_verify).
+# ---------------------------------------------------------------------------
+def _jvzoo_verify_ok(form: dict[str, str], secret: str) -> bool:
+    """JVZIPN v2 signature check (support.jvzoo.com: 'JVZIPN v2 – How to
+    Receive JVZoo Order Data in Your Script')."""
+    incoming = (form.get("cverify") or "").strip().upper()
+    if not incoming or not secret:
+        return False
+    parts = [form.get("paykey", ""), form.get("customer_email", ""),
+             form.get("product_name", ""), form.get("transaction_type", ""),
+             form.get("date", ""), secret]
+    raw = "|".join(parts).encode("utf-8")
+    expect = hashlib.sha1(raw).hexdigest()[:8].upper()
+    return hmac.compare_digest(expect, incoming)
+
+
+def _jvzoo_total(form: dict[str, str]) -> float:
+    try:
+        return round(float(form.get("total", "0") or "0"), 2)
+    except ValueError:
+        return 0.0
+
+
+def _jvzoo_tier_for(form: dict[str, str]) -> str:
+    return config.JVZOO_TIER_TOTALS.get(_jvzoo_total(form), "")
+
+
+@app.post("/api/v1/jvzoo/ipn")
+async def jvzoo_ipn(request: Request):
+    secret = config.JVZIPN_SECRET
+    if not secret:
+        raise HTTPException(503, "JVZIPN_SECRET not configured")
+    if int(request.headers.get("content-length") or 0) > WEBHOOK_MAX_BYTES:
+        raise HTTPException(413, "payload too large")
+    raw = await request.body()
+    if len(raw) > WEBHOOK_MAX_BYTES:
+        raise HTTPException(413, "payload too large")
+    form_data = await request.form()
+    form = {k: str(v) for k, v in form_data.items()}
+    if not _jvzoo_verify_ok(form, secret):
+        raise HTTPException(401, "bad jvzoo signature")
+    return _handle_jvzoo_ipn(form)
+
+
+def _handle_jvzoo_ipn(form: dict[str, str]) -> dict[str, Any]:
+    paykey = (form.get("paykey") or "").strip()
+    txn_type = (form.get("transaction_type") or "").strip().upper()
+    email = auth.normalize_email(form.get("customer_email"))
+    if not paykey or not txn_type or not email:
+        return {"ok": True, "ignored": "missing paykey/type/email"}
+    conn = _conn()
+    try:
+        if not store.note_jvzoo_event(conn, paykey, txn_type):
+            return {"ok": True, "duplicate": True}
+        tier = _jvzoo_tier_for(form)
+        user = store.get_user_by_email(conn, email)
+        user_id = user["user_id"] if user else ""
+        if txn_type == "SALE":
+            # $0 trial start: record only. The 50-free-message trial is the
+            # app's own verified-signup grant; no tier change here.
+            if _jvzoo_total(form) > 0 and tier:
+                store.upsert_jvzoo_subscription(conn, paykey, email,
+                                                user_id, tier, "active")
+                if user_id:
+                    store.set_tier(conn, user_id, tier)
+                    return {"ok": True, "user_id": user_id, "tier": tier,
+                            "action": "subscribed"}
+                return {"ok": True, "tier": tier,
+                        "action": "pending_verification"}
+            store.upsert_jvzoo_subscription(conn, paykey, email,
+                                            user_id, tier, "trial")
+            return {"ok": True, "action": "trial_recorded"}
+        if txn_type == "BILL":
+            # Paid rebill: this is the paid membership — fulfill the tier.
+            if not tier:
+                return {"ok": True, "ignored": "unknown total for tier"}
+            store.upsert_jvzoo_subscription(conn, paykey, email,
+                                            user_id, tier, "active")
+            if user_id:
+                store.set_tier(conn, user_id, tier)
+                return {"ok": True, "user_id": user_id, "tier": tier,
+                        "action": "rebill_topup"}
+            return {"ok": True, "tier": tier,
+                    "action": "pending_verification"}
+        if txn_type == "RFND" or "CANCEL" in txn_type:
+            store.end_jvzoo_subscriptions_for_email(conn, email)
+            if user_id:
+                store.downgrade_to_basic(conn, user_id)
+                return {"ok": True, "user_id": user_id,
+                        "action": "downgraded_to_basic"}
+            return {"ok": True, "action": "ended_no_account"}
+        return {"ok": True, "ignored": txn_type}
+    finally:
+        conn.close()
 
 

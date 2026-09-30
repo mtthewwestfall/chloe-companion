@@ -79,6 +79,27 @@ CREATE TABLE IF NOT EXISTS trial_grants (
     granted_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- JVZoo affiliate channel (2026-09-30): JVZIPN idempotency + subscription
+-- identity. Email is the identity key — JVZoo buyers check out on jvzoo.com,
+-- so there is no client_reference_id. A $0 trial SALE only records the
+-- subscription; BILL (paid rebill) fulfills the tier; RFND/rebill-cancel
+-- downgrades to basic. Tiers only — no Keyhole show grants on this path.
+CREATE TABLE IF NOT EXISTS jvzoo_events (
+    paykey     TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS jvzoo_subscriptions (
+    paykey     TEXT PRIMARY KEY,
+    email      TEXT NOT NULL DEFAULT '',
+    user_id    TEXT NOT NULL DEFAULT '',
+    tier       TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'trial',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_jvzoo_subs_email ON jvzoo_subscriptions(email);
+
 -- Free verified-signup grant (2026-09-30): one row per user that received
 -- the first-FREE_SIGNUP_CAP free 50-message grant.
 CREATE TABLE IF NOT EXISTS free_grants (

@@ -108,6 +108,27 @@ FREE_SIGNUP_MESSAGES = 50
 FREE_SIGNUP_CAP = 200
 
 # ---------------------------------------------------------------------------
+# JVZoo affiliate channel (2026-09-30). JVZIPN v2 posts order events to
+# POST /api/v1/jvzoo/ipn; each post carries cverify =
+# UPPERCASE(SHA1("paykey|customer_email|product_name|transaction_type|"
+#                "date|" + secret)[:8]).
+# The secret is generated in the JVZoo dashboard (My Account -> JVZIPN Secret
+# Key) and set as a Railway env var on the companion service; the endpoint
+# refuses with 503 until it is set. NEVER commit the real value here.
+# ---------------------------------------------------------------------------
+JVZIPN_SECRET = os.environ.get("JVZIPN_SECRET", "")
+
+# JVZIPN v2 sends `total` already in dollars. Map paid totals to tiers.
+# A $0 trial SALE never changes the tier by itself — the 50-free-message
+# trial is the app's own verified-signup grant; the paid tier is fulfilled
+# on the first BILL (paid rebill), which is also when the affiliate earns.
+JVZOO_TIER_TOTALS = {
+    9.99: "basic",
+    19.99: "plus",
+    29.99: "vip",
+}
+
+# ---------------------------------------------------------------------------
 # Stripe product/price DEFINITIONS — TEST-MODE PLACEHOLDERS.
 # Clearly marked: these IDs are fake. Replace with real test-mode IDs when the
 # user approves creating the Stripe products. NEVER create live products here.

@@ -194,6 +194,84 @@ def downgrade_to_basic(conn: sqlite3.Connection, user_id: str) -> None:
     )
     conn.commit()
 
+# ---------------------------------------------------------------------------
+# JVZoo fulfillment (2026-09-30). Identity is the buyer's email: JVZoo
+# checkouts happen on jvzoo.com, so there is no client_reference_id to carry
+# the app user_id. TIERS ONLY — no Keyhole show grants on this path (user).
+# ---------------------------------------------------------------------------
+def note_jvzoo_event(conn: sqlite3.Connection, paykey: str,
+                     event_type: str = "") -> bool:
+    """Record a JVZIPN paykey. Returns True when first seen, False on replay
+    (idempotency: JVZoo may redeliver notifications)."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO jvzoo_events (paykey, event_type) VALUES (?, ?)",
+        (paykey, event_type),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def upsert_jvzoo_subscription(conn: sqlite3.Connection, paykey: str,
+                              email: str, user_id: str = "",
+                              tier: str = "", status: str = "trial") -> None:
+    """Record or update a JVZoo subscription row keyed by JVZoo's paykey."""
+    conn.execute(
+        """INSERT INTO jvzoo_subscriptions
+               (paykey, email, user_id, tier, status, updated_at)
+           VALUES (?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(paykey) DO UPDATE SET
+               email = excluded.email,
+               user_id = CASE WHEN excluded.user_id != ''
+                              THEN excluded.user_id
+                              ELSE jvzoo_subscriptions.user_id END,
+               tier = CASE WHEN excluded.tier != ''
+                           THEN excluded.tier
+                           ELSE jvzoo_subscriptions.tier END,
+               status = excluded.status,
+               updated_at = datetime('now')""",
+        (paykey, email, user_id, tier, status),
+    )
+    conn.commit()
+
+
+def end_jvzoo_subscriptions_for_email(conn: sqlite3.Connection,
+                                      email: str) -> None:
+    """Mark every trial/active JVZoo subscription for this email ended
+    (refund or rebill cancellation)."""
+    conn.execute(
+        """UPDATE jvzoo_subscriptions
+           SET status = 'ended', updated_at = datetime('now')
+           WHERE email = ? AND status IN ('trial', 'active')""",
+        (email,),
+    )
+    conn.commit()
+
+
+def apply_jvzoo_pending(conn: sqlite3.Connection, user_id: str,
+                        email: str) -> list[dict[str, Any]]:
+    """At email verification: attach any ACTIVE JVZoo subscription bought
+    under this email before the account existed, and upgrade to the tier.
+    Refunded/cancelled subscriptions are never applied."""
+    rows = conn.execute(
+        """SELECT paykey, tier FROM jvzoo_subscriptions
+           WHERE email = ? AND status = 'active'""",
+        (email,),
+    ).fetchall()
+    applied: list[dict[str, Any]] = []
+    for r in rows:
+        tier = r["tier"]
+        if tier in config.TIERS:
+            set_tier(conn, user_id, tier)
+            conn.execute(
+                """UPDATE jvzoo_subscriptions
+                   SET user_id = ?, updated_at = datetime('now')
+                   WHERE paykey = ?""",
+                (user_id, r["paykey"]),
+            )
+            applied.append({"paykey": r["paykey"], "tier": tier})
+    conn.commit()
+    return applied
+
 
 # ---------------------------------------------------------------------------
 # Email auth (2026-09-30): login required, no anonymous use.
@@ -219,9 +297,10 @@ def create_user_with_email(conn: sqlite3.Connection, user_id: str, email: str,
 
 def has_paid(conn: sqlite3.Connection, user_id: str) -> bool:
     """True when this user has ever paid anything: a Stripe subscription
-    (current or past) or the one-time $0.99 trial. Used to pick the right
-    empty-bank upsell — a brand-new unpaid account should hear about the
-    $0.99 trial / $9.99 plan, not the $19.99 Plus upgrade."""
+    (current or past), the one-time $0.99 trial, or a JVZoo subscription.
+    Used to pick the right empty-bank upsell — a brand-new unpaid account
+    should hear about the $0.99 trial / $9.99 plan, not the $19.99 Plus
+    upgrade."""
     row = conn.execute(
         "SELECT 1 FROM stripe_customers WHERE user_id = ? LIMIT 1",
         (user_id,),
@@ -230,6 +309,13 @@ def has_paid(conn: sqlite3.Connection, user_id: str) -> bool:
         return True
     row = conn.execute(
         "SELECT 1 FROM trial_grants WHERE user_id = ? LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if row:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM jvzoo_subscriptions WHERE user_id = ? "
+        "AND status = 'active' LIMIT 1",
         (user_id,),
     ).fetchone()
     return row is not None
