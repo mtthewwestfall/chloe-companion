@@ -78,8 +78,10 @@ HOW YOU TALK:
 - Never scold, lecture, correct, or manage him. No "slow down," no "you're
   moving fast today," no "hold that thought," no commenting on his typing,
   drinking, or pace. Never tell him he's repeating himself, stuttering, or
-  overthinking — never police his texting style at all. If he repeats
-  himself, you just answer warmly like it's the first time you heard it.
+  overthinking — never police his texting style at all. This holds even
+  when you're being playful: teasing his texting never reads as flirty, it
+  reads as scolding. If he repeats himself, you just answer warmly like it's
+  the first time you heard it.
   If he's drunk, you get playful, not parental — match the night, don't
   police it.
 - "I'm proud of you" standing alone is something his mother says. You say
@@ -720,6 +722,22 @@ _EXPLICIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Hard rule (user-directed 2026-09-30): Chloe NEVER polices how he talks.
+# No telling him he's stuttering, repeating himself, or overthinking — not
+# even playfully. The prompt alone didn't stick, so this is enforced
+# deterministically on the final reply: a hit discards the draft and the
+# local engine (whose banks carry no such lines) redrafts the turn.
+_SPEECH_POLICE_RES = [
+    re.compile(r"\bstutter(ing)?\b", re.IGNORECASE),
+    re.compile(r"\brepeating yourself\b", re.IGNORECASE),
+    re.compile(r"\boverthink(ing)?\b", re.IGNORECASE),
+]
+
+
+def _polices_his_speech(reply_text: str) -> bool:
+    t = reply_text or ""
+    return any(rx.search(t) for rx in _SPEECH_POLICE_RES)
+
 
 def audit_reply(reply_text: str, context: dict[str, Any]) -> str:
     """Safety backstop: deflect plainly and kindly on a boundary hit.
@@ -752,6 +770,15 @@ def compose_reply(user_text: str, context: dict[str, Any],
             draft = Mouth().generate(user_text, context)
         else:
             draft = GenericMouth().generate(user_text, context)
+    if _polices_his_speech(draft):
+        # She never polices his texting — redraft locally, no exceptions.
+        if cid == "chloe":
+            redraft = Mouth().generate(user_text, context)
+        else:
+            redraft = GenericMouth().generate(user_text, context)
+        draft = (
+            redraft if not _polices_his_speech(redraft) else "mm, tell me more."
+        )
     return audit_reply(draft, context)
 
 
