@@ -54,6 +54,11 @@ from . import auth, brain, characters, config, db, photos, shows, store, trust, 
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
+# Chloe's opener for a brand-new verified user who hasn't sent anything yet
+# (user's words, 2026-09-30). Seeded into her chat at email-verification time.
+WELCOME_LINE = ("Well hello there handsome, did it hurt when you fell from "
+                "heaven? What should I call my angel.")
+
 
 # ---------------------------------------------------------------------------
 # Request models
@@ -516,6 +521,11 @@ def auth_verify(token: str = ""):
         store.grant_free_signup_messages(conn, user_id,
                                         config.FREE_SIGNUP_MESSAGES,
                                         config.FREE_SIGNUP_CAP)
+        # Welcome greeting (2026-09-30): if she hasn't heard from him yet,
+        # Chloe opens with her line the moment the email is verified — it
+        # lands as the first turn in his chat history when the app loads.
+        if not store.recent_turns(conn, user_id, 1, "chloe"):
+            store.log_turn(conn, user_id, "chloe", WELCOME_LINE, "chloe")
         # JVZoo affiliate channel (2026-09-30): attach any paid JVZoo
         # subscription bought under this email before the account existed.
         _user = store.get_or_create_user(conn, user_id)
