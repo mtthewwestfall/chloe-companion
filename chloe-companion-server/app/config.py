@@ -102,8 +102,9 @@ TRIAL_MESSAGES = 100
 
 # Free verified-signup grant (2026-09-30, per user): the first
 # FREE_SIGNUP_CAP verified signups each get FREE_SIGNUP_MESSAGES free
-# messages, granted once at email-verification time.
-FREE_SIGNUP_MESSAGES = 100
+# messages, granted once at email-verification time. Set to 50 (not 100)
+# so the $0.99 trial (100 msgs) stays a real upgrade.
+FREE_SIGNUP_MESSAGES = 50
 FREE_SIGNUP_CAP = 200
 
 # ---------------------------------------------------------------------------

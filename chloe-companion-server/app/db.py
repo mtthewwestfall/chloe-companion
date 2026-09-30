@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS trial_grants (
 );
 
 -- Free verified-signup grant (2026-09-30): one row per user that received
--- the first-FREE_SIGNUP_CAP free 100-message grant.
+-- the first-FREE_SIGNUP_CAP free 50-message grant.
 CREATE TABLE IF NOT EXISTS free_grants (
     user_id    TEXT PRIMARY KEY,
     granted_at TEXT NOT NULL DEFAULT (datetime('now')),
