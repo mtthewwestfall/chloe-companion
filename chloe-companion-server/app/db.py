@@ -110,6 +110,20 @@ CREATE TABLE IF NOT EXISTS free_grants (
 
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
+CREATE TABLE IF NOT EXISTS local_characters (
+    id               TEXT PRIMARY KEY,   -- slug, lowercase, e.g. 'nova'
+    name             TEXT NOT NULL,
+    avatar_url       TEXT NOT NULL DEFAULT '',
+    persona          TEXT NOT NULL DEFAULT '',
+    companion_voice  TEXT NOT NULL DEFAULT 'liora',
+    blurb            TEXT NOT NULL DEFAULT '',
+    door_title       TEXT NOT NULL DEFAULT '',
+    sort_order       INTEGER NOT NULL DEFAULT 0,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS trust_state (
     user_id         TEXT PRIMARY KEY,
     milestone       INTEGER NOT NULL DEFAULT 5,

@@ -13,6 +13,11 @@ Only characters with kh_companion=true are exposed here. The list is cached
 Chloe is ALWAYS present via a built-in fallback so the companion never
 breaks when the Keyhole backend is down.
 
+Companion-local girls (2026-09-30): the admin panel's Girls tab stores extra
+characters in the companion DB (local_characters). They are merged into the
+roster on every refresh — a local girl with the same id as a Keyhole girl
+overrides it. The 'chloe' id is reserved and can never be added locally.
+
 Character dicts (internal): {id, name, avatar_url, persona,
 companion_voice, blurb, door_title, sort_order}.
 """
@@ -42,6 +47,31 @@ CHLOE_FALLBACK: dict[str, Any] = {
     "door_title": "",
     "sort_order": 0,
 }
+
+
+def _local_characters() -> list[dict[str, Any]]:
+    """Companion-local girls from the admin panel (enabled only). Never
+    raises — the roster must survive a missing table or DB hiccup."""
+    try:
+        from . import db as _db
+        conn = _db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, name, avatar_url, persona, companion_voice, blurb,"
+                " door_title, sort_order FROM local_characters "
+                "WHERE enabled = 1 ORDER BY sort_order, name"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — roster must never break on this
+        print(f"[characters] local read failed: {e}", flush=True)
+        return []
+
+
+def bust_cache() -> None:
+    """Force the next get_characters() call to refresh (after admin edits)."""
+    _cache["ts"] = 0.0
 
 
 def _fetch() -> list[dict[str, Any]]:
@@ -84,8 +114,12 @@ def get_characters(refresh: bool = False) -> list[dict[str, Any]]:
             chars = _cache["chars"] or []
         else:
             _cache["chars"] = chars
+        _cache["local"] = _local_characters()
         _cache["ts"] = now
     chars = [dict(c) for c in _cache["chars"]]
+    for lc in _cache.get("local") or []:
+        chars = [c for c in chars if c["id"] != lc["id"]]
+        chars.append(dict(lc))
     if not any(c["id"] == "chloe" for c in chars):
         chars.append(dict(CHLOE_FALLBACK))
     chars.sort(key=lambda c: (0 if c["id"] == "chloe" else 1, c.get("sort_order") or 0))

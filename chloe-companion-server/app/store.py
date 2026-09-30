@@ -486,3 +486,119 @@ def conversation_history(conn: sqlite3.Connection, user_id: str, limit: int = 50
             (user_id, character_id, limit),
         ).fetchall()
     ][::-1]
+
+
+# ---------------------------------------------------------------------------
+# Admin panel (2026-09-30): account listing + companion-local characters.
+# ---------------------------------------------------------------------------
+
+def list_accounts(conn: sqlite3.Connection, limit: int = 200) -> list[dict[str, Any]]:
+    """Newest-first user rows for the admin Accounts tab, each with a
+    last-active timestamp (latest conversation turn, if any)."""
+    rows = conn.execute(
+        "SELECT user_id, name, email, email_verified_at, tier, "
+        "messages_remaining, voice_notes_remaining, messages_used_total, "
+        "created_at FROM users ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        last = conn.execute(
+            "SELECT MAX(created_at) AS m FROM conversation WHERE user_id = ?",
+            (d["user_id"],),
+        ).fetchone()
+        d["last_active_at"] = last["m"] if last else None
+        d["verified"] = bool(d.get("email_verified_at"))
+        out.append(d)
+    return out
+
+
+def account_stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    total = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    verified = conn.execute(
+        "SELECT COUNT(*) AS n FROM users WHERE email_verified_at IS NOT NULL"
+    ).fetchone()["n"]
+    tiers: dict[str, int] = {}
+    for r in conn.execute(
+        "SELECT tier, COUNT(*) AS n FROM users GROUP BY tier"
+    ).fetchall():
+        tiers[r["tier"] or "basic"] = r["n"]
+    paid = conn.execute(
+        "SELECT COUNT(DISTINCT user_id) AS n FROM stripe_customers"
+    ).fetchone()["n"] if _table_exists(conn, "stripe_customers") else 0
+    jvzoo_paid = conn.execute(
+        "SELECT COUNT(DISTINCT COALESCE(user_id, email)) AS n "
+        "FROM jvzoo_subscriptions WHERE status = 'active'"
+    ).fetchone()["n"] if _table_exists(conn, "jvzoo_subscriptions") else 0
+    return {
+        "total": total,
+        "verified": verified,
+        "by_tier": tiers,
+        "stripe_paid_users": paid,
+        "jvzoo_active_subs": jvzoo_paid,
+    }
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+    )
+
+
+def list_local_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, name, avatar_url, persona, companion_voice, blurb, "
+            "door_title, sort_order, enabled, created_at, updated_at "
+            "FROM local_characters ORDER BY sort_order, name"
+        ).fetchall()
+    ]
+
+
+def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> dict[str, Any]:
+    """Insert or replace a companion-local character. `id` must already be
+    a clean slug; raises ValueError on the reserved 'chloe' id."""
+    cid = (char.get("id") or "").strip().lower()
+    if not cid or cid == "chloe":
+        raise ValueError("character id must be a non-empty slug other than 'chloe'")
+    conn.execute(
+        "INSERT INTO local_characters "
+        "(id, name, avatar_url, persona, companion_voice, blurb, door_title, "
+        " sort_order, enabled, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "name=excluded.name, avatar_url=excluded.avatar_url, "
+        "persona=excluded.persona, companion_voice=excluded.companion_voice, "
+        "blurb=excluded.blurb, door_title=excluded.door_title, "
+        "sort_order=excluded.sort_order, enabled=excluded.enabled, "
+        "updated_at=datetime('now')",
+        (
+            cid,
+            (char.get("name") or cid).strip(),
+            (char.get("avatar_url") or "").strip(),
+            (char.get("persona") or "").strip(),
+            (char.get("companion_voice") or "liora").strip() or "liora",
+            (char.get("blurb") or "").strip(),
+            (char.get("door_title") or "").strip(),
+            int(char.get("sort_order") or 0),
+            1 if char.get("enabled", True) else 0,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM local_characters WHERE id = ?", (cid,)
+    ).fetchone()
+    return dict(row)
+
+
+def delete_local_character(conn: sqlite3.Connection, char_id: str) -> bool:
+    cur = conn.execute(
+        "DELETE FROM local_characters WHERE id = ?", ((char_id or "").strip().lower(),)
+    )
+    conn.commit()
+    return cur.rowcount > 0

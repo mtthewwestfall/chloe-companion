@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import hmac
 import json
+import re
 import sqlite3
 import time
 import urllib.parse
@@ -93,6 +95,29 @@ class NameIn(BaseModel):
     name: str
 
 
+class GirlIn(BaseModel):
+    id: str = ""          # optional slug; derived from name when blank
+    name: str
+    avatar_url: str = ""
+    persona: str = ""
+    companion_voice: str = "liora"
+    blurb: str = ""
+    door_title: str = ""
+    sort_order: int = 0
+    enabled: bool = True
+
+
+class GirlUpdate(BaseModel):
+    name: str | None = None
+    avatar_url: str | None = None
+    persona: str | None = None
+    companion_voice: str | None = None
+    blurb: str | None = None
+    door_title: str | None = None
+    sort_order: int | None = None
+    enabled: bool | None = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -109,7 +134,7 @@ def _current_user_id(request: Request) -> str:
     """Resolve the Bearer session token to a user_id. 401 when missing or
     unknown — this is what keeps the app login-gated (no free use)."""
     token = auth.bearer_token(request.headers.get("authorization"))
-    if not token:
+    if not expected:
         raise HTTPException(status_code=401, detail="login_required")
     conn = _conn()
     try:
@@ -221,6 +246,130 @@ def list_characters():
     list (kh_companion=true), cached ~5 minutes. Chloe is always first and
     always present (built-in fallback when the Keyhole backend is down)."""
     return {"characters": characters.public_list()}
+
+
+# ---------------------------------------------------------------------------
+# Admin panel (2026-09-30): /admin.html "Accounts" + "Girls" tabs.
+# Guarded by the ADMIN_TOKEN env var via the X-Admin-Token header.
+# ---------------------------------------------------------------------------
+def _require_admin(request: Request) -> None:
+    expected = config.ADMIN_TOKEN
+    if not expected:
+        raise HTTPException(status_code=503, detail="admin_disabled")
+    provided = request.headers.get("x-admin-token", "")
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return slug or "girl"
+
+
+def _admin_accounts() -> dict:
+    conn = _conn()
+    try:
+        return {"stats": store.account_stats(conn),
+                "accounts": store.list_accounts(conn)}
+    finally:
+        conn.close()
+
+
+def _admin_girls() -> dict:
+    remote = characters.get_characters()
+    conn = _conn()
+    try:
+        local = store.list_local_characters(conn)
+    finally:
+        conn.close()
+    local_ids = {c["id"] for c in local}
+    girls = []
+    for c in remote:
+        girls.append({**{k: c.get(k) for k in
+                         ("id", "name", "avatar_url", "persona",
+                          "companion_voice", "blurb", "door_title",
+                          "sort_order")},
+                      "source": "local" if c["id"] in local_ids else
+                                ("builtin" if c["id"] == "chloe" else "keyhole")})
+    return {"girls": girls}
+
+
+def _admin_create_girl(data: dict) -> dict:
+    cid = (data.get("id") or "").strip().lower() or _slugify(data.get("name", ""))
+    if cid == "chloe":
+        raise HTTPException(status_code=400, detail="chloe_id_reserved")
+    conn = _conn()
+    try:
+        girl = store.upsert_local_character(conn, {**data, "id": cid})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+    characters.bust_cache()
+    return {"girl": girl}
+
+
+def _admin_update_girl(girl_id: str, data: dict) -> dict:
+    cid = (girl_id or "").strip().lower()
+    if cid == "chloe":
+        raise HTTPException(status_code=400, detail="chloe_id_reserved")
+    conn = _conn()
+    try:
+        existing = next((c for c in store.list_local_characters(conn)
+                         if c["id"] == cid), None)
+        if not existing:
+            raise HTTPException(status_code=404, detail="not_found")
+        merged = {**existing, **{k: v for k, v in data.items()
+                                 if v is not None}, "id": cid}
+        girl = store.upsert_local_character(conn, merged)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+    characters.bust_cache()
+    return {"girl": girl}
+
+
+def _admin_delete_girl(girl_id: str) -> dict:
+    conn = _conn()
+    try:
+        ok = store.delete_local_character(conn, girl_id)
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(status_code=404, detail="not_found")
+    characters.bust_cache()
+    return {"ok": True}
+
+
+@app.get("/api/v1/admin/accounts")
+def admin_accounts(request: Request):
+    _require_admin(request)
+    return _admin_accounts()
+
+
+@app.get("/api/v1/admin/girls")
+def admin_girls(request: Request):
+    _require_admin(request)
+    return _admin_girls()
+
+
+@app.post("/api/v1/admin/girls")
+def admin_create_girl(body: GirlIn, request: Request):
+    _require_admin(request)
+    return _admin_create_girl(body.model_dump())
+
+
+@app.put("/api/v1/admin/girls/{girl_id}")
+def admin_update_girl(girl_id: str, body: GirlUpdate, request: Request):
+    _require_admin(request)
+    return _admin_update_girl(girl_id, body.model_dump())
+
+
+@app.delete("/api/v1/admin/girls/{girl_id}")
+def admin_delete_girl(girl_id: str, request: Request):
+    _require_admin(request)
+    return _admin_delete_girl(girl_id)
 
 
 @app.post("/api/v1/chat")

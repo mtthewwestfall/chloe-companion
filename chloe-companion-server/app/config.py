@@ -181,5 +181,14 @@ MAIL_FROM = os.environ.get("MAIL_FROM", "Chloe <hello@lockeddoor.ai>")
 PUBLIC_APP_URL = os.environ.get("PUBLIC_APP_URL", "https://companion.lockeddoor.ai").rstrip("/")
 VERIFY_TTL_HOURS = 24
 
+
+# ---------------------------------------------------------------------------
+# Admin panel (2026-09-30): browser-based admin at /admin.html with
+# "Accounts" and "Girls" tabs. Guarded by ADMIN_TOKEN (Railway env var),
+# sent as the X-Admin-Token header. Endpoints 503 until the token is set.
+# NEVER commit the real value here.
+# ---------------------------------------------------------------------------
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
 DB_PATH = os.environ.get("CHLOE_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "chloe.db"))
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

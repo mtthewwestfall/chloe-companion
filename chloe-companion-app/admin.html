@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Chloe Companion — Admin</title>
+<style>
+  :root { --bg:#0a1128; --panel:#101a3a; --line:#24305e; --text:#eef1ff;
+          --muted:#9aa3c7; --gold:#e8a94c; --green:#58d68d; --red:#e86a6a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family:-apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .tabs { display:flex; gap:8px; margin-bottom:20px; }
+  .tab { padding:10px 22px; border:1px solid var(--line); border-radius:10px;
+         background:transparent; color:var(--muted); font-size:15px; cursor:pointer; }
+  .tab.active { background:var(--gold); border-color:var(--gold); color:#201500;
+                font-weight:700; }
+  .cards { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+          padding:14px 18px; min-width:130px; }
+  .card .n { font-size:26px; font-weight:700; }
+  .card .l { font-size:12px; color:var(--muted); margin-top:4px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel);
+          border-radius:12px; overflow:hidden; font-size:13px; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
+  tr:last-child td { border-bottom:none; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:20px; font-size:12px; }
+  .pill.ok { background:#123f2a; color:var(--green); }
+  .pill.no { background:#3a1a1a; color:var(--red); }
+  .pill.tier { background:#1c2547; color:var(--gold); }
+  .src { font-size:11px; padding:2px 8px; border-radius:12px; background:#1c2547;
+         color:var(--muted); }
+  .src.local { background:#123f2a; color:var(--green); }
+  .src.builtin { background:#3a2f10; color:var(--gold); }
+  .girl { display:flex; gap:14px; align-items:center; background:var(--panel);
+          border:1px solid var(--line); border-radius:12px; padding:12px 16px;
+          margin-bottom:10px; }
+  .girl img { width:52px; height:52px; border-radius:50%; object-fit:cover;
+              background:#1c2547; }
+  .girl .meta { flex:1; min-width:0; }
+  .girl .nm { font-weight:700; }
+  .girl .id { color:var(--muted); font-size:12px; }
+  .girl .blurb { color:var(--muted); font-size:13px; margin-top:2px;
+                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .btn { padding:8px 16px; border-radius:8px; border:1px solid var(--line);
+         background:#1c2547; color:var(--text); cursor:pointer; font-size:14px; }
+  .btn.primary { background:var(--gold); border-color:var(--gold); color:#201500;
+                 font-weight:700; }
+  .btn.danger { background:transparent; border-color:#5e2430; color:var(--red); }
+  .btn:disabled { opacity:.5; cursor:default; }
+  form.panel { background:var(--panel); border:1px solid var(--line);
+               border-radius:12px; padding:18px; margin:18px 0; }
+  form.panel h3 { margin:0 0 12px; font-size:16px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .field { flex:1; min-width:200px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .field input, .field textarea, .field select {
+    width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
+    background:#0b1330; color:var(--text); font-size:14px; }
+  .field textarea { min-height:90px; resize:vertical; }
+  #gate { max-width:380px; margin:80px auto; text-align:center;
+          background:var(--panel); border:1px solid var(--line);
+          border-radius:14px; padding:32px 28px; }
+  #gate input { width:100%; padding:11px; border-radius:8px; margin:14px 0;
+                border:1px solid var(--line); background:#0b1330; color:var(--text);
+                font-size:15px; text-align:center; }
+  #gate .err { color:var(--red); font-size:13px; min-height:20px; }
+  .hidden { display:none !important; }
+  .note { color:var(--muted); font-size:12px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div id="gate">
+    <h1>Admin</h1>
+    <div class="sub">Chloe Companion</div>
+    <input id="tokenInput" type="password" placeholder="Admin token" autocomplete="off">
+    <div class="err" id="gateErr"></div>
+    <button class="btn primary" id="gateBtn" style="width:100%">Enter</button>
+  </div>
+
+  <div id="app" class="hidden">
+    <h1>Chloe Companion — Admin</h1>
+    <div class="sub">Accounts &amp; girls roster</div>
+    <div class="tabs">
+      <button class="tab active" data-tab="accounts">Accounts</button>
+      <button class="tab" data-tab="girls">Girls</button>
+    </div>
+
+    <div id="tab-accounts">
+      <div class="cards" id="statCards"></div>
+      <table>
+        <thead><tr>
+          <th>Name</th><th>Email</th><th>Tier</th><th>Verified</th>
+          <th>Msgs left</th><th>Voice left</th><th>Msgs used</th><th>Created</th><th>Last active</th>
+        </tr></thead>
+        <tbody id="acctBody"><tr><td colspan="9">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div id="tab-girls" class="hidden">
+      <div id="girlList"><p class="sub">Loading…</p></div>
+      <form class="panel" id="girlForm">
+        <h3 id="girlFormTitle">Add a new girl</h3>
+        <input type="hidden" id="gEditId" value="">
+        <div class="row">
+          <div class="field"><label>Name *</label><input id="gName" required maxlength="40"></div>
+          <div class="field"><label>ID slug (optional — made from name)</label><input id="gId" maxlength="32" placeholder="e.g. nova"></div>
+        </div>
+        <div class="field" style="margin-bottom:12px"><label>Persona — how she talks, who she is *</label>
+          <textarea id="gPersona" placeholder="e.g. Playful stargazer, teases him about…"></textarea></div>
+        <div class="row">
+          <div class="field"><label>Avatar URL</label><input id="gAvatar" placeholder="https://…"></div>
+          <div class="field"><label>Voice</label>
+            <select id="gVoice"><option value="liora">liora</option></select></div>
+          <div class="field"><label>Sort order</label><input id="gSort" type="number" value="10"></div>
+        </div>
+        <div class="field" style="margin-bottom:12px"><label>Blurb (short tagline)</label>
+          <input id="gBlurb" maxlength="140"></div>
+        <div class="row">
+          <button type="submit" class="btn primary" id="gSubmit">Add girl</button>
+          <button type="button" class="btn hidden" id="gCancel">Cancel edit</button>
+        </div>
+        <div class="note">Girls added here are companion-local: they appear in the app's
+        character picker immediately and remember him separately. Chloe herself can't be edited or removed here.</div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = location.origin;
+const store = {
+  get token() { return sessionStorage.getItem('cc_admin_token') || ''; },
+  set token(v) { sessionStorage.setItem('cc_admin_token', v); }
+};
+
+async function api(path, opts = {}) {
+  const r = await fetch(API + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json',
+               'X-Admin-Token': store.token, ...(opts.headers || {}) }
+  });
+  if (r.status === 401 || r.status === 503) throw new Error('auth');
+  if (!r.ok) { const t = await r.text(); throw new Error(t || r.status); }
+  return r.status === 204 ? null : r.json();
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtDate(s) { if (!s) return '—'; const d = new Date(s.replace(' ', 'T') + 'Z');
+  return isNaN(d) ? '—' : d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+
+// -- gate ---------------------------------------------------------------
+async function tryLogin() {
+  const err = document.getElementById('gateErr');
+  err.textContent = '';
+  try {
+    await api('/api/v1/admin/accounts');
+    document.getElementById('gate').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    loadAccounts(); loadGirls();
+  } catch (e) {
+    err.textContent = e.message === 'auth' ? 'Wrong token.' : 'Admin not available: ' + e.message;
+  }
+}
+document.getElementById('gateBtn').onclick = () => {
+  store.token = document.getElementById('tokenInput').value.trim();
+  tryLogin();
+};
+document.getElementById('tokenInput').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('gateBtn').click(); });
+if (store.token) { document.getElementById('tokenInput').value = store.token; tryLogin(); }
+
+// -- tabs ---------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  document.getElementById('tab-accounts').classList.toggle('hidden', t.dataset.tab !== 'accounts');
+  document.getElementById('tab-girls').classList.toggle('hidden', t.dataset.tab !== 'girls');
+});
+
+// -- accounts -----------------------------------------------------------
+async function loadAccounts() {
+  const body = document.getElementById('acctBody');
+  try {
+    const { stats, accounts } = await api('/api/v1/admin/accounts');
+    const tiers = Object.entries(stats.by_tier).map(([k, v]) => `${k}: ${v}`).join(' · ');
+    document.getElementById('statCards').innerHTML = [
+      [stats.total, 'total users'], [stats.verified, 'verified'],
+      [stats.stripe_paid_users + stats.jvzoo_active_subs, 'paying'],
+      [tiers || '—', 'by tier'],
+    ].map(([n, l]) => `<div class="card"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join('');
+    body.innerHTML = accounts.length ? accounts.map(a => `<tr>
+      <td>${esc(a.name) || '—'}</td><td>${esc(a.email) || '—'}</td>
+      <td><span class="pill tier">${esc(a.tier)}</span></td>
+      <td><span class="pill ${a.verified ? 'ok' : 'no'}">${a.verified ? 'yes' : 'no'}</span></td>
+      <td>${a.messages_remaining}</td><td>${a.voice_notes_remaining}</td>
+      <td>${a.messages_used_total}</td>
+      <td>${fmtDate(a.created_at)}</td><td>${fmtDate(a.last_active_at)}</td>
+    </tr>`).join('') : '<tr><td colspan="9">No accounts yet.</td></tr>';
+  } catch (e) { body.innerHTML = `<tr><td colspan="9">Failed to load: ${esc(e.message)}</td></tr>`; }
+}
+
+// -- girls --------------------------------------------------------------
+async function loadGirls() {
+  const list = document.getElementById('girlList');
+  try {
+    const { girls } = await api('/api/v1/admin/girls');
+    list.innerHTML = girls.map(g => `
+      <div class="girl">
+        ${g.avatar_url ? `<img src="${esc(g.avatar_url)}" alt="">` : '<img alt="">'}
+        <div class="meta">
+          <div class="nm">${esc(g.name)} <span class="src ${g.source}">${esc(g.source)}</span></div>
+          <div class="id">id: ${esc(g.id)}${g.sort_order ? ' · order ' + g.sort_order : ''}</div>
+          ${g.blurb ? `<div class="blurb">${esc(g.blurb)}</div>` : ''}
+        </div>
+        ${g.source === 'local' ? `
+          <button class="btn" data-edit="${esc(g.id)}">Edit</button>
+          <button class="btn danger" data-del="${esc(g.id)}">Delete</button>` : ''}
+      </div>`).join('') || '<p class="sub">No girls found.</p>';
+    list.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => startEdit(b.dataset.edit, girls));
+    list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => delGirl(b.dataset.del, girls));
+  } catch (e) { list.innerHTML = `<p class="sub">Failed to load: ${esc(e.message)}</p>`; }
+}
+
+function startEdit(id, girls) {
+  const g = girls.find(x => x.id === id); if (!g) return;
+  document.getElementById('gEditId').value = g.id;
+  document.getElementById('gName').value = g.name;
+  document.getElementById('gId').value = g.id;
+  document.getElementById('gId').disabled = true;
+  document.getElementById('gPersona').value = g.persona || '';
+  document.getElementById('gAvatar').value = g.avatar_url || '';
+  document.getElementById('gBlurb').value = g.blurb || '';
+  document.getElementById('gSort').value = g.sort_order || 0;
+  document.getElementById('girlFormTitle').textContent = 'Edit ' + g.name;
+  document.getElementById('gSubmit').textContent = 'Save changes';
+  document.getElementById('gCancel').classList.remove('hidden');
+  document.getElementById('girlForm').scrollIntoView({ behavior: 'smooth' });
+}
+function resetForm() {
+  document.getElementById('girlForm').reset();
+  document.getElementById('gEditId').value = '';
+  document.getElementById('gId').disabled = false;
+  document.getElementById('girlFormTitle').textContent = 'Add a new girl';
+  document.getElementById('gSubmit').textContent = 'Add girl';
+  document.getElementById('gCancel').classList.add('hidden');
+}
+document.getElementById('gCancel').onclick = resetForm;
+
+document.getElementById('girlForm').onsubmit = async e => {
+  e.preventDefault();
+  const editId = document.getElementById('gEditId').value;
+  const payload = {
+    id: document.getElementById('gId').value.trim(),
+    name: document.getElementById('gName').value.trim(),
+    persona: document.getElementById('gPersona').value.trim(),
+    avatar_url: document.getElementById('gAvatar').value.trim(),
+    companion_voice: document.getElementById('gVoice').value,
+    blurb: document.getElementById('gBlurb').value.trim(),
+    sort_order: parseInt(document.getElementById('gSort').value || '0', 10),
+    enabled: true
+  };
+  if (!payload.name) return;
+  const btn = document.getElementById('gSubmit');
+  btn.disabled = true;
+  try {
+    if (editId) await api('/api/v1/admin/girls/' + encodeURIComponent(editId),
+                          { method: 'PUT', body: JSON.stringify(payload) });
+    else await api('/api/v1/admin/girls', { method: 'POST', body: JSON.stringify(payload) });
+    resetForm(); loadGirls();
+  } catch (err) { alert('Failed: ' + err.message); }
+  btn.disabled = false;
+};
+
+async function delGirl(id, girls) {
+  const g = girls.find(x => x.id === id);
+  if (!confirm(`Delete ${g ? g.name : id}? Her memories stay in the database but she'll leave the roster.`)) return;
+  try { await api('/api/v1/admin/girls/' + encodeURIComponent(id), { method: 'DELETE' }); loadGirls(); }
+  catch (e) { alert('Failed: ' + e.message); }
+}
+</script>
+</body>
+</html>
