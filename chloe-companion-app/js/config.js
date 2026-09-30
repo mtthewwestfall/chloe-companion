@@ -1,5 +1,8 @@
 /* ============================================================
    CONFIG — single source of truth for environment values.
+
+   Auth era (2026-09-30): the app requires an email login — there is no
+   demo user and no anonymous device id, so DEMO_USER_ID is gone.
    ============================================================ */
 const CONFIG = {
   // Companion backend base URL. When the app is served over HTTP(S) — e.g.
@@ -11,14 +14,13 @@ const CONFIG = {
     ? location.origin
     : 'http://localhost:8471',
 
-  // *** REPLACE BEFORE SHIPPING ***
-  // Deep-link target for the "Shows" button / ticket links.
-  // Placeholder only — NOT wired to any live site.
-  WEBSITE_URL: 'https://example.com',
-
-  // Fixed identity used while the real backend is unreachable.
-  DEMO_USER_ID: 'demo_user',
+  // Deep-link target for the "Shows" button / ticket links fallback.
+  WEBSITE_URL: 'https://keyhole.lockeddoor.ai',
 
   APP_NAME: 'Chloe — AI Companion',
-  REQUEST_TIMEOUT_MS: 2500
+  REQUEST_TIMEOUT_MS: 2500,
+
+  // Signup / resend-verification send an email through Resend — allow a
+  // longer budget than the normal API timeout.
+  AUTH_EMAIL_TIMEOUT_MS: 30000
 };

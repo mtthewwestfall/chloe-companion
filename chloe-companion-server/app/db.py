@@ -20,6 +20,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id              TEXT PRIMARY KEY,
     name                 TEXT,
+    email                TEXT,  -- NULL for pre-auth rows (2026-09-30)
+    password_hash        TEXT,
+    email_verified_at    TEXT,
     tier                 TEXT NOT NULL DEFAULT 'basic',
     messages_remaining   INTEGER NOT NULL DEFAULT 300,
     voice_notes_remaining INTEGER NOT NULL DEFAULT 0,
@@ -43,6 +46,7 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
 CREATE INDEX IF NOT EXISTS idx_memories_user_char ON memories(user_id, character_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
 CREATE TABLE IF NOT EXISTS conversation (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +86,23 @@ CREATE TABLE IF NOT EXISTS trust_state (
     milestone       INTEGER NOT NULL DEFAULT 5,
     stage_entered_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- Email auth (2026-09-30): login is required, no anonymous use. Sessions
+-- are opaque tokens stored server-side; verification tokens are single-use.
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+CREATE TABLE IF NOT EXISTS email_verifications (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
@@ -158,6 +179,26 @@ def _migrate_character_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_auth_columns(conn: sqlite3.Connection) -> None:
+    """2026-09-30: email login required (no anonymous use). Existing installs
+    get email/password_hash/email_verified_at on users; pre-existing rows
+    keep NULL email (they can never log in — no paying users existed).
+    Runs BEFORE the SCHEMA script.
+    """
+    if _table_exists(conn, "users"):
+        for column, ddl in (
+            ("email", "TEXT"),
+            ("password_hash", "TEXT"),
+            ("email_verified_at", "TEXT"),
+        ):
+            if not _column_exists(conn, "users", column):
+                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)"
+        )
+    conn.commit()
+
+
 def connect(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or config.DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -175,6 +216,7 @@ def init_db(db_path: str | None = None) -> None:
         # installs the tables don't exist yet and the schema script creates
         # them with the column directly.
         _migrate_character_columns(conn)
+        _migrate_auth_columns(conn)
         conn.executescript(SCHEMA)
         conn.commit()
     finally:

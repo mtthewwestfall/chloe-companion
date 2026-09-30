@@ -1,10 +1,23 @@
 """HTTP API — the exact contract the companion app is built against.
 
-POST /api/v1/chat {user_id, message, character_id?}
+AUTH (2026-09-30): email login is REQUIRED — no anonymous/free use. Every
+endpoint below marked [auth] needs `Authorization: Bearer <session token>`.
+POST /api/v1/auth/signup {email, password, name?} -> {ok, verify_sent}
+POST /api/v1/auth/login {email, password} -> {ok, token, user_id, name, tier}
+POST /api/v1/auth/logout [auth] -> {ok}
+GET  /api/v1/auth/me [auth] -> {user_id, name, tier, messages_remaining, ...}
+POST /api/v1/auth/name [auth] {name} -> {ok, name}
+GET  /api/v1/auth/verify?token= -> 303 redirect to the app with #session=
+POST /api/v1/auth/resend-verification {email} -> {ok}
+
+POST /api/v1/chat [auth] {message, character_id?}
   -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining, character_id}
+GET  /api/v1/chat/history [auth] ?character_id=&limit=
+  -> {turns:[{role, text, created_at}]}  (oldest first; restores the saved
+     conversation so logging back in picks up where you left off)
 GET  /api/v1/characters
   -> {characters:[{id, name, avatar_url}]}  (admin roster, kh_companion only)
-GET  /api/v1/me?user_id=
+GET  /api/v1/me?user_id=  [auth — legacy; user_id param ignored, token wins]
   -> {user_id, name, tier, messages_remaining, voice_notes_remaining, proactive_enabled}
 GET  /api/v1/tiers
   -> {plans:[{key,name,price_usd,interval,messages_per_month,
@@ -12,8 +25,8 @@ GET  /api/v1/tiers
               photo_drops,proactive,checkout_url}]}
 GET  /api/v1/shows
   -> {shows:[{id,title,starts_at,ticket_url}]}
-POST /api/v1/memory/export {user_id} -> {memories:[...]}
-POST /api/v1/memory/delete {user_id} -> {ok:true}
+POST /api/v1/memory/export [auth] {character_id?} -> {memories:[...]}
+POST /api/v1/memory/delete [auth] {character_id?} -> {ok:true}
 POST /api/v1/stripe/webhook  (live: Stripe-signature-verified; credits message banks on purchase/renewal)
 """
 from __future__ import annotations
@@ -21,37 +34,58 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 import time
 import urllib.request
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from . import brain, characters, config, db, photos, shows, store, trust, voice
+from . import auth, brain, characters, config, db, photos, shows, store, trust, voice
 
-app = FastAPI(title="Chloe Companion API", version="0.3.0-multichar")
+app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
 
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
 class ChatIn(BaseModel):
-    user_id: str
+    user_id: str = ""  # legacy: ignored — the Bearer token identifies the user
     message: str
     character_id: str = "chloe"
 
 
 class UserIdIn(BaseModel):
-    user_id: str
+    user_id: str = ""  # legacy: ignored — the Bearer token identifies the user
     character_id: str = "chloe"
 
 
 class MemoryWriteIn(BaseModel):
-    user_id: str
+    user_id: str = ""  # legacy: ignored — the Bearer token identifies the user
     mem_type: str
     text: str
     character_id: str = "chloe"
+
+
+class SignupIn(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class ResendIn(BaseModel):
+    email: str
+
+
+class NameIn(BaseModel):
+    name: str
 
 
 # ---------------------------------------------------------------------------
@@ -61,15 +95,77 @@ def _conn():
     return db.connect()
 
 
-def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = None) -> dict[str, Any]:
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?"))
+
+
+def _current_user_id(request: Request) -> str:
+    """Resolve the Bearer session token to a user_id. 401 when missing or
+    unknown — this is what keeps the app login-gated (no free use)."""
+    token = auth.bearer_token(request.headers.get("authorization"))
+    if not token:
+        raise HTTPException(status_code=401, detail="login_required")
+    conn = _conn()
+    try:
+        user_id = store.get_session_user_id(conn, token)
+    finally:
+        conn.close()
+    if not user_id:
+        raise HTTPException(status_code=401, detail="login_required")
+    return user_id
+
+
+def _user_summary(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "user_id": user["user_id"],
+        "name": user["name"],
+        "email": user.get("email"),
+        "tier": user["tier"],
+        "messages_remaining": user["messages_remaining"],
+        "voice_notes_remaining": user["voice_notes_remaining"],
+        "proactive_enabled": bool(user["proactive_enabled"]),
+    }
+
+
+def _send_verify_email(conn: Any, user: dict[str, Any]) -> None:
+    """Create a fresh verification token and email it. Raises HTTPException
+    502 when email can't be sent (user can retry via resend)."""
+    if not config.RESEND_API_KEY:
+        print(f"[auth] RESEND_API_KEY unset; cannot email {user.get('email')}",
+              flush=True)
+        raise HTTPException(status_code=502, detail="email_unavailable")
+    token = auth.new_token()
+    store.create_email_verification(conn, user["user_id"], token,
+                                    config.VERIFY_TTL_HOURS)
+    verify_url = (f"{config.PUBLIC_APP_URL}/api/v1/auth/verify"
+                  f"?token={token}")
+    try:
+        auth.send_verification_email(
+            user["email"], user["name"] or "there", verify_url,
+            config.RESEND_API_KEY, config.MAIL_FROM)
+    except RuntimeError as e:
+        print(f"[auth] verification email failed for {user.get('email')}: {e}",
+              flush=True)
+        raise HTTPException(status_code=502, detail="email_failed")
+
+
+def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = None,
+                      unpaid: bool = False) -> dict[str, Any]:
     # Graceful refusal + upsell nudge. Never crashes, never goes negative.
     # Chloe's exact lines are preserved; other characters get a generic
     # warm version (no upsell wording tied to Chloe's voice).
+    # `unpaid` = this account has never paid anything (no subscription, no
+    # trial) — point at the $0.99 trial / $9.99 plan, never the Plus upgrade.
     char_id = (character or {}).get("id", "chloe")
     char_name = (character or {}).get("name", "Chloe")
     tier = user["tier"]
     if char_id == "chloe":
-        if tier == "basic":
+        if unpaid:
+            nudge = ("i'd love to keep talking, babe — but my message jar's "
+                     "empty. try me for $0.99, or grab the $9.99 plan and "
+                     "i'm yours all month.")
+        elif tier == "basic":
             nudge = ("i'm out of messages for tonight, babe — "
                      "want me to stay up with you? plus is $19.99 and i get "
                      "voice notes too.")
@@ -80,7 +176,11 @@ def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = N
             nudge = ("i've used up this month's messages — they'll top back up "
                      "on your renewal. i'll be right here.")
     else:
-        if tier == "basic":
+        if unpaid:
+            nudge = (f"i'd love to keep talking — but i'm out of messages. "
+                     f"try the $0.99 trial, or the $9.99 plan for a whole "
+                     f"month of me.")
+        elif tier == "basic":
             nudge = (f"i'm out of messages for tonight — "
                      f"want more of me? {char_name} plus is $19.99 and i get "
                      "voice notes too.")
@@ -119,46 +219,48 @@ def list_characters():
 
 
 @app.post("/api/v1/chat")
-def chat(body: ChatIn):
+def chat(body: ChatIn, request: Request):
+    user_id = _current_user_id(request)  # login required — no free use
     conn = _conn()
     try:
         # Resolve the character (unknown ids fall back to Chloe).
         character = characters.get_character(body.character_id)
         cid = character["id"]
 
-        user = store.get_or_create_user(conn, body.user_id)
-        store.log_turn(conn, body.user_id, "user", body.message, cid)
+        user = store.get_or_create_user(conn, user_id)
+        store.log_turn(conn, user_id, "user", body.message, cid)
 
-        if not store.consume_message(conn, body.user_id):
-            return _empty_bank_reply(user, character)
+        if not store.consume_message(conn, user_id):
+            return _empty_bank_reply(user, character,
+                                     unpaid=not store.has_paid(conn, user_id))
 
         # Trust posture: advance the stage clock (at most one stage per
         # check). This NEVER gates warmth — only how much of herself she
         # has volunteered so far.
-        trust.maybe_advance(conn, body.user_id)
+        trust.maybe_advance(conn, user_id)
 
         # Brain context: 3-layer memory stack (recent turns -> rolling
         # digest -> pinned facts + relevant memories) + trust posture line.
         # Memory is namespaced per character: each one remembers separately.
-        context = brain.build_brain_context(conn, body.user_id, user, body.message,
+        context = brain.build_brain_context(conn, user_id, user, body.message,
                                             character)
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
         reply_text = brain.compose_reply(body.message, context, cid)
-        store.log_turn(conn, body.user_id, cid, reply_text, cid)
+        store.log_turn(conn, user_id, cid, reply_text, cid)
 
         # Slower brain path: learn durable typed memories from his message
         # and refresh the rolling digest. Runs after the reply is sent.
-        brain.learn_from_turn(conn, body.user_id, body.message, cid)
+        brain.learn_from_turn(conn, user_id, body.message, cid)
 
         # Voice note: stubbed/disabled by default -> null. Uses the
         # character's xAI voice (Chloe: liora).
         voice_note_url = None
         tier_cfg = config.TIERS[user["tier"]]
         if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
-            if store.consume_voice_note(conn, body.user_id):
+            if store.consume_voice_note(conn, user_id):
                 voice_note_url = voice.maybe_generate_voice_note(
-                    reply_text, body.user_id, character.get("companion_voice") or "liora")
+                    reply_text, user_id, character.get("companion_voice") or "liora")
 
         # Photo drop: tier-gated serving hook. Chloe's curated drops only —
         # other characters get no photos (never Chloe's photos on them).
@@ -170,7 +272,7 @@ def chat(body: ChatIn):
             elif drop:
                 photo_url = f"PLACEHOLDER:{drop['id']}"
 
-        user = store.get_or_create_user(conn, body.user_id)
+        user = store.get_or_create_user(conn, user_id)
         return {
             "reply_text": reply_text,
             "voice_note_url": voice_note_url,
@@ -182,19 +284,161 @@ def chat(body: ChatIn):
         conn.close()
 
 
+@app.get("/api/v1/chat/history")
+def chat_history(request: Request, character_id: str = "chloe", limit: int = 50):
+    """Saved conversation with a character, oldest first. Auth required.
+    The app loads this on login so the chat picks up where you left off
+    instead of resetting to a blank screen."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        try:
+            limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            limit = 50
+        return {"turns": store.conversation_history(
+            conn, user_id, limit, character_id or "chloe")}
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/me")
-def me(user_id: str):
+def me(user_id: str = "", request: Request = None):
+    # Legacy route: the query param is ignored — the Bearer token identifies
+    # the user. Login required.
+    auth_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, auth_id)
+        return _user_summary(user)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Email auth (2026-09-30): login required, no anonymous/free use.
+# ---------------------------------------------------------------------------
+@app.post("/api/v1/auth/signup")
+def auth_signup(body: SignupIn, request: Request):
+    if auth.rate_limited("signup:" + _client_ip(request)):
+        raise HTTPException(status_code=429, detail="too_many_attempts")
+    email = auth.normalize_email(body.email)
+    if not auth.valid_email(email):
+        raise HTTPException(status_code=400, detail="invalid_email")
+    if not auth.valid_password(body.password):
+        raise HTTPException(status_code=400,
+                            detail="password must be 8-128 characters")
+    name = (body.name or "").strip()[:60] or None
+    conn = _conn()
+    try:
+        existing = store.get_user_by_email(conn, email)
+        if existing:
+            if existing.get("email_verified_at"):
+                raise HTTPException(status_code=409, detail="email_taken")
+            # Unverified: rotate the verification token and resend.
+            _send_verify_email(conn, existing)
+            return {"ok": True, "verify_sent": True, "resent": True}
+        user_id = "cm_" + auth.new_token(12).replace("-", "").replace("_", "")[:16]
+        user = store.create_user_with_email(conn, user_id, email,
+                                            auth.hash_password(body.password), name)
+        _send_verify_email(conn, user)
+        return {"ok": True, "verify_sent": True}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="email_taken")
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/auth/verify")
+def auth_verify(token: str = ""):
+    conn = _conn()
+    try:
+        user_id = store.consume_email_verification(conn, token) if token else None
+        if not user_id:
+            raise HTTPException(status_code=400, detail="invalid_or_expired_link")
+        store.set_email_verified(conn, user_id)
+        session = auth.new_token()
+        store.create_session(conn, user_id, session)
+    finally:
+        conn.close()
+    # Land back in the app, handing it the session in the URL hash (the
+    # frontend picks it up, stores it, and clears the hash).
+    return RedirectResponse(
+        url=f"{config.PUBLIC_APP_URL}/#session={session}", status_code=303)
+
+
+@app.post("/api/v1/auth/resend-verification")
+def auth_resend(body: ResendIn, request: Request):
+    if auth.rate_limited("resend:" + _client_ip(request)):
+        raise HTTPException(status_code=429, detail="too_many_attempts")
+    email = auth.normalize_email(body.email)
+    conn = _conn()
+    try:
+        user = store.get_user_by_email(conn, email) if auth.valid_email(email) else None
+        # Always return ok (don't reveal whether the email exists), but only
+        # unverified accounts actually get a new email.
+        if user and not user.get("email_verified_at"):
+            _send_verify_email(conn, user)
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/auth/login")
+def auth_login(body: LoginIn, request: Request):
+    if auth.rate_limited("login:" + _client_ip(request)):
+        raise HTTPException(status_code=429, detail="too_many_attempts")
+    email = auth.normalize_email(body.email)
+    conn = _conn()
+    try:
+        user = store.get_user_by_email(conn, email) if auth.valid_email(email) else None
+        if not user or not user.get("password_hash") or not auth.verify_password(
+                body.password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="wrong_email_or_password")
+        if not user.get("email_verified_at"):
+            raise HTTPException(status_code=403, detail="email_unverified")
+        session = auth.new_token()
+        store.create_session(conn, user["user_id"], session)
+        summary = _user_summary(user)
+        summary.update({"ok": True, "token": session})
+        return summary
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/auth/logout")
+def auth_logout(request: Request):
+    token = auth.bearer_token(request.headers.get("authorization"))
+    if token:
+        conn = _conn()
+        try:
+            store.delete_session(conn, token)
+        finally:
+            conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/v1/auth/me")
+def auth_me(request: Request):
+    user_id = _current_user_id(request)
     conn = _conn()
     try:
         user = store.get_or_create_user(conn, user_id)
-        return {
-            "user_id": user["user_id"],
-            "name": user["name"],
-            "tier": user["tier"],
-            "messages_remaining": user["messages_remaining"],
-            "voice_notes_remaining": user["voice_notes_remaining"],
-            "proactive_enabled": bool(user["proactive_enabled"]),
-        }
+        return _user_summary(user)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/auth/name")
+def auth_name(body: NameIn, request: Request):
+    user_id = _current_user_id(request)
+    name = (body.name or "").strip()[:60]
+    if not name:
+        raise HTTPException(status_code=400, detail="name_required")
+    conn = _conn()
+    try:
+        store.set_user_name(conn, user_id, name)
+        return {"ok": True, "name": name}
     finally:
         conn.close()
 
@@ -246,35 +490,38 @@ def list_tiers():
 
 
 @app.post("/api/v1/memory/export")
-def memory_export(body: UserIdIn):
+def memory_export(body: UserIdIn, request: Request):
+    user_id = _current_user_id(request)
     conn = _conn()
     try:
-        return {"memories": store.export_memories(conn, body.user_id,
+        return {"memories": store.export_memories(conn, user_id,
                                                   body.character_id or "chloe")}
     finally:
         conn.close()
 
 
 @app.post("/api/v1/memory/delete")
-def memory_delete(body: UserIdIn):
+def memory_delete(body: UserIdIn, request: Request):
+    user_id = _current_user_id(request)
     conn = _conn()
     try:
-        store.delete_all_memories(conn, body.user_id, body.character_id or "chloe")
+        store.delete_all_memories(conn, user_id, body.character_id or "chloe")
         return {"ok": True}
     finally:
         conn.close()
 
 
 @app.post("/api/v1/memory/write")
-def memory_write(body: MemoryWriteIn):
+def memory_write(body: MemoryWriteIn, request: Request):
     """Companion-internal endpoint: the brain (Phase 3) writes typed memories
     it learns mid-conversation. Typed per Thoughtspace: core/fact/preference/
     boundary/tone."""
+    user_id = _current_user_id(request)
     if body.mem_type not in store.MEM_TYPES:
         raise HTTPException(400, f"mem_type must be one of {store.MEM_TYPES}")
     conn = _conn()
     try:
-        mid = store.write_memory(conn, body.user_id, body.mem_type, body.text,
+        mid = store.write_memory(conn, user_id, body.mem_type, body.text,
                                  body.character_id or "chloe")
         return {"ok": True, "id": mid}
     finally:

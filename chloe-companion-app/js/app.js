@@ -49,6 +49,47 @@
     addMsg(who, esc(text), { caption: who === 'her' ? charDisplayName() + ' · ' + timeNow() : timeNow() });
   }
 
+  // Restore a saved turn: server stores UTC ("YYYY-MM-DD HH:MM:SS"), so
+  // parse it as UTC and show the caption in the user's local time.
+  function histDate(iso) {
+    const d = new Date(String(iso || '').replace(' ', 'T') + 'Z');
+    return isNaN(d) ? null : d;
+  }
+  function addHistoryTurn(role, text, created_at) {
+    const who = role === 'user' ? 'him' : 'her';
+    const t = histDate(created_at);
+    const stamp = t ? t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+    addMsg(who, esc(text || ''), {
+      caption: who === 'her' ? charDisplayName() + (stamp ? ' · ' + stamp : '') : stamp,
+    });
+  }
+  function historyDayDivider(created_at) {
+    const d = histDate(created_at);
+    if (!d) return;
+    const el = document.createElement('div');
+    el.className = 'day-divider';
+    el.textContent = d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+    chatLog.appendChild(el);
+    try { localStorage.setItem('chloe_last_day', d.toDateString()); } catch (e) {}
+  }
+  async function loadHistory() {
+    // Pull the saved conversation and render it oldest-first, with day
+    // dividers where the date changes. Returns true when anything was
+    // rendered — the chat then picks up exactly where you left off.
+    let turns = [];
+    try { turns = await ApiClient.history(currentChar.id, 50); } catch (e) { turns = []; }
+    if (!turns.length) return false;
+    let lastDay = '';
+    for (const t of turns) {
+      const d = histDate(t.created_at);
+      const day = d ? d.toDateString() : '';
+      if (day && day !== lastDay) { historyDayDivider(t.created_at); lastDay = day; }
+      addHistoryTurn(t.role, t.text, t.created_at);
+    }
+    scrollBottom();
+    return true;
+  }
+
   // Voice-note bubble UI. In demo mode the URL is `demo:voice` and we play a
   // soft locally-synthesized tone so the UI is previewable (clearly labeled).
   function addVoiceNote(url, caption) {
@@ -193,7 +234,7 @@
     updateCharTile();
   }
 
-  function switchCharacter(id, roster) {
+  async function switchCharacter(id, roster) {
     if (id === currentChar.id) return;
     const next = (roster || []).find((c) => c.id === id) || { ...DEFAULT_CHAR, id };
     currentChar = { ...next };
@@ -204,6 +245,9 @@
     });
     updateCharTile();
     chatLog.innerHTML = '';
+    // Each character keeps their own saved conversation — restore it rather
+    // than starting blank.
+    if (await loadHistory()) return;
     dayDividerIfNeeded();
     addText('her', charGreeting());
     showToast('Now talking to ' + charDisplayName());
@@ -243,7 +287,11 @@
     } catch (e) {
       typingRow.classList.add('hidden');
       if (currentChar.id === 'chloe') vidIdle();
-      addText('her', 'hmm, lost you for a second. say that again?');
+      // 401s bounce to the login screen via onAuthRequired — don't also
+      // drop a "lost you" bubble into the chat.
+      if (e && e.status !== 401) {
+        addText('her', 'hmm, lost you for a second. say that again?');
+      }
     }
     sending = false;
   }
@@ -253,11 +301,9 @@
     if (e.key === 'Enter') sendMessage(msgInput.value);
   });
 
-  // Mic: voice-note sending unlocks with the real server; demo explains that.
+  // Mic: voice-note sending unlocks with her reply tiers.
   $('micBtn').addEventListener('click', () => {
-    showToast(ApiClient.isConnected()
-      ? 'Hold to record (coming with the companion server)'
-      : 'Voice messages unlock when the companion server is connected');
+    showToast('Voice notes come with her Plus and VIP plans');
   });
 
 
@@ -349,14 +395,128 @@
     }, 15000);
   }
 
-  /* ---------- onboarding-lite ---------- */
+  /* ---------- auth gate: email login required, no free/demo use ---------- */
 
-  function showOnboarding() { $('onboarding').classList.remove('hidden'); $('app').classList.add('hidden'); }
-  function showApp() { $('onboarding').classList.add('hidden'); $('app').classList.remove('hidden'); }
+  function showAuth() {
+    $('authScreen').classList.remove('hidden');
+    $('onboarding').classList.add('hidden');
+    $('app').classList.add('hidden');
+  }
+  function hideAuth() { $('authScreen').classList.add('hidden'); }
 
-  function finishOnboarding() {
+  let authMode = 'login'; // 'login' | 'signup'
+  function setAuthMode(mode) {
+    authMode = mode;
+    $('tabLogin').classList.toggle('active', mode === 'login');
+    $('tabSignup').classList.toggle('active', mode === 'signup');
+    $('authName').classList.toggle('hidden', mode === 'login');
+    $('authPassword').setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
+    $('authGo').textContent = mode === 'signup' ? 'Sign up' : 'Log in';
+    $('authMsg').textContent = '';
+    $('authResend').classList.add('hidden');
+  }
+  $('tabLogin').addEventListener('click', () => setAuthMode('login'));
+  $('tabSignup').addEventListener('click', () => setAuthMode('signup'));
+
+  function authBusy(busy, label) {
+    $('authGo').disabled = busy;
+    $('authGo').textContent = busy ? (label || 'Working…') : (authMode === 'signup' ? 'Sign up' : 'Log in');
+  }
+
+  async function submitAuth() {
+    const email = $('authEmail').value.trim();
+    const password = $('authPassword').value;
+    const name = $('authName').value.trim().slice(0, 24);
+    $('authMsg').textContent = '';
+    $('authResend').classList.add('hidden');
+    if (!email || !password) { $('authMsg').textContent = 'Enter your email and password.'; return; }
+    authBusy(true);
+    try {
+      if (authMode === 'signup') {
+        await ApiClient.signup(email, password, name);
+        // Stay on the signup tab so this message (and the resend button)
+        // remain visible — switching modes would clear it.
+        $('authMsg').textContent = 'Check your inbox — tap the link to verify your email, then log in.';
+        $('authResend').classList.remove('hidden');
+        $('authResend').onclick = async () => {
+          try {
+            await ApiClient.resendVerification(email);
+            $('authMsg').textContent = 'Verification email re-sent. Check your inbox.';
+          } catch (e2) {
+            $('authMsg').textContent = ApiClient.friendlyDetail(e2.detail);
+          }
+        };
+      } else {
+        const data = await ApiClient.login(email, password);
+        hideAuth();
+        enterApp(data);
+      }
+    } catch (e) {
+      const d = e.detail || '';
+      $('authMsg').textContent = ApiClient.friendlyDetail(d);
+      if (d === 'email_unverified') {
+        $('authResend').classList.remove('hidden');
+        $('authResend').onclick = async () => {
+          try {
+            await ApiClient.resendVerification(email);
+            $('authMsg').textContent = 'Verification email re-sent. Check your inbox.';
+          } catch (e2) {
+            $('authMsg').textContent = ApiClient.friendlyDetail(e2.detail);
+          }
+        };
+      }
+    } finally {
+      authBusy(false);
+    }
+  }
+  $('authGo').addEventListener('click', submitAuth);
+  $('authPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
+  $('authEmail').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
+
+  // Any 401 anywhere bounces back to the login screen.
+  ApiClient.onAuthRequired(() => showAuth());
+
+  $('logoutBtn').addEventListener('click', async () => {
+    await ApiClient.logout();
+    try { localStorage.removeItem('chloe_name'); } catch (e) {}
+    closeSheet('profileSheet');
+    chatLog.innerHTML = '';
+    showAuth();
+  });
+
+  /* ---------- entering the app (post-login) ---------- */
+
+  function enterApp(me) {
+    hideAuth();
+    const serverName = (me && me.name) || '';
+    if (serverName) {
+      try { localStorage.setItem('chloe_name', serverName); } catch (e) {}
+    }
+    if (!localStorage.getItem('chloe_name')) {
+      showOnboarding();
+    } else {
+      showApp();
+      bootChat(false);
+    }
+  }
+
+  /* ---------- onboarding-lite (name ask) ---------- */
+
+  function showOnboarding() {
+    hideAuth();
+    $('onboarding').classList.remove('hidden');
+    $('app').classList.add('hidden');
+  }
+  function showApp() {
+    hideAuth();
+    $('onboarding').classList.add('hidden');
+    $('app').classList.remove('hidden');
+  }
+
+  async function finishOnboarding() {
     const name = $('nameInput').value.trim().slice(0, 24) || 'friend';
-    localStorage.setItem('chloe_name', name);
+    try { await ApiClient.setName(name); } catch (e) { /* offline-safe: keep local */ }
+    try { localStorage.setItem('chloe_name', name); } catch (e) {}
     showApp();
     bootChat(true);
   }
@@ -368,6 +528,8 @@
     $('nameInput').value = localStorage.getItem('chloe_name') || '';
     $('nameInput').focus();
   });
+  // "Change my name" reuses the onboarding ask; finishOnboarding already
+  // syncs the new name to the server via POST /api/v1/auth/name.
 
   /* ---------- sheets ---------- */
 
@@ -382,20 +544,16 @@
 
   $('profileBtn').addEventListener('click', async () => {
     openSheet('profileSheet');
-    const me = await ApiClient.me();
-    $('profileName').textContent = me.name || localStorage.getItem('chloe_name') || 'You';
-    $('statMsgs').textContent = me.messages_remaining;
-    $('statVoice').textContent = me.voice_notes_remaining;
-    // Tier card + mode pill reflect the real connection state, not the demo fallback.
-    const live = ApiClient.isConnected();
-    $('tierName').textContent = live && me.tier
-      ? 'Companion — ' + me.tier.charAt(0).toUpperCase() + me.tier.slice(1)
-      : 'Companion — Demo';
-    $('tierSub').textContent = live ? 'live on companion server' : 'demo tier · not billed';
-    $('modePill').textContent = live ? 'Live' : 'Demo mode';
-    $('modeBlurb').textContent = live ? 'real memory on the companion server.' : 'connect the companion server for real memory.';
+    let me = null;
+    try { me = await ApiClient.me(); } catch (e) { me = null; }
+    $('profileName').textContent = (me && me.name) || localStorage.getItem('chloe_name') || 'You';
+    $('statMsgs').textContent = me ? me.messages_remaining : '—';
+    $('statVoice').textContent = me ? me.voice_notes_remaining : '—';
+    const tier = me && me.tier ? me.tier : 'basic';
+    $('tierName').textContent = 'Companion — ' + tier.charAt(0).toUpperCase() + tier.slice(1);
+    $('tierSub').textContent = me ? 'live on companion server' : 'couldn’t reach the server';
     updateConnLine();
-    renderPlans(me.tier, live);
+    renderPlans(tier);
   });
 
   // Stripe fulfillment needs to know WHO paid: every checkout URL gets
@@ -414,9 +572,10 @@
   // Plans: subscribe/upgrade cards from the live server (names, prices,
   // benefits, Stripe checkout links). Rendered once per profile-sheet open;
   // buttons open the checkout link in a new tab.
-  async function renderPlans(currentTier, live) {
+  async function renderPlans(currentTier) {
     const list = $('planList');
-    const data = live ? await ApiClient.tiers() : null;
+    let data = null;
+    try { data = await ApiClient.tiers(); } catch (e) { data = null; }
     const plans = data && data.plans;
     if (!plans || !plans.length) {
       list.innerHTML = '<div class="sheet-sub">Plans appear here once you\'re connected to the companion server.</div>';
@@ -499,15 +658,15 @@
     if (ApiClient.isConnected()) {
       el.innerHTML = '<span class="ok">connected to companion server</span>';
     } else {
-      el.innerHTML = '<span class="bad">demo mode</span>';
+      el.innerHTML = '<span class="bad">not connected</span>';
     }
   }
   ApiClient.onStatus(updateConnLine);
   $('reconnectBtn').addEventListener('click', async () => {
     $('connStatus').textContent = 'checking…';
-    await ApiClient.probe();
+    try { await ApiClient.me(); } catch (e) {}
     updateConnLine();
-    showToast(ApiClient.isConnected() ? 'Connected to the companion server' : 'Still in demo mode');
+    showToast(ApiClient.isConnected() ? 'Connected to the companion server' : 'Still not connected — check your connection');
   });
 
   /* ---------- boot ---------- */
@@ -527,20 +686,21 @@
   async function bootChat(isFirstHello) {
     if (currentChar.id === 'chloe') vidIdle();
     armQuietNudge();
-    dayDividerIfNeeded();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';
 
     // Character roster (admin-managed). Chloe-only until the server lists more.
     renderCharPicker();
-
-    // Probe for the real server in the background; demo works regardless.
-    ApiClient.probe().then(updateConnLine);
     updateConnLine();
 
     const returning = !isFirstHello && !!localStorage.getItem('chloe_seen');
     localStorage.setItem('chloe_seen', '1');
 
+    // Restore the saved conversation FIRST: logging back in picks up right
+    // where you left off instead of resetting to a blank chat.
+    if (await loadHistory()) return;
+
+    dayDividerIfNeeded();
     await new Promise((r) => setTimeout(r, 600));
     typingRow.classList.remove('hidden'); scrollBottom();
     await new Promise((r) => setTimeout(r, 1400));
@@ -549,15 +709,28 @@
     if (isFirstHello) {
       addText('her', charGreeting());
     } else if (returning) {
-      addText('her', MockEngine.returnOpener());
+      addText('her', 'hey, welcome back. missed you.');
     }
   }
 
-  // Go.
-  if (localStorage.getItem('chloe_name')) {
-    showApp();
-    bootChat(false);
-  } else {
-    showOnboarding();
-  }
+  // Go: pick up the session from an email verify link, else require login.
+  (function () {
+    const m = (location.hash || '').match(/#session=([A-Za-z0-9\-_]+)/);
+    if (m) {
+      ApiClient.setToken(m[1]);
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+    }
+  })();
+  (async function boot() {
+    if (ApiClient.getToken()) {
+      try {
+        const me = await ApiClient.me();
+        enterApp(me);
+        return;
+      } catch (e) {
+        ApiClient.clearToken(); // bad/expired token -> login screen
+      }
+    }
+    showAuth();
+  })();
 })();

@@ -1,46 +1,32 @@
 /* ============================================================
-   API client for the real companion backend.
+   API client — email-login session client for the companion backend.
 
-   Contract (implemented by the future companion server):
-     POST /api/v1/chat {user_id, message}
-       -> {reply_text, voice_note_url|null, photo_url|null, messages_remaining}
-     GET  /api/v1/me?user_id=
-       -> {user_id, name, tier, messages_remaining, voice_notes_remaining, proactive_enabled}
-     GET  /api/v1/shows
-       -> {shows:[{id,title,starts_at,ticket_url}]}
+   Auth (2026-09-30): every authed call sends
+   `Authorization: Bearer <token>`. The token lives in localStorage
+   (`chloe_auth_token`). There is NO demo fallback and NO anonymous
+   device id — without a valid session the app shows the login screen.
 
-   Graceful fallback: if the server is unreachable (timeout/error),
-   every call falls back to MockEngine (DEMO) so the app stays
-   previewable. `connected` tracks the last known server state and
-   the UI can listen via onStatus().
+   Public (no token needed): tiers, shows, characters.
    ============================================================ */
 const ApiClient = (() => {
-  // Per-device identity (2026-09-29): the server keys banks, memory, and
-  // Stripe fulfillment on user_id. First launch mints a stable id in
-  // localStorage; installs that predate identity keep the shared demo_user
-  // row so existing history/memories carry over.
-  function userId() {
-    try {
-      let id = localStorage.getItem('chloe_uid');
-      if (!id) {
-        if (localStorage.getItem('chloe_seen')) {
-          id = 'demo_user';
-        } else {
-          const b = new Uint8Array(8);
-          if (crypto.getRandomValues) crypto.getRandomValues(b);
-          else for (let i = 0; i < 8; i++) b[i] = Math.floor(Math.random() * 256);
-          id = 'u_' + Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
-        }
-        localStorage.setItem('chloe_uid', id);
-      }
-      return id;
-    } catch (e) {
-      return 'demo_user';
-    }
-  }
+  const TOKEN_KEY = 'chloe_auth_token';
 
   let connected = false;
+  let cachedUser = null;
   const listeners = new Set();
+  const authListeners = new Set();
+
+  function getToken() {
+    try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+  }
+  function setToken(t) {
+    try {
+      if (t) localStorage.setItem(TOKEN_KEY, t);
+      else localStorage.removeItem(TOKEN_KEY);
+    } catch (e) {}
+    if (!t) cachedUser = null;
+  }
+  function clearToken() { setToken(null); }
 
   function setConnected(v) {
     if (v !== connected) {
@@ -49,99 +35,159 @@ const ApiClient = (() => {
     }
   }
   function onStatus(fn) { listeners.add(fn); }
+  function onAuthRequired(fn) { authListeners.add(fn); }
+  function fireAuthRequired() {
+    authListeners.forEach((fn) => { try { fn(); } catch (e) {} });
+  }
 
   function withTimeout(promise, ms) {
     const t = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
     return Promise.race([promise, t]);
   }
 
-  async function request(method, path, body) {
-    const url = CONFIG.API_BASE_URL + path;
-    const opts = {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-    };
-    const resp = await withTimeout(fetch(url, opts), CONFIG.REQUEST_TIMEOUT_MS);
-    if (!resp.ok) throw new Error('http ' + resp.status);
+  // detail strings from the server for auth failures we surface in the UI
+  const AUTH_DETAILS = {
+    wrong_email_or_password: 'Wrong email or password.',
+    email_unverified: 'Please verify your email first — check your inbox.',
+    email_taken: 'That email already has an account. Try logging in.',
+    invalid_email: 'That email doesn’t look right.',
+    login_required: 'Please log in.',
+    too_many_attempts: 'Too many attempts — wait a few minutes and try again.',
+    email_failed: 'Couldn’t send the email. Try again in a minute.',
+    email_unavailable: 'Email is temporarily unavailable. Try again soon.',
+    invalid_or_expired_link: 'That link is invalid or expired.',
+  };
+  function friendlyDetail(d) {
+    return AUTH_DETAILS[d] || 'Something went wrong. Try again.';
+  }
+
+  async function request(method, path, body, opts) {
+    opts = opts || {};
+    const headers = { 'Content-Type': 'application/json' };
+    const tok = getToken();
+    if (tok) headers['Authorization'] = 'Bearer ' + tok;
+    const resp = await withTimeout(
+      fetch(CONFIG.API_BASE_URL + path, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+      }),
+      opts.timeoutMs || CONFIG.REQUEST_TIMEOUT_MS
+    );
+    if (resp.status === 401) {
+      const data = await resp.json().catch(() => ({}));
+      const err = new Error('unauthorized');
+      err.detail = data.detail || 'login_required';
+      err.status = 401;
+      // Only a 401 on a request that CARRIED a token means the session died
+      // (expired/revoked) — clear it and bounce to login. A 401 on a
+      // tokenless call (e.g. wrong password on /auth/login) must NOT wipe
+      // anything or fire the auth screen bounce.
+      if (tok) {
+        clearToken();
+        setConnected(false);
+        fireAuthRequired();
+      }
+      throw err;
+    }
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      const err = new Error('http ' + resp.status);
+      err.detail = data.detail || '';
+      err.status = resp.status;
+      throw err;
+    }
+    setConnected(true);
     return resp.json();
   }
 
-  // Probe the server once (called at boot and on manual retry).
-  async function probe() {
-    try {
-      await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(userId()));
-      setConnected(true);
-    } catch (e) {
-      setConnected(false); // DEMO fallback — server not up yet
-    }
-    return connected;
+  /* ---------- auth ---------- */
+
+  async function signup(email, password, name) {
+    // Signup sends a verification email via Resend — allow a longer timeout
+    // than the normal API budget.
+    const data = await request('POST', '/api/v1/auth/signup',
+      { email, password, name: name || '' },
+      { timeoutMs: CONFIG.AUTH_EMAIL_TIMEOUT_MS || 30000 });
+    return data; // {ok, verify_sent} — NOT logged in until email verified
   }
 
-  async function chat(message, characterId) {
-    try {
-      const data = await request('POST', '/api/v1/chat', {
-        user_id: userId(),
-        message,
-        character_id: characterId || 'chloe',
-      });
-      setConnected(true);
-      return data;
-    } catch (e) {
-      setConnected(false);
-      return MockEngine.chat(message); // DEMO fallback
+  async function login(email, password) {
+    const data = await request('POST', '/api/v1/auth/login', { email, password });
+    if (data.token) {
+      setToken(data.token);
+      cachedUser = data;
     }
+    return data;
+  }
+
+  async function logout() {
+    try { await request('POST', '/api/v1/auth/logout'); } catch (e) {}
+    clearToken();
+    setConnected(false);
+  }
+
+  async function resendVerification(email) {
+    // Same longer budget as signup — it also sends a Resend email.
+    return request('POST', '/api/v1/auth/resend-verification', { email },
+      { timeoutMs: CONFIG.AUTH_EMAIL_TIMEOUT_MS || 30000 });
+  }
+
+  async function setName(name) {
+    const data = await request('POST', '/api/v1/auth/name', { name });
+    if (cachedUser) cachedUser.name = data.name;
+    return data;
   }
 
   async function me() {
-    try {
-      const data = await request('GET', '/api/v1/me?user_id=' + encodeURIComponent(userId()));
-      setConnected(true);
-      return data;
-    } catch (e) {
-      setConnected(false);
-      return MockEngine.me(); // DEMO fallback
-    }
+    const data = await request('GET', '/api/v1/auth/me');
+    cachedUser = data;
+    return data;
+  }
+
+  function userId() {
+    return cachedUser ? cachedUser.user_id : null;
+  }
+
+  /* ---------- app ---------- */
+
+  async function chat(message, characterId) {
+    return request('POST', '/api/v1/chat',
+      { message, character_id: characterId || 'chloe' },
+      { timeoutMs: 30000 });
+  }
+
+  async function history(characterId, limit) {
+    // Saved conversation, oldest first — restores the chat on login so it
+    // never resets to a blank screen.
+    const q = '?character_id=' + encodeURIComponent(characterId || 'chloe') +
+              '&limit=' + (limit || 50);
+    const data = await request('GET', '/api/v1/chat/history' + q);
+    return (data && data.turns) ? data.turns : [];
   }
 
   async function shows() {
-    try {
-      const data = await request('GET', '/api/v1/shows');
-      setConnected(true);
-      return data;
-    } catch (e) {
-      setConnected(false);
-      return MockEngine.shows(); // DEMO fallback
-    }
+    return request('GET', '/api/v1/shows');
   }
 
-  // Subscription plans from the live server (names, prices, benefits,
-  // Stripe checkout links). Null when offline — plans UI renders a
-  // "connect to subscribe" note instead.
   async function tiers() {
-    try {
-      const data = await request('GET', '/api/v1/tiers');
-      setConnected(true);
-      return data;
-    } catch (e) {
-      setConnected(false);
-      return null;
-    }
+    return request('GET', '/api/v1/tiers');
   }
 
-  // Character roster from the live server (admin-managed Keyhole list,
-  // kh_companion only). Chloe first, always present. Null when offline —
-  // the app falls back to a Chloe-only roster.
   async function characters() {
     try {
       const data = await request('GET', '/api/v1/characters');
-      setConnected(true);
       return data && data.characters ? data.characters : null;
     } catch (e) {
-      setConnected(false);
       return null;
     }
   }
 
-  return { probe, chat, me, shows, tiers, characters, userId, onStatus, isConnected: () => connected };
+  return {
+    getToken, setToken, clearToken,
+    signup, login, logout, resendVerification, setName, me, userId,
+    chat, history, shows, tiers, characters,
+    onStatus, onAuthRequired, isConnected: () => connected,
+    friendlyDetail,
+  };
 })();

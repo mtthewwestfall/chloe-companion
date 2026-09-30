@@ -143,5 +143,15 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Proactive scheduler: dry-run by default (writes to a queue file, no delivery).
 SCHEDULER_DRY_RUN = os.environ.get("CHLOE_SCHEDULER_DRY_RUN", "1") == "1"
 
+# ---------------------------------------------------------------------------
+# Email auth (2026-09-30): login is required — no anonymous/free use.
+# Verification emails go through Resend (same provider as the Keyhole
+# backend). NEVER commit real values here.
+# ---------------------------------------------------------------------------
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+MAIL_FROM = os.environ.get("MAIL_FROM", "Chloe <hello@lockeddoor.ai>")
+PUBLIC_APP_URL = os.environ.get("PUBLIC_APP_URL", "https://companion.lockeddoor.ai").rstrip("/")
+VERIFY_TTL_HOURS = 24
+
 DB_PATH = os.environ.get("CHLOE_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "chloe.db"))
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

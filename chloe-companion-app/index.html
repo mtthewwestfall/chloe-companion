@@ -47,6 +47,27 @@
 </div>
 <div class="lamp-glow" aria-hidden="true"></div>
 
+<!-- Auth: email login required — no anonymous/free use -->
+<div id="authScreen" class="overlay hidden">
+  <div class="onboard-card">
+    <div class="onboard-avatar">
+      <svg viewBox="0 0 96 96"><circle cx="48" cy="48" r="46" fill="none" stroke="#e8a94c" stroke-width="3" opacity="0.9"/><circle cx="48" cy="48" r="34" fill="#f4d9a0"/><circle cx="40" cy="40" r="30" fill="#101a3d"/><circle cx="72" cy="30" r="2" fill="#f4d9a0" opacity="0.8"/><circle cx="24" cy="66" r="1.6" fill="#f4d9a0" opacity="0.6"/></svg>
+    </div>
+    <h1>Hey, I'm Chloe.</h1>
+    <p class="tagline">She is not a one-hour girl who leaves when the clock hits zero.<br>She stays. She remembers.</p>
+    <div class="auth-tabs" role="tablist" aria-label="Log in or sign up">
+      <button id="tabLogin" class="auth-tab active" role="tab">Log in</button>
+      <button id="tabSignup" class="auth-tab" role="tab">Sign up</button>
+    </div>
+    <input id="authName" type="text" maxlength="24" placeholder="What should I call you?" autocomplete="nickname" class="hidden">
+    <input id="authEmail" type="email" placeholder="Email" autocomplete="email" enterkeyhint="next">
+    <input id="authPassword" type="password" placeholder="Password (8+ characters)" autocomplete="current-password" enterkeyhint="go">
+    <button id="authGo" class="btn-primary">Log in</button>
+    <p id="authMsg" class="auth-msg"></p>
+    <button id="authResend" class="btn-ghost small hidden">Resend verification email</button>
+  </div>
+</div>
+
 <!-- Onboarding: first-launch name ask -->
 <div id="onboarding" class="overlay hidden">
   <div class="onboard-card">
@@ -121,8 +142,8 @@
     <div class="sheet-head"><h2 id="profileName">You</h2><button class="sheet-close" data-close="profileSheet">✕</button></div>
 
     <div class="tier-card">
-      <div class="tier-name" id="tierName">Companion — Demo</div>
-      <div class="tier-sub" id="tierSub">demo tier · not billed</div>
+      <div class="tier-name" id="tierName">Companion</div>
+      <div class="tier-sub" id="tierSub">loading…</div>
     </div>
 
     <div class="sub-section">
@@ -142,12 +163,13 @@
     </label>
 
     <div class="about-box">
-      <div class="about-title">About this preview</div>
-      <p id="demoBlurb"><span class="demo-pill" id="modePill">Demo mode</span> — <span id="modeBlurb">connect the companion server for real memory.</span></p>
+      <div class="about-title">Your account</div>
+      <p id="demoBlurb"><span class="demo-pill" id="modePill">Live</span> — <span id="modeBlurb">signed in on the companion server.</span></p>
       <p class="conn-line">Server: <span id="connStatus">checking…</span></p>
       <p class="conn-line dim" id="apiBaseLine"></p>
       <button id="reconnectBtn" class="btn-ghost small">Retry connection</button>
       <button id="resetNameBtn" class="btn-ghost small">Change my name</button>
+      <button id="logoutBtn" class="btn-ghost small">Log out</button>
     </div>
   </div>
 </div>
@@ -155,7 +177,6 @@
 <div id="toast" class="toast hidden"></div>
 
 <script src="./js/config.js"></script>
-<script src="./js/mock.js"></script>
 <script src="./js/api.js"></script>
 <script src="./js/app.js"></script>
 <script>

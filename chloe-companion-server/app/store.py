@@ -166,6 +166,115 @@ def downgrade_to_basic(conn: sqlite3.Connection, user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Email auth (2026-09-30): login required, no anonymous use.
+# ---------------------------------------------------------------------------
+def create_user_with_email(conn: sqlite3.Connection, user_id: str, email: str,
+                           password_hash: str, name: str | None = None) -> dict[str, Any]:
+    """Create a new account row for an email signup (unverified). Raises
+    sqlite3.IntegrityError when the email is already taken.
+
+    New accounts start with EMPTY banks: 0 messages, 0 voice notes. Nothing
+    is free — the $0.99 trial grants 100 messages via grant_trial_messages()
+    and a subscription fills the paid bank via set_tier()."""
+    conn.execute(
+        """INSERT INTO users (user_id, name, email, password_hash, tier,
+                              messages_remaining, voice_notes_remaining,
+                              proactive_enabled)
+           VALUES (?, ?, ?, ?, 'basic', 0, 0, 0)""",
+        (user_id, name, email, password_hash),
+    )
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone())
+
+
+def has_paid(conn: sqlite3.Connection, user_id: str) -> bool:
+    """True when this user has ever paid anything: a Stripe subscription
+    (current or past) or the one-time $0.99 trial. Used to pick the right
+    empty-bank upsell — a brand-new unpaid account should hear about the
+    $0.99 trial / $9.99 plan, not the $19.99 Plus upgrade."""
+    row = conn.execute(
+        "SELECT 1 FROM stripe_customers WHERE user_id = ? LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if row:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM trial_grants WHERE user_id = ? LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    return row is not None
+
+
+def get_user_by_email(conn: sqlite3.Connection, email: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_email_verified(conn: sqlite3.Connection, user_id: str) -> None:
+    conn.execute(
+        "UPDATE users SET email_verified_at = datetime('now'), "
+        "updated_at = datetime('now') WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+
+
+def set_user_name(conn: sqlite3.Connection, user_id: str, name: str) -> None:
+    conn.execute(
+        "UPDATE users SET name = ?, updated_at = datetime('now') WHERE user_id = ?",
+        (name, user_id),
+    )
+    conn.commit()
+
+
+def create_session(conn: sqlite3.Connection, user_id: str, token: str) -> None:
+    conn.execute(
+        "INSERT INTO auth_sessions (token, user_id) VALUES (?, ?)",
+        (token, user_id),
+    )
+    conn.commit()
+
+
+def get_session_user_id(conn: sqlite3.Connection, token: str) -> str | None:
+    row = conn.execute(
+        "SELECT user_id FROM auth_sessions WHERE token = ?", (token,)
+    ).fetchone()
+    return row["user_id"] if row else None
+
+
+def delete_session(conn: sqlite3.Connection, token: str) -> None:
+    conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+    conn.commit()
+
+
+def create_email_verification(conn: sqlite3.Connection, user_id: str,
+                              token: str, ttl_hours: int = 24) -> None:
+    conn.execute("DELETE FROM email_verifications WHERE user_id = ?", (user_id,))
+    conn.execute(
+        """INSERT INTO email_verifications (token, user_id, expires_at)
+           VALUES (?, ?, datetime('now', ?))""",
+        (token, user_id, f"+{ttl_hours} hours"),
+    )
+    conn.commit()
+
+
+def consume_email_verification(conn: sqlite3.Connection, token: str) -> str | None:
+    """Single-use: returns the user_id when the token is valid and unexpired,
+    else None. Consumes the token on success."""
+    row = conn.execute(
+        """SELECT user_id FROM email_verifications
+           WHERE token = ? AND expires_at > datetime('now')""",
+        (token,),
+    ).fetchone()
+    if not row:
+        return None
+    user_id = row["user_id"]
+    conn.execute("DELETE FROM email_verifications WHERE token = ?", (token,))
+    conn.commit()
+    return user_id
+
+
+# ---------------------------------------------------------------------------
 # Memory — typed per Thoughtspace pattern
 # ---------------------------------------------------------------------------
 def write_memory(conn: sqlite3.Connection, user_id: str, mem_type: str, text: str,
@@ -241,6 +350,22 @@ def recent_turns(conn: sqlite3.Connection, user_id: str, limit: int = 12,
         dict(r)
         for r in conn.execute(
             "SELECT role, text FROM conversation WHERE user_id = ? AND character_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, character_id, limit),
+        ).fetchall()
+    ][::-1]
+
+
+def conversation_history(conn: sqlite3.Connection, user_id: str, limit: int = 50,
+                         character_id: str = "chloe") -> list[dict[str, Any]]:
+    """Full saved conversation for the history view: oldest first, with
+    timestamps. Backs GET /api/v1/chat/history — this is what keeps the chat
+    from resetting on every login."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT role, text, created_at FROM conversation "
+            "WHERE user_id = ? AND character_id = ? "
             "ORDER BY id DESC LIMIT ?",
             (user_id, character_id, limit),
         ).fetchall()

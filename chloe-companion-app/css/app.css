@@ -70,6 +70,25 @@ body {
 }
 .onboard-card input:focus { border-color: var(--amber); }
 
+/* Auth screen (2026-09-30): email login required. */
+.auth-tabs {
+  display: flex; gap: 8px; justify-content: center; margin: 0 0 16px;
+}
+.auth-tab {
+  flex: 1; padding: 10px; border-radius: 12px; border: 1px solid var(--navy-3);
+  background: var(--navy-2); color: var(--ink-dim); font-size: 15px;
+  font-weight: 600; cursor: pointer;
+}
+.auth-tab.active {
+  background: linear-gradient(180deg, #f0b95c, #d18f33); color: #231604;
+  border-color: transparent;
+}
+.auth-msg {
+  min-height: 20px; font-size: 13.5px; color: var(--amber-soft);
+  margin: 12px 0 0; line-height: 1.45;
+}
+#authScreen .btn-ghost.small { margin-top: 10px; }
+
 .btn-primary {
   width: 100%; padding: 14px; border: 0; border-radius: 14px;
   background: linear-gradient(180deg, #f0b95c, #d18f33); color: #231604;
