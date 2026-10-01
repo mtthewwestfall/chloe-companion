@@ -174,6 +174,17 @@
       <span class="toggle"></span>
     </label>
 
+    <div class="sub-section" id="powersSection">
+      <div class="sub-title">Her powers</div>
+      <div class="sheet-sub" id="powersBlurb">What she can do for you at your tier.</div>
+      <div id="powersList" class="plan-list"><div class="sheet-sub">Checking…</div></div>
+      <div id="emailConnectRow" class="conn-line">
+        <span id="emailStatus">Email: not connected</span>
+        <button id="emailConnectBtn" class="btn-ghost small">Connect email</button>
+      </div>
+      <div class="sheet-sub dim">Your email login stays on this device only — our server never sees it.</div>
+    </div>
+
     <div class="about-box">
       <div class="about-title">Your account</div>
       <p id="demoBlurb"><span class="demo-pill" id="modePill">Live</span> — <span id="modeBlurb">signed in on the companion server.</span></p>
@@ -190,6 +201,7 @@
 
 <script src="./js/config.js"></script>
 <script src="./js/api.js"></script>
+<script src="./js/assist.js"></script>
 <script src="./js/app.js"></script>
 <script>
   // Register the service worker (PWA app shell, cache-first).

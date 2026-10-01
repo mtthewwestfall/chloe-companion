@@ -284,6 +284,16 @@
         addText('her', res.reply_text || '…');
       }
       if (res.photo_url) addPhotoDrop(res.photo_url, res.reply_text);
+      if (window.Assist && res.email_draft) {
+        Assist.handleChatResponse(res).then((r) => {
+          if (!r) return;
+          if (r.ok) {
+            showToast('Draft saved to your Gmail');
+          } else {
+            showToast('Connect your email (profile) and she\'ll drop that draft in');
+          }
+        });
+      }
       if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
@@ -553,6 +563,11 @@
   // Any 401 anywhere bounces back to the login screen.
   ApiClient.onAuthRequired(() => showAuth());
 
+  const _emailBtn = $('emailConnectBtn');
+  if (_emailBtn && !_emailBtn.dataset.wired) {
+    _emailBtn.dataset.wired = '1';
+    _emailBtn.addEventListener('click', toggleEmailConnect);
+  }
   $('logoutBtn').addEventListener('click', async () => {
     await ApiClient.logout();
     try { localStorage.removeItem('chloe_name'); } catch (e) {}
@@ -574,6 +589,7 @@
     } else {
       showApp();
       bootChat(false);
+      initAssist();
     }
   }
 
@@ -608,6 +624,75 @@
   // "Change my name" reuses the onboarding ask; finishOnboarding already
   // syncs the new name to the server via POST /api/v1/auth/name.
 
+  /* ---------- her powers (Assist) ---------- */
+  // Web lookups, reminders, email drafts, job hunting — tier-gated,
+  // owner-only until rollout. Email logins stay on this device only.
+
+  function initAssist() {
+    if (!window.Assist) return;
+    try {
+      Assist.onReminder((r) => {
+        // Due reminder -> her voice in the chat, like she remembered.
+        const who = (typeof currentChar !== 'undefined' && currentChar && currentChar.name)
+          ? currentChar.name : 'Chloe';
+        addText('her', 'hey — quick reminder: ' + (r.text || 'something') + ' ⏰');
+        scrollBottom();
+      });
+      Assist.startPolling();
+    } catch (e) { /* assist is best-effort; chat works without it */ }
+  }
+
+  async function renderPowers() {
+    const list = $('powersList');
+    if (!window.Assist || !list) return;
+    let caps = { enabled: false };
+    try { caps = await Assist.getCapabilities(); } catch (e) {}
+    if (!caps.enabled) {
+      $('powersBlurb').textContent = 'Her powers unlock with a paid plan.';
+      list.innerHTML = '';
+    } else {
+      const c = caps.capabilities || {};
+      $('powersBlurb').textContent =
+        'What she can do for you — ' + (caps.tier || 'paid') + ' tier.';
+      const rows = [
+        ['Web lookups', (c.web_search || 0) + ' per day — ask her anything current'],
+        ['Reminders', 'up to ' + (c.reminders || 0) + ' active — "remind me…"'],
+      ];
+      if (c.email_drafts) rows.push(['Email drafts', 'she writes it, you send it']);
+      if (c.job_lookup) rows.push(['Job hunting', '"find me … jobs" and she searches']);
+      list.innerHTML = rows.map((r) =>
+        '<div class="plan-row"><div><div class="plan-name">' + r[0] +
+        '</div><div class="sheet-sub">' + r[1] + '</div></div></div>'
+      ).join('');
+    }
+    try {
+      const st = await Assist.emailStatus();
+      $('emailStatus').textContent =
+        'Email: ' + (st.connected ? st.address : 'not connected');
+      $('emailConnectBtn').textContent = st.connected ? 'Disconnect' : 'Connect email';
+    } catch (e) {}
+  }
+
+  async function toggleEmailConnect() {
+    if (!window.Assist) return;
+    const btn = $('emailConnectBtn');
+    btn.disabled = true;
+    try {
+      const st = await Assist.emailStatus();
+      if (st.connected) {
+        await Assist.disconnectEmail();
+        showToast('Email disconnected');
+      } else {
+        await Assist.connectEmail();
+        showToast('Email connected — she can draft for you now');
+      }
+    } catch (e) {
+      showToast(e.message || "Couldn't connect email");
+    }
+    btn.disabled = false;
+    renderPowers();
+  }
+
   /* ---------- sheets ---------- */
 
   function openSheet(id) { $(id).classList.remove('hidden'); }
@@ -628,6 +713,7 @@
     $('statVoice').textContent = me ? me.voice_notes_remaining : '—';
     $('statReqs').textContent = (me && typeof me.requests_remaining === 'number')
       ? me.requests_remaining : '—';
+    renderPowers();
     const tier = me && me.tier ? me.tier : 'basic';
     $('tierName').textContent = 'Companion — ' + tier.charAt(0).toUpperCase() + tier.slice(1);
     $('tierSub').textContent = me ? 'live on companion server' : 'couldn’t reach the server';

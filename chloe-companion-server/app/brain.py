@@ -653,6 +653,14 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
         "Style: 1-3 short sentences, like a text. Warm and real. "
         "Never narrate the room or scenery. Never therapist mode."
     )
+    assist_result = (context.get("assist_result") or "").strip()
+    if assist_result:
+        parts.append(
+            "SOMETHING YOU JUST DID FOR HIM:\n" + assist_result +
+            "\nTell him about it in your own short words, like you just "
+            "handled it real quick. Never sound like a search engine or an "
+            "assistant app — you're his girl who happens to know things."
+        )
     return "\n\n".join(parts)
 
 

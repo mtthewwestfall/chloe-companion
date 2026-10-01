@@ -59,7 +59,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, brain, characters, config, db, media_gen, photos, shows, store, trust, voice
+from . import assist, auth, brain, characters, config, db, media_gen, photos, shows, store, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
@@ -542,6 +542,14 @@ def chat(body: ChatIn, request: Request):
         context = brain.build_brain_context(conn, user_id, user, body.message,
                                             character)
 
+        # Assistant capabilities ("her hands"): web search, reminders, email
+        # drafts, job lookup. Tier-gated, owner-only until rollout. Never
+        # raises — fail open. Credential rule: user logins never touch us;
+        # they live on the user's device (see js/assist.js).
+        assist_hit = assist.maybe_assist(conn, user, body.message, cid)
+        if assist_hit and assist_hit.get("brief"):
+            context["assist_result"] = assist_hit["brief"]
+
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
         reply_text = brain.compose_reply(body.message, context, cid)
         store.log_turn(conn, user_id, cid, reply_text, cid)
@@ -570,13 +578,18 @@ def chat(body: ChatIn, request: Request):
                 photo_url = f"PLACEHOLDER:{drop['id']}"
 
         user = store.get_or_create_user(conn, user_id)
-        return {
+        resp = {
             "reply_text": reply_text,
             "voice_note_url": voice_note_url,
             "photo_url": photo_url,
             "messages_remaining": user["messages_remaining"],
             "character_id": cid,
         }
+        # Email drafts are composed server-side but created on the user's
+        # device (Gmail API from the browser) — the token never reaches us.
+        if assist_hit and assist_hit.get("email_draft"):
+            resp["email_draft"] = assist_hit["email_draft"]
+        return resp
     finally:
         conn.close()
 
@@ -715,6 +728,125 @@ def create_media_request(body: MediaRequestIn, request: Request):
                 "balance": _request_balance(conn, user_id, cid)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Assistant capabilities ("her hands") — tier-gated, owner-only until rollout.
+# Credential rule: user logins NEVER touch these endpoints. Gmail OAuth tokens
+# live on the user's device; the browser calls Google directly (js/assist.js).
+# ---------------------------------------------------------------------------
+
+class AssistSearchIn(BaseModel):
+    query: str
+
+
+class AssistReminderIn(BaseModel):
+    text: str = ""
+    remind_at: str = ""  # optional ISO UTC; server parses `text` when empty
+
+
+def _assist_user(request: Request):
+    """Authed user gated for assist; 403 when not enabled for them."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        if not assist.enabled_for(user_id, user.get("tier") or "free"):
+            raise HTTPException(status_code=403, detail="assist_not_enabled")
+        return user_id, user, conn
+    except HTTPException:
+        conn.close()
+        raise
+
+
+@app.get("/api/v1/assist/capabilities")
+def assist_capabilities(request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        tier = user.get("tier") or "free"
+        enabled = assist.enabled_for(user_id, tier)
+        caps = assist.caps_for(tier) if enabled else assist.caps_for("free")
+        return {"enabled": enabled, "tier": tier, "capabilities": caps}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/assist/config")
+def assist_config(request: Request):
+    _current_user_id(request)  # login required; the client id is public anyway
+    return {"google_oauth_client_id":
+            os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")}
+
+
+@app.post("/api/v1/assist/search")
+def assist_search(body: AssistSearchIn, request: Request):
+    user_id, user, conn = _assist_user(request)
+    try:
+        caps = assist.caps_for(user.get("tier") or "free")
+        q = (body.query or "").strip()[:300]
+        if not q:
+            raise HTTPException(status_code=400, detail="empty_query")
+        if not assist.use_search(conn, user_id, caps):
+            raise HTTPException(status_code=402, detail="lookups_exhausted")
+        res = assist.web_search(q)
+        if not res:
+            raise HTTPException(status_code=502, detail="lookup_failed")
+        return res
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/assist/reminders")
+def assist_list_reminders(request: Request):
+    user_id, user, conn = _assist_user(request)
+    try:
+        return {"reminders": assist.list_reminders(conn, user_id)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/assist/reminders")
+def assist_create_reminder(body: AssistReminderIn, request: Request):
+    user_id, user, conn = _assist_user(request)
+    try:
+        caps = assist.caps_for(user.get("tier") or "free")
+        if assist.active_reminder_count(conn, user_id) >= caps["reminders"]:
+            raise HTTPException(status_code=402, detail="reminders_full")
+        remind_at = (body.remind_at or "").strip()
+        text = (body.text or "").strip()
+        if not remind_at:
+            remind_at, text = assist.parse_reminder(text)
+        if not remind_at:
+            raise HTTPException(status_code=400, detail="no_time_understood")
+        rid = assist.set_reminder(conn, user_id, "chloe", text[:280],
+                                  remind_at)
+        return {"id": rid, "remind_at": remind_at, "text": text}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/assist/reminders/{reminder_id}")
+def assist_cancel_reminder(reminder_id: int, request: Request):
+    user_id, user, conn = _assist_user(request)
+    try:
+        if not assist.cancel_reminder(conn, user_id, reminder_id):
+            raise HTTPException(status_code=404, detail="not_found")
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/assist/reminders/due")
+def assist_due_reminders(request: Request):
+    # Polled by the app; returns due reminders and marks them delivered.
+    user_id, user, conn = _assist_user(request)
+    try:
+        return {"reminders": assist.due_reminders(conn, user_id)}
+    finally:
+        conn.close()
+
 
 
 @app.get("/api/v1/media-requests/{req_id}")
