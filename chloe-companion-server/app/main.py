@@ -168,6 +168,11 @@ class CreditOverageIn(BaseModel):
     user_id: str
 
 
+class GrantMessagesIn(BaseModel):
+    user_id: str
+    count: int = 100
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1068,6 +1073,32 @@ def admin_media_requests(request: Request, limit: int = 100):
     conn = _conn()
     try:
         return {"requests": store.recent_media_requests(conn, limit)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/grant-messages")
+def admin_grant_messages(body: GrantMessagesIn, request: Request):
+    """Owner/support tool: add test or courtesy messages to an account."""
+    _require_admin(request)
+    uid = (body.user_id or "").strip()
+    n = max(1, min(int(body.count or 0), 10000))
+    if not uid:
+        raise HTTPException(status_code=400, detail="user_id required")
+    conn = _conn()
+    try:
+        conn.execute(
+            """UPDATE users SET messages_remaining = messages_remaining + ?,
+                                 updated_at = datetime('now')
+               WHERE user_id = ?""",
+            (n, uid),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT messages_remaining FROM users WHERE user_id = ?",
+            (uid,)).fetchone()
+        return {"ok": True, "user_id": uid,
+                "messages_remaining": row["messages_remaining"] if row else 0}
     finally:
         conn.close()
 
