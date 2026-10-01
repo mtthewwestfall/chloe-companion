@@ -802,7 +802,8 @@ def assist_capabilities(request: Request):
         user = store.get_or_create_user(conn, user_id)
         tier = user.get("tier") or "free"
         enabled = assist.enabled_for(user_id, tier)
-        caps = assist.caps_for(tier) if enabled else assist.caps_for("free")
+        caps = (assist.effective_caps(user_id, tier) if enabled
+                else assist.caps_for("free"))
         return {"enabled": enabled, "tier": tier, "capabilities": caps}
     finally:
         conn.close()

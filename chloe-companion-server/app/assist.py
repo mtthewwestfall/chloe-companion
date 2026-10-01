@@ -71,6 +71,19 @@ def caps_for(tier: str) -> dict:
                                 "email_drafts": False, "job_lookup": False}))
 
 
+def effective_caps(user_id: str, tier: str) -> dict:
+    """Caps actually in force for this user.
+
+    Owner test override (2026-10-01): while the rollout is owner-only,
+    owners get plus-level caps so every capability (email drafts, job
+    lookup) can be exercised on a basic account. Revisit when the paid
+    rollout begins.
+    """
+    if user_id in _owner_ids():
+        return caps_for("plus")
+    return caps_for(tier)
+
+
 # ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
@@ -416,7 +429,7 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
     tier = user.get("tier") or "free"
     if not enabled_for(user_id, tier):
         return None
-    caps = caps_for(tier)
+    caps = effective_caps(user_id, tier)
     intent, args = detect_intent(text)
     if not intent:
         return None
