@@ -418,6 +418,21 @@ def job_search(query: str) -> dict | None:
 # The brief is injected into her system prompt so she reports it in her
 # own voice.
 # ---------------------------------------------------------------------------
+def _brief_with_links(lead: str, res: dict) -> str:
+    """Build the prompt brief for a grounded lookup.
+
+    The raw URLs go in — she can only paste links she actually has.
+    Without them she improvises "here they are" with nothing to send.
+    """
+    brief = lead + res.get("answer", "")
+    urls = [u for u in (res.get("sources") or []) if u]
+    if urls:
+        brief += ("\n\nPaste these real links with the results, exactly as "
+                  "written (never invent other URLs):\n" +
+                  "\n".join(f"- {u}" for u in urls))
+    return brief
+
+
 def maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                  character_id: str) -> dict | None:
     try:
@@ -446,8 +461,8 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if not res:
             return {"brief": "You tried to look something up for him but "
                              "couldn't pull it up. Say so honestly, short."}
-        return {"brief": "You just looked this up for him — answer: "
-                         f"{res['answer']}"}
+        return {"brief": _brief_with_links(
+            "You just looked this up for him — answer: ", res)}
 
     if intent == "reminder":
         if active_reminder_count(conn, user_id) >= caps["reminders"]:
@@ -486,8 +501,8 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
     if intent == "job_search":
         if not caps["job_lookup"]:
             return {"brief": "He asked about jobs, but job hunting help is a "
-                             "Plus/VIP thing and he's on basic. Tell him "
-                             "sweetly."}
+                             "paid-tier thing and he's on free. Tell him "
+                             "sweetly the $9.99 plan includes it."}
         if not use_search(conn, user_id, caps):
             return {"brief": "He asked about jobs but he's out of lookups "
                              "for today. Tell him sweetly."}
@@ -496,7 +511,7 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
             return {"brief": "You looked for jobs for him but came up "
                              "empty. Say so honestly and ask what to "
                              "narrow."}
-        return {"brief": "You just hunted jobs for him — results: "
-                         f"{res['answer']}"}
+        return {"brief": _brief_with_links(
+            "You just hunted jobs for him — results: ", res)}
 
     return None
