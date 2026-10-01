@@ -176,11 +176,11 @@
 
   function charDisplayName() { return currentChar.name || 'Chloe'; }
 
-  // FaceTime tile: Chloe gets her live video tile; other characters show
+  // FaceTime tile: girls with video footage get the live tile; the rest show
   // their avatar (or an initial tile when no avatar is set).
   function updateCharTile() {
     const video = $('chloeVideo'), avatar = $('charAvatar'), initial = $('charInitial');
-    if (currentChar.id === 'chloe') {
+    if (hasVideo()) {
       video.classList.remove('hidden'); avatar.classList.add('hidden'); initial.classList.add('hidden');
       vidIdle();
     } else {
@@ -231,6 +231,7 @@
       bar.appendChild(chip);
     });
     bar.classList.toggle('hidden', roster.length < 2);
+    await loadCharFootage(currentChar.id);
     updateCharTile();
   }
 
@@ -243,6 +244,7 @@
       chip.classList.toggle('selected',
         chip.querySelector('.char-chip-name').textContent === (next.name || next.id));
     });
+    await loadCharFootage(currentChar.id);
     updateCharTile();
     chatLog.innerHTML = '';
     // Each character keeps their own saved conversation — restore it rather
@@ -263,7 +265,7 @@
     sending = true;
     addText('him', text);
     msgInput.value = '';
-    if (currentChar.id === 'chloe') vidTyping();
+    vidTyping();
     lastUserMsgAt = Date.now();
     stage1At = 0; videoNudgeSent = false;
     typingRow.classList.remove('hidden');
@@ -275,7 +277,7 @@
     try {
       const res = await ApiClient.chat(text, currentChar.id);
       typingRow.classList.add('hidden');
-      if (currentChar.id === 'chloe') vidIdle();
+      vidIdle();
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);
       } else {
@@ -286,7 +288,7 @@
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
-      if (currentChar.id === 'chloe') vidIdle();
+      vidIdle();
       // 401s bounce to the login screen via onAuthRequired — don't also
       // drop a "lost you" bubble into the chat.
       if (e && e.status !== 401) {
@@ -307,11 +309,14 @@
   });
 
 
-  /* ---------- FaceTime video tile ---------- */
+  /* ---------- FaceTime video tile ----------
+     Chloe's clips are hardcoded (2026-09-29). Other girls play the footage
+     labeled for them in the admin panel (typing-main / main / activity).
+     'give' is Keyhole-only: the server never sends it to the app. */
   const MEDIA_BASE = 'https://keyhole-latest-production.up.railway.app/media/files/';
-  const VID_IDLE = 'chloe_3bcbf88d987b7621.mp4';
-  const VID_TYPING = 'chloe_6f26366653c891fc.mp4';
-  const VID_ACTS = [
+  const CHLOE_IDLE = 'chloe_3bcbf88d987b7621.mp4';
+  const CHLOE_TYPING = 'chloe_6f26366653c891fc.mp4';
+  const CHLOE_ACTS = [
     'chloe_8dc35b0d286f75c8.mp4', 'chloe_d7f526d8e173b8c1.mp4', 'chloe_b6e63f643b5d65b8.mp4',
     'chloe_f0444b783021a49b.mp4', 'chloe_af1ad9f4bdd4e640.mp4', 'chloe_d7916e4c02a3623d.mp4',
     'chloe_fb752057230ea48e.mp4', 'chloe_b7892a8396f0906b.mp4', 'chloe_2a699be08f3afa13.mp4',
@@ -324,42 +329,84 @@
   ];
   const chloeVideo = $('chloeVideo'), videoTapHint = $('videoTapHint');
   let vidMode = 'idle';   // idle | typing | activity
-  let actIdx = Math.floor(Math.random() * VID_ACTS.length);
+  let actIdx = Math.floor(Math.random() * CHLOE_ACTS.length);
   let idleTimer = null;
+  // Labeled footage for the current non-Chloe girl, from the server.
+  let charFootage = { typing: null, main: null, acts: [] };
+
+  async function loadCharFootage(id) {
+    charFootage = { typing: null, main: null, acts: [] };
+    actIdx = -1; // other girls' activities play sequentially from the first
+    if (!id || id === 'chloe') { actIdx = Math.floor(Math.random() * CHLOE_ACTS.length); return; }
+    try {
+      const r = await fetch(CONFIG.API_BASE_URL + '/api/v1/characters/' + encodeURIComponent(id) + '/footage');
+      const d = await r.json();
+      for (const f of (d && d.footage) || []) {
+        if (f.label === 'typing-main' && !charFootage.typing) charFootage.typing = f.url;
+        else if (f.label === 'main' && !charFootage.main) charFootage.main = f.url;
+        else if (f.label === 'activity' && f.url) charFootage.acts.push(f.url);
+      }
+    } catch (e) { /* tile falls back to her avatar */ }
+  }
+
+  function hasVideo() {
+    return currentChar.id === 'chloe' ||
+      !!(charFootage.main || charFootage.typing || charFootage.acts.length);
+  }
+  function vidIdleSrc() {
+    if (currentChar.id === 'chloe') return MEDIA_BASE + CHLOE_IDLE;
+    return charFootage.main || charFootage.typing || charFootage.acts[0] || null;
+  }
+  function vidTypingSrc() {
+    if (currentChar.id === 'chloe') return MEDIA_BASE + CHLOE_TYPING;
+    return charFootage.typing || charFootage.main || charFootage.acts[0] || null;
+  }
+  function vidActs() { return currentChar.id === 'chloe' ? CHLOE_ACTS : charFootage.acts; }
 
   function vidShowTapHint() { videoTapHint.classList.remove('hidden'); }
   function vidHideTapHint() { videoTapHint.classList.add('hidden'); }
 
   function vidPlay(src, loop) {
-    const url = MEDIA_BASE + src;
+    if (!src) { vidShowTapHint(); return; }
+    const url = /^https?:\/\//.test(src) ? src : MEDIA_BASE + src;
     chloeVideo.loop = !!loop;
-    if (chloeVideo.dataset.src !== url) {
-      chloeVideo.dataset.src = url;
+    if (chloeVideo.dataset.rawSrc !== src) {
+      chloeVideo.dataset.rawSrc = src;
       chloeVideo.src = url;
     }
     const pr = chloeVideo.play();
     if (pr && pr.then) pr.then(vidHideTapHint).catch(vidShowTapHint);
   }
   function vidIdle() {
+    if (!hasVideo()) return;
+    const src = vidIdleSrc();
+    if (!src) return;
     vidMode = 'idle';
-    vidPlay(VID_IDLE, true);
+    vidPlay(src, true);
     clearTimeout(idleTimer);
+    const acts = vidActs();
+    if (!acts.length) return;
     // One activity at a time during idle, then back to idle.
     idleTimer = setTimeout(() => {
       if (vidMode !== 'idle' || document.hidden) { vidIdle(); return; }
       vidMode = 'activity';
-      actIdx = (actIdx + 1) % VID_ACTS.length;
-      vidPlay(VID_ACTS[actIdx], false);
+      actIdx = (actIdx + 1) % acts.length;
+      vidPlay(acts[actIdx], false);
     }, 20000);
   }
-  function vidTyping() { vidMode = 'typing'; clearTimeout(idleTimer); vidPlay(VID_TYPING, true); }
+  function vidTyping() {
+    if (!hasVideo()) return;
+    const src = vidTypingSrc();
+    if (!src) return;
+    vidMode = 'typing'; clearTimeout(idleTimer); vidPlay(src, true);
+  }
   chloeVideo.addEventListener('ended', () => { if (vidMode === 'activity') vidIdle(); });
   chloeVideo.addEventListener('error', vidShowTapHint, true);
-  videoTapHint.addEventListener('click', (e) => { e.stopPropagation(); vidPlay(chloeVideo.dataset.src ? chloeVideo.dataset.src.slice(MEDIA_BASE.length) : VID_IDLE, vidMode !== 'activity'); });
+  videoTapHint.addEventListener('click', (e) => { e.stopPropagation(); vidPlay(chloeVideo.dataset.rawSrc || vidIdleSrc(), vidMode !== 'activity'); });
   // iOS: retry autoplay on first touch and when the tab becomes visible.
   document.addEventListener('touchend', function once() {
     document.removeEventListener('touchend', once);
-    if (chloeVideo.paused) vidPlay(chloeVideo.dataset.src ? chloeVideo.dataset.src.slice(MEDIA_BASE.length) : VID_IDLE, vidMode !== 'activity');
+    if (chloeVideo.paused) vidPlay(chloeVideo.dataset.rawSrc || vidIdleSrc(), vidMode !== 'activity');
   });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && chloeVideo.paused) vidIdle();
@@ -386,8 +433,10 @@
       // plus exactly what she says in it as a chat message.
       if (stage1At && !videoNudgeSent && Date.now() - stage1At >= VIDEO_NUDGE_MS) {
         videoNudgeSent = true;
-        vidMode = 'activity';
-        vidPlay(VID_NUDGE, false);   // plays once, 'ended' drops back to idle
+        if (currentChar.id === 'chloe') {
+          vidMode = 'activity';
+          vidPlay(VID_NUDGE, false);   // plays once, 'ended' drops back to idle
+        }
         const myStage2 = stage1At;
         typingRow.classList.remove('hidden'); scrollBottom();
         setTimeout(() => {
@@ -711,7 +760,7 @@
   }
 
   async function bootChat(isFirstHello) {
-    if (currentChar.id === 'chloe') vidIdle();
+    vidIdle();
     armQuietNudge();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';

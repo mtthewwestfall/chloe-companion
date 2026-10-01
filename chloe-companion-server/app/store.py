@@ -602,3 +602,63 @@ def delete_local_character(conn: sqlite3.Connection, char_id: str) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Per-girl footage labels (2026-09-30). The admin panel's Girls tab lets the
+# user attach video clips to a companion-local girl and label each one
+# typing-main | main | give | activity. The companion app plays typing-main /
+# main / activity; 'give' exists so all of her footage lives in one place
+# but is Keyhole-only — the public footage endpoint never serves it.
+# ---------------------------------------------------------------------------
+FOOTAGE_LABELS = ("typing-main", "main", "give", "activity")
+# Labels the companion app is allowed to play.
+COMPANION_FOOTAGE_LABELS = ("typing-main", "main", "activity")
+
+
+def list_girl_footage(conn: sqlite3.Connection,
+                      girl_id: str) -> list[dict[str, Any]]:
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, girl_id, label, url, sort_order, created_at "
+            "FROM girl_footage WHERE girl_id = ? "
+            "ORDER BY sort_order, id",
+            ((girl_id or "").strip().lower(),),
+        ).fetchall()
+    ]
+
+
+def add_girl_footage(conn: sqlite3.Connection, girl_id: str, label: str,
+                     url: str, sort_order: int = 0) -> dict[str, Any]:
+    """Attach a labeled clip to a companion-local girl. Raises ValueError on
+    a bad label, a blank URL, or an unknown / non-local girl id."""
+    gid = (girl_id or "").strip().lower()
+    label = (label or "").strip().lower()
+    url = (url or "").strip()
+    if label not in FOOTAGE_LABELS:
+        raise ValueError(f"label must be one of {', '.join(FOOTAGE_LABELS)}")
+    if not url:
+        raise ValueError("url is required")
+    exists = conn.execute(
+        "SELECT 1 FROM local_characters WHERE id = ?", (gid,)
+    ).fetchone()
+    if not exists:
+        raise ValueError("unknown girl id")
+    cur = conn.execute(
+        "INSERT INTO girl_footage (girl_id, label, url, sort_order) "
+        "VALUES (?, ?, ?, ?)",
+        (gid, label, url, int(sort_order or 0)),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id, girl_id, label, url, sort_order, created_at "
+        "FROM girl_footage WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+    return dict(row)
+
+
+def delete_girl_footage(conn: sqlite3.Connection, footage_id: int) -> bool:
+    cur = conn.execute("DELETE FROM girl_footage WHERE id = ?", (footage_id,))
+    conn.commit()
+    return cur.rowcount > 0

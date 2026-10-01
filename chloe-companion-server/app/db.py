@@ -124,6 +124,21 @@ CREATE TABLE IF NOT EXISTS local_characters (
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-girl footage labels (2026-09-30): admin-labeled video clips for
+-- companion-local girls. Labels: typing-main | main | give | activity.
+-- The companion app only ever plays typing-main / main / activity;
+-- 'give' is Keyhole-only and is never served to the companion app.
+CREATE TABLE IF NOT EXISTS girl_footage (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    girl_id    TEXT NOT NULL,
+    label      TEXT NOT NULL,   -- typing-main | main | give | activity
+    url        TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (girl_id) REFERENCES local_characters(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_girl_footage_girl ON girl_footage(girl_id);
+
 CREATE TABLE IF NOT EXISTS trust_state (
     user_id         TEXT PRIMARY KEY,
     milestone       INTEGER NOT NULL DEFAULT 5,

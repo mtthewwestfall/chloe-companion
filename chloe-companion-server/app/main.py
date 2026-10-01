@@ -123,6 +123,12 @@ class GirlUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class FootageIn(BaseModel):
+    label: str                       # typing-main | main | give | activity
+    url: str
+    sort_order: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -253,6 +259,28 @@ def list_characters():
     return {"characters": characters.public_list()}
 
 
+@app.get("/api/v1/characters/{character_id}/footage")
+def character_footage(character_id: str):
+    """Public: labeled footage for a companion-local girl, so the app can
+    build her video tile. Only the labels the companion app may play
+    (typing-main, main, activity) — 'give' is Keyhole-only and is never
+    served here, no matter what the admin labeled. Unknown ids (and Chloe,
+    whose clips are hardcoded in the app) return an empty list."""
+    cid = (character_id or "").strip().lower()
+    if not cid or cid == "chloe":
+        return {"footage": []}
+    conn = _conn()
+    try:
+        clips = store.list_girl_footage(conn, cid)
+    finally:
+        conn.close()
+    return {"footage": [
+        {"label": c["label"], "url": c["url"]}
+        for c in clips
+        if c["label"] in store.COMPANION_FOOTAGE_LABELS
+    ]}
+
+
 # ---------------------------------------------------------------------------
 # Admin panel (2026-09-30): /admin.html "Accounts" + "Girls" tabs.
 # Guarded by the ADMIN_TOKEN env var via the X-Admin-Token header.
@@ -375,6 +403,49 @@ def admin_update_girl(girl_id: str, body: GirlUpdate, request: Request):
 def admin_delete_girl(girl_id: str, request: Request):
     _require_admin(request)
     return _admin_delete_girl(girl_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-girl footage labels (2026-09-30): the Girls tab lets the user attach
+# video clips to a companion-local girl and label each one typing-main |
+# main | give | activity. 'give' is stored (Keyhole-only) but never served
+# to the companion app — see GET /api/v1/characters/{id}/footage.
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/girls/{girl_id}/footage")
+def admin_girl_footage(girl_id: str, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        return {"footage": store.list_girl_footage(conn, girl_id)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/girls/{girl_id}/footage")
+def admin_add_girl_footage(girl_id: str, body: FootageIn, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        clip = store.add_girl_footage(conn, girl_id, body.label, body.url,
+                                      body.sort_order)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+    return {"clip": clip}
+
+
+@app.delete("/api/v1/admin/girls/{girl_id}/footage/{footage_id}")
+def admin_delete_girl_footage(girl_id: str, footage_id: int, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        ok = store.delete_girl_footage(conn, footage_id)
+    finally:
+        conn.close()
+    if not ok:
+        raise HTTPException(status_code=404, detail="not_found")
+    return {"ok": True}
 
 
 @app.post("/api/v1/chat")

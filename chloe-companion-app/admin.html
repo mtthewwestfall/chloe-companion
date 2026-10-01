@@ -47,6 +47,23 @@
   .girl .id { color:var(--muted); font-size:12px; }
   .girl .blurb { color:var(--muted); font-size:13px; margin-top:2px;
                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .foot { margin:-4px 0 10px 66px; background:#0b1330; border:1px solid var(--line);
+          border-radius:10px; padding:10px 14px; font-size:13px; }
+  .foot .clip { display:flex; gap:10px; align-items:center; padding:6px 0;
+                border-bottom:1px solid var(--line); }
+  .foot .clip:last-child { border-bottom:none; }
+  .foot .clip .u { flex:1; min-width:0; color:var(--muted); font-size:12px;
+                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lbl { font-size:11px; padding:2px 9px; border-radius:12px; background:#1c2547;
+         color:var(--gold); white-space:nowrap; }
+  .lbl.give { background:#3a1a1a; color:var(--red); }
+  .foot .addrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .foot .addrow input { flex:2; min-width:180px; padding:8px 10px; border-radius:8px;
+                        border:1px solid var(--line); background:#0a1128;
+                        color:var(--text); font-size:13px; }
+  .foot .addrow select { flex:1; min-width:140px; padding:8px 10px; border-radius:8px;
+                         border:1px solid var(--line); background:#0a1128;
+                         color:var(--text); font-size:13px; }
   .btn { padding:8px 16px; border-radius:8px; border:1px solid var(--line);
          background:#1c2547; color:var(--text); cursor:pointer; font-size:14px; }
   .btn.primary { background:var(--gold); border-color:var(--gold); color:#201500;
@@ -221,11 +238,15 @@ async function loadGirls() {
           ${g.blurb ? `<div class="blurb">${esc(g.blurb)}</div>` : ''}
         </div>
         ${g.source === 'local' ? `
+          <button class="btn" data-foot="${esc(g.id)}">Footage</button>
           <button class="btn" data-edit="${esc(g.id)}">Edit</button>
           <button class="btn danger" data-del="${esc(g.id)}">Delete</button>` : ''}
-      </div>`).join('') || '<p class="sub">No girls found.</p>';
+      </div>
+      ${g.source === 'local' ? `<div class="foot hidden" id="foot-${esc(g.id)}"></div>` : ''}`).join('')
+      || '<p class="sub">No girls found.</p>';
     list.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => startEdit(b.dataset.edit, girls));
     list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => delGirl(b.dataset.del, girls));
+    list.querySelectorAll('[data-foot]').forEach(b => b.onclick = () => toggleFootage(b.dataset.foot));
   } catch (e) { list.innerHTML = `<p class="sub">Failed to load: ${esc(e.message)}</p>`; }
 }
 
@@ -278,6 +299,70 @@ document.getElementById('girlForm').onsubmit = async e => {
   } catch (err) { alert('Failed: ' + err.message); }
   btn.disabled = false;
 };
+
+const FOOTAGE_LABELS = [
+  ['typing-main', 'Typing main'],
+  ['main', 'Main'],
+  ['activity', 'Activity'],
+  ['give', 'Give — Keyhole only'],
+];
+const FOOTAGE_LABEL_NAME = Object.fromEntries(FOOTAGE_LABELS);
+
+async function toggleFootage(girlId) {
+  const panel = document.getElementById('foot-' + girlId);
+  if (!panel) return;
+  panel.classList.toggle('hidden');
+  if (!panel.classList.contains('hidden') && !panel.dataset.loaded) loadFootage(girlId);
+}
+
+async function loadFootage(girlId) {
+  const panel = document.getElementById('foot-' + girlId);
+  try {
+    const { footage } = await api('/api/v1/admin/girls/' + encodeURIComponent(girlId) + '/footage');
+    panel.dataset.loaded = '1';
+    panel.innerHTML = `
+      ${footage.map(c => `
+        <div class="clip">
+          <span class="lbl ${c.label === 'give' ? 'give' : ''}">${esc(FOOTAGE_LABEL_NAME[c.label] || c.label)}</span>
+          <span class="u">${esc(c.url)}</span>
+          <button class="btn danger" data-delfoot="${c.id}">Remove</button>
+        </div>`).join('') || '<div class="note">No footage yet — add her first clip below.</div>'}
+      <div class="addrow">
+        <input id="fu-${esc(girlId)}" placeholder="Video URL — https://…">
+        <select id="fl-${esc(girlId)}">
+          ${FOOTAGE_LABELS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
+        </select>
+        <button class="btn primary" id="fa-${esc(girlId)}">Add clip</button>
+      </div>
+      <div class="note">Typing main plays while she composes a reply · Main is her idle loop ·
+      Activity clips rotate during idle · Give is Keyhole-only and never plays in the companion app.</div>`;
+    panel.querySelectorAll('[data-delfoot]').forEach(b =>
+      b.onclick = () => delFootage(girlId, b.dataset.delfoot));
+    document.getElementById('fa-' + girlId).onclick = () => addFootage(girlId);
+  } catch (e) { panel.innerHTML = `<div class="note">Failed to load footage: ${esc(e.message)}</div>`; }
+}
+
+async function addFootage(girlId) {
+  const url = document.getElementById('fu-' + girlId).value.trim();
+  const label = document.getElementById('fl-' + girlId).value;
+  if (!url) return;
+  try {
+    await api('/api/v1/admin/girls/' + encodeURIComponent(girlId) + '/footage',
+              { method: 'POST', body: JSON.stringify({ label, url }) });
+    document.getElementById('foot-' + girlId).dataset.loaded = '';
+    loadFootage(girlId);
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function delFootage(girlId, clipId) {
+  if (!confirm('Remove this clip?')) return;
+  try {
+    await api('/api/v1/admin/girls/' + encodeURIComponent(girlId) + '/footage/' + clipId,
+              { method: 'DELETE' });
+    document.getElementById('foot-' + girlId).dataset.loaded = '';
+    loadFootage(girlId);
+  } catch (e) { alert('Failed: ' + e.message); }
+}
 
 async function delGirl(id, girls) {
   const g = girls.find(x => x.id === id);
