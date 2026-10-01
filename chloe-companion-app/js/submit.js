@@ -73,6 +73,11 @@ window.SubmitFlow = (() => {
   /* ---------- sheet ---------- */
 
   async function openSubmissionSheet() {
+    // The "Create a companion" button lives inside the profile sheet.
+    // Close it first — both sheets share z-index 40 and the profile sheet
+    // sits later in the DOM, so it would otherwise cover this form.
+    const prof = $('profileSheet');
+    if (prof) prof.classList.add('hidden');
     photos = [];
     renderPhotoStrip();
     const nameEl = $('subName'), personaEl = $('subPersona'),
