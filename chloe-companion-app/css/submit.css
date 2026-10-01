@@ -1,0 +1,28 @@
+/* Custom-companion submissions (2026-10-01) */
+.fld-label { display:block; font-weight:600; margin:14px 0 6px; font-size:14px; }
+.fld-label .dim { font-weight:400; }
+#submitSheet input[type="text"], #submitSheet textarea {
+  width:100%; box-sizing:border-box; padding:10px 12px; border-radius:10px;
+  border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.06);
+  color:inherit; font:inherit; resize:vertical;
+}
+.policy-box {
+  margin-top:14px; padding:12px; border-radius:12px;
+  background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1);
+}
+.policy-box .sheet-sub { margin:0 0 8px; }
+.sub-photo-strip { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+.sub-photo { position:relative; width:84px; height:84px; }
+.sub-photo img { width:100%; height:100%; object-fit:cover; border-radius:10px; }
+.sub-photo button {
+  position:absolute; top:-6px; right:-6px; width:22px; height:22px;
+  border-radius:50%; border:none; background:#111; color:#fff; cursor:pointer;
+  font-size:12px; line-height:1;
+}
+.sub-row { padding:8px 0; border-bottom:1px solid rgba(255,255,255,.07); }
+.sub-row-name { font-weight:600; margin-right:8px; }
+.sub-row-status { font-size:12px; padding:2px 8px; border-radius:20px; background:rgba(255,255,255,.1); }
+.sub-row-status.st-approved { background:rgba(80,200,120,.25); }
+.sub-row-status.st-rejected { background:rgba(220,80,80,.25); }
+.sheet-sub.bad { color:#ff9d9d; }
+.char-chip-create { opacity:.85; border-style:dashed !important; }

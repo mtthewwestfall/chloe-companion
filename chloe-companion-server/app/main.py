@@ -59,7 +59,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, db, media_gen, photos, shows, store, trust, voice
+from . import assist, auth, brain, characters, config, db, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
@@ -148,6 +148,21 @@ class MediaRequestIn(BaseModel):
     media: str                       # pic | video
     prompt: str = ""                 # regular only; give ignores it
 
+class SubmissionIn(BaseModel):
+    name: str = ""
+    persona: str = ""
+    blurb: str = ""
+    images: list[str] = []           # data URIs, max 3
+    policy_ack: bool = False
+
+
+class SubmissionApproveIn(BaseModel):
+    verified_fictional: bool = False
+
+
+class SubmissionRejectIn(BaseModel):
+    reason: str = ""
+
 
 class CreditOverageIn(BaseModel):
     user_id: str
@@ -226,6 +241,17 @@ def _request_deflection(character: dict[str, Any]) -> str:
                 "tell me something else you'd like to see \U0001F609")
     return ("hmm, I can't do that one — "
             "tell me something else you'd like to see \U0001F609")
+
+
+def _request_explicit_deflection(character: dict[str, Any]) -> str:
+    # Nude renditions are only for characters verified to not be a real
+    # person (submission policy, 2026-10-01).
+    if (character or {}).get("id", "chloe") == "chloe":
+        return ("that kind of pic is only for girls verified as not a real "
+                "person, babe — tell me something else you'd like to see "
+                "\U0001F609")
+    return ("that kind of pic is only for girls verified as not a real "
+            "person — tell me something else you'd like to see \U0001F609")
 
 
 def _request_failed_line(character: dict[str, Any]) -> str:
@@ -681,14 +707,23 @@ def create_media_request(body: MediaRequestIn, request: Request):
         # Regular prompts are moderated server-side. Rejected prompts get an
         # in-character deflection — never an error dump — and cost nothing.
         if kind == "regular":
-            reason = store.moderate_prompt(body.prompt)
+            # Explicit lane (2026-10-01): only for custom-submission
+            # characters verified to not be a real person. The hard
+            # blocklist (minors / non-consent / extreme) never opens.
+            allow_explicit = bool(character.get("verified_fictional"))
+            reason = store.moderate_prompt(body.prompt,
+                                          allow_explicit=allow_explicit)
             if reason:
                 req = store.create_media_request(
                     conn, user_id, cid, kind, media, body.prompt,
                     pool_source="included")
                 store.set_media_request_status(conn, req["id"], "rejected")
+                deflection = (
+                    _request_explicit_deflection(character)
+                    if reason == "explicit_blocked"
+                    else _request_deflection(character))
                 return {"id": req["id"], "status": "rejected",
-                        "deflection": _request_deflection(character),
+                        "deflection": deflection,
                         "character_id": cid}
 
         # Regular generation needs the Sogni key; fail closed without
@@ -847,6 +882,113 @@ def assist_due_reminders(request: Request):
     finally:
         conn.close()
 
+
+
+# ---------------------------------------------------------------------------
+# Custom-companion submissions (2026-10-01): approval-only. Any gender —
+# customers can design him or her. Images are AI-reviewed (nudity / 18+)
+# before the owner ever sees them; nothing goes live without owner approval.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/submissions/policy")
+def submission_policy(request: Request):
+    _current_user_id(request)
+    return {"policy": submit.SUBMISSION_POLICY}
+
+
+@app.post("/api/v1/submissions")
+def create_submission(body: SubmissionIn, request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        if (user.get("tier") or "free") not in ("basic", "plus", "vip"):
+            raise HTTPException(status_code=402,
+                                detail="paid_tier_required")
+        try:
+            return submit.create_submission(conn, user_id,
+                                            body.model_dump())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/submissions/mine")
+def my_submissions(request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, status, verified_fictional, ai_review, "
+            "created_at, reviewed_at FROM submissions "
+            "WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                review = json.loads(r["ai_review"] or "{}")
+            except Exception:
+                review = {}
+            out.append({
+                "id": r["id"], "name": r["name"], "status": r["status"],
+                "verified_fictional": bool(r["verified_fictional"]),
+                "review_notes": review.get("notes", ""),
+                "created_at": r["created_at"],
+                "reviewed_at": r["reviewed_at"],
+            })
+        return {"submissions": out}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/submissions")
+def admin_list_submissions(request: Request, status: str = ""):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        q = ("SELECT s.*, u.email AS user_email FROM submissions s "
+             "LEFT JOIN users u ON u.id = s.user_id")
+        params: list = []
+        if status:
+            q += " WHERE s.status = ?"
+            params.append(status)
+        q += " ORDER BY s.created_at DESC"
+        rows = conn.execute(q, params).fetchall()
+        return {"submissions": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/submissions/{sub_id}/approve")
+def admin_approve_submission(sub_id: str, body: SubmissionApproveIn,
+                             request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        try:
+            result = submit.approve_submission(
+                conn, sub_id, body.verified_fictional)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        characters.bust_cache()
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/submissions/{sub_id}/reject")
+def admin_reject_submission(sub_id: str, body: SubmissionRejectIn,
+                            request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        try:
+            return submit.reject_submission(conn, sub_id, body.reason)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
 
 
 @app.get("/api/v1/media-requests/{req_id}")

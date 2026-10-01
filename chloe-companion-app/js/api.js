@@ -198,11 +198,26 @@ const ApiClient = (() => {
     return request('GET', '/api/v1/media-requests/' + id);
   }
 
+  /* ---------- custom-companion submissions (approval-only, 2026-10-01) ---------- */
+
+  function submissionPolicy() {
+    return request('GET', '/api/v1/submissions/policy');
+  }
+
+  function createSubmission(payload) {
+    return request('POST', '/api/v1/submissions', payload, { timeoutMs: 90000 });
+  }
+
+  function mySubmissions() {
+    return request('GET', '/api/v1/submissions/mine');
+  }
+
   return {
     getToken, setToken, clearToken,
     signup, login, logout, resendVerification, setName, me, userId,
     chat, history, shows, tiers, characters,
     mediaBalance, createMediaRequest, pollMediaRequest,
+    submissionPolicy, createSubmission, mySubmissions,
     onStatus, onAuthRequired, isConnected: () => connected,
     friendlyDetail,
   };

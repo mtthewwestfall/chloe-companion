@@ -21,6 +21,7 @@
 <link rel="apple-touch-startup-image" href="./icons/splash-2048x2732.png" media="(device-width: 1024px) and (device-height: 1366px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)">
 
 <link rel="stylesheet" href="./css/app.css">
+<link rel="stylesheet" href="./css/submit.css">
 </head>
 <body>
 
@@ -146,6 +147,34 @@
   </div>
 </div>
 
+<!-- Create-your-own companion sheet (2026-10-01): submission only, any gender -->
+<div id="submitSheet" class="sheet hidden">
+  <div class="sheet-card">
+    <div class="sheet-grab"></div>
+    <div class="sheet-head"><h2>Create your own ✨</h2><button class="sheet-close" data-close="submitSheet">✕</button></div>
+    <p class="sheet-sub">Design <b>him</b> or <b>her</b> — your perfect man or woman, whatever you want.</p>
+    <label class="fld-label">Their name</label>
+    <input id="subName" type="text" placeholder="e.g. Derek, Valentina…" maxlength="60">
+    <label class="fld-label">Personality <span class="dim">(how they act, what they're like)</span></label>
+    <textarea id="subPersona" rows="3" placeholder="Charming, teasing, loves late-night talks…" maxlength="2000"></textarea>
+    <label class="fld-label">Tagline <span class="dim">(optional, one line)</span></label>
+    <input id="subBlurb" type="text" placeholder="Trouble in a leather jacket" maxlength="280">
+    <label class="fld-label">Photos <span class="dim" id="subPhotoCount">0/3 photos</span></label>
+    <input id="subPhotoInput" type="file" accept="image/*" multiple class="hidden">
+    <div id="subPhotoStrip" class="sub-photo-strip"></div>
+    <button id="subPhotoAdd" class="btn-ghost small">+ Add photos</button>
+    <div class="policy-box">
+      <p id="subPolicyText" class="sheet-sub"></p>
+      <label class="toggle-row"><span>I accept the submission policy</span>
+        <input type="checkbox" id="subPolicyAck"><span class="toggle"></span>
+      </label>
+    </div>
+    <p id="subStatus" class="sheet-sub"></p>
+    <button id="subSubmitBtn" class="btn-primary">Submit for review</button>
+    <p class="sheet-sub dim">Submission only — nothing goes live until it's personally approved.</p>
+  </div>
+</div>
+
 <!-- Profile / settings sheet -->
 <div id="profileSheet" class="sheet hidden">
   <div class="sheet-card">
@@ -185,6 +214,13 @@
       <div class="sheet-sub dim">Your email login stays on this device only — our server never sees it.</div>
     </div>
 
+    <div class="sub-section" id="createSection">
+      <div class="sub-title">Create your own</div>
+      <div class="sheet-sub">Design <b>him</b> or <b>her</b> — your perfect companion, built to your taste.</div>
+      <button id="createCompanionBtn" class="btn-ghost small">✨ Create a companion</button>
+      <div id="mySubsList" class="plan-list"><div class="sheet-sub">Loading…</div></div>
+    </div>
+
     <div class="about-box">
       <div class="about-title">Your account</div>
       <p id="demoBlurb"><span class="demo-pill" id="modePill">Live</span> — <span id="modeBlurb">signed in on the companion server.</span></p>
@@ -202,6 +238,7 @@
 <script src="./js/config.js"></script>
 <script src="./js/api.js"></script>
 <script src="./js/assist.js"></script>
+<script src="./js/submit.js"></script>
 <script src="./js/app.js"></script>
 <script>
   // Register the service worker (PWA app shell, cache-first).

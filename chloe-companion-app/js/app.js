@@ -230,6 +230,17 @@
       chip.addEventListener('click', () => switchCharacter(c.id, roster));
       bar.appendChild(chip);
     });
+    // "Create your own" chip (2026-10-01): opens the submission sheet —
+    // any gender, approval-only.
+    const plus = document.createElement('button');
+    plus.className = 'char-chip char-chip-create';
+    plus.title = 'Create your own companion';
+    plus.innerHTML = '<span class="char-chip-face char-chip-initial">+</span>' +
+      '<span class="char-chip-name">Create</span>';
+    plus.addEventListener('click', () => {
+      if (window.SubmitFlow) SubmitFlow.openSubmissionSheet();
+    });
+    bar.appendChild(plus);
     bar.classList.toggle('hidden', roster.length < 2);
     await loadCharFootage(currentChar.id);
     updateCharTile();
@@ -714,6 +725,7 @@
     $('statReqs').textContent = (me && typeof me.requests_remaining === 'number')
       ? me.requests_remaining : '—';
     renderPowers();
+    if (window.SubmitFlow) SubmitFlow.refreshMySubmissions();
     const tier = me && me.tier ? me.tier : 'basic';
     $('tierName').textContent = 'Companion — ' + tier.charAt(0).toUpperCase() + tier.slice(1);
     $('tierSub').textContent = me ? 'live on companion server' : 'couldn’t reach the server';

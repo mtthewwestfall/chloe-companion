@@ -120,9 +120,31 @@ CREATE TABLE IF NOT EXISTS local_characters (
     door_title       TEXT NOT NULL DEFAULT '',
     sort_order       INTEGER NOT NULL DEFAULT 0,
     enabled          INTEGER NOT NULL DEFAULT 1,
+    verified_fictional INTEGER NOT NULL DEFAULT 0,  -- 2026-10-01: owner-verified not a real person
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Custom-companion submissions (2026-10-01): approval-only. Customers
+-- propose their own companion (any gender); nothing goes live until the
+-- owner approves. Images are AI-reviewed (nudity / 18+) before the owner
+-- ever sees them.
+CREATE TABLE IF NOT EXISTS submissions (
+    id               TEXT PRIMARY KEY,   -- 'sub_<hex>'
+    user_id          TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    persona          TEXT NOT NULL DEFAULT '',
+    blurb            TEXT NOT NULL DEFAULT '',
+    images           TEXT NOT NULL DEFAULT '[]',  -- JSON array of data URIs
+    status           TEXT NOT NULL DEFAULT 'pending',  -- pending|flagged|approved|rejected
+    ai_review        TEXT NOT NULL DEFAULT '{}',  -- JSON {verdict, per_image, notes}
+    verified_fictional INTEGER NOT NULL DEFAULT 0,
+    policy_ack       INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    reviewed_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions(user_id);
+CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status);
+
 
 -- Per-girl footage labels (2026-09-30): admin-labeled video clips for
 -- companion-local girls. Labels: typing-main | main | give | activity.
@@ -316,6 +338,19 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 
 
 
+def _migrate_submission_columns(conn: sqlite3.Connection) -> None:
+    """2026-10-01: custom-companion submissions. Existing installs get
+    verified_fictional on local_characters; the submissions table itself
+    is created by the SCHEMA script."""
+    if _table_exists(conn, "local_characters") and not _column_exists(
+        conn, "local_characters", "verified_fictional"
+    ):
+        conn.execute(
+            "ALTER TABLE local_characters ADD COLUMN verified_fictional "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     """One-time rebuild of girl_footage without the local_characters FK."""
     row = conn.execute(
@@ -354,6 +389,7 @@ def init_db(db_path: str | None = None) -> None:
         # them with the column directly.
         _migrate_character_columns(conn)
         _migrate_auth_columns(conn)
+        _migrate_submission_columns(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)
         conn.commit()

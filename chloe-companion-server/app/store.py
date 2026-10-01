@@ -563,7 +563,8 @@ def list_local_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         dict(r)
         for r in conn.execute(
             "SELECT id, name, avatar_url, persona, companion_voice, blurb, "
-            "door_title, sort_order, enabled, created_at, updated_at "
+            "door_title, sort_order, enabled, verified_fictional, created_at, "
+            "updated_at "
             "FROM local_characters ORDER BY sort_order, name"
         ).fetchall()
     ]
@@ -578,13 +579,14 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
     conn.execute(
         "INSERT INTO local_characters "
         "(id, name, avatar_url, persona, companion_voice, blurb, door_title, "
-        " sort_order, enabled, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        " sort_order, enabled, verified_fictional, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
         "ON CONFLICT(id) DO UPDATE SET "
         "name=excluded.name, avatar_url=excluded.avatar_url, "
         "persona=excluded.persona, companion_voice=excluded.companion_voice, "
         "blurb=excluded.blurb, door_title=excluded.door_title, "
         "sort_order=excluded.sort_order, enabled=excluded.enabled, "
+        "verified_fictional=excluded.verified_fictional, "
         "updated_at=datetime('now')",
         (
             cid,
@@ -596,6 +598,7 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
             (char.get("door_title") or "").strip(),
             int(char.get("sort_order") or 0),
             1 if char.get("enabled", True) else 0,
+            1 if char.get("verified_fictional") else 0,
         ),
     )
     conn.commit()
@@ -914,32 +917,52 @@ def recent_media_requests(conn: sqlite3.Connection,
 # prompt is logged (the row itself) for admin review. Rejected prompts get
 # an in-character deflection from the endpoint — never an error dump.
 # ---------------------------------------------------------------------------
-_PROMPT_BLOCKLIST = (
-    # minors / non-consent / extreme — hard reject
+# Hard blocklist: minors / non-consent / extreme — rejected for EVERYONE,
+# always. No flag or tier opens this lane.
+_PROMPT_HARD_BLOCK = (
     "child", "kid", "teen", "minor", "underage", "baby",
     "forced", "non-consent", "nonconsent", "rape", "drugged",
     "unconscious", "sleeping",  # sexualized unconsciousness
     "incest", "bestiality", "animal",
     "gore", "blood", "torture", "mutilat",
-    # explicit sexual content stays in the GIVE lane (pre-approved only);
-    # regular prompts must stay non-explicit.
+)
+
+# Explicit lane (2026-10-01): opened ONLY for custom-submission characters
+# verified to not be a real person (verified_fictional=1). Everyone else
+# stays in the GIVE lane (pre-approved clips only).
+_PROMPT_EXPLICIT = (
     "nude", "naked", "topless", "explicit", "porn", "sex ",
     " sex", "blowjob", "handjob", "orgasm", "masturbat",
     "nipple", "pussy", "dick", "cock", "tits",
 )
 
 
-def moderate_prompt(prompt: str) -> str | None:
-    """Return a rejection reason when the prompt is blocked, else None."""
+def prompt_has_explicit(prompt: str) -> bool:
+    """True when the prompt asks for the explicit lane."""
+    low = (prompt or "").lower()
+    return any(bad in low for bad in _PROMPT_EXPLICIT)
+
+
+def moderate_prompt(prompt: str, allow_explicit: bool = False) -> str | None:
+    """Return a rejection reason when the prompt is blocked, else None.
+
+    allow_explicit opens the explicit lane — only for custom-submission
+    characters verified to not be a real person. The hard blocklist
+    (minors / non-consent / extreme) is never opened.
+    """
     p = (prompt or "").strip()
     if not p:
         return "empty prompt — tell her what you'd like to see"
     if len(p) > 500:
         return "prompt too long (500 chars max)"
     low = p.lower()
-    for bad in _PROMPT_BLOCKLIST:
+    for bad in _PROMPT_HARD_BLOCK:
         if bad in low:
             return "that one's off the table, babe"
+    if not allow_explicit:
+        for bad in _PROMPT_EXPLICIT:
+            if bad in low:
+                return "explicit_blocked"
     return None
 
 

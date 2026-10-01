@@ -89,6 +89,24 @@
   #gate .err { color:var(--red); font-size:13px; min-height:20px; }
   .hidden { display:none !important; }
   .note { color:var(--muted); font-size:12px; margin-top:8px; }
+<style>
+.sub-filters { margin: 10px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.btn.sm { padding: 4px 10px; font-size: 12px; }
+.btn.sm.active { background: #2a2a2a; }
+.pill { background: #c33; color: #fff; border-radius: 12px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
+.pill:empty { display: none; }
+.girl.sub { align-items: flex-start; }
+.sub-photos { display: flex; gap: 6px; }
+.sub-photos img { width: 90px; height: 90px; object-fit: cover; border-radius: 8px; }
+.verdicts { margin-top: 6px; font-size: 13px; }
+.verdict { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: rgba(255,255,255,.08); }
+.verdict.ok { background: rgba(80,200,120,.25); }
+.verdict.warn { background: rgba(220,170,60,.25); }
+.verdict.bad { background: rgba(220,80,80,.3); }
+.chk { display: block; margin: 8px 0; font-size: 13px; }
+.chk input { margin-right: 6px; }
+.row { display: flex; gap: 8px; margin-top: 6px; }
+.src.ok { background: rgba(80,200,120,.25); }
 </style>
 </head>
 <body>
@@ -107,7 +125,10 @@
     <div class="sub">Accounts &amp; girls roster</div>
     <div class="tabs">
       <button class="tab active" data-tab="accounts">Accounts</button>
-      <button class="tab" data-tab="girls">Girls</button>
+      <button class="tab" data-tab="girls">
+<button class="tab" data-tab="submissions">
+  Submissions <span id="subCount" class="pill"></span>
+</button>Girls</button>
     </div>
 
     <div id="tab-accounts">
@@ -121,7 +142,20 @@
       </table>
     </div>
 
-    <div id="tab-girls" class="hidden">
+    <div id="tab-submissions" class="hidden">
+  <p class="sub">Approval-only queue. Every photo was AI-reviewed (18+ / no nudity)
+  before landing here — the verdict is shown on each card. Nothing goes live until you approve it.</p>
+  <div class="sub-filters">
+    <button class="btn sm active" data-sf="">All</button>
+    <button class="btn sm" data-sf="pending">Pending</button>
+    <button class="btn sm" data-sf="flagged">Flagged</button>
+    <button class="btn sm" data-sf="approved">Approved</button>
+    <button class="btn sm" data-sf="rejected">Rejected</button>
+  </div>
+  <div id="subList"></div>
+</div>
+
+<div id="tab-girls" class="hidden">
       <div id="girlList"><p class="sub">Loading…</p></div>
       <form class="panel" id="girlForm">
         <h3 id="girlFormTitle">Add a new girl</h3>
@@ -200,7 +234,69 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   t.classList.add('active');
   document.getElementById('tab-accounts').classList.toggle('hidden', t.dataset.tab !== 'accounts');
   document.getElementById('tab-girls').classList.toggle('hidden', t.dataset.tab !== 'girls');
+  document.getElementById('tab-submissions').classList.toggle('hidden', t.dataset.tab !== 'submissions');
+  if (t.dataset.tab === 'submissions') loadSubmissions();
 });
+
+// -- submissions (approval-only queue, 2026-10-01) --------------------------
+let subFilter = '';
+async function loadSubmissions() {
+  const list = document.getElementById('subList');
+  document.querySelectorAll('[data-sf]').forEach(b =>
+    b.classList.toggle('active', b.dataset.sf === subFilter));
+  try {
+    const q = subFilter ? '?status=' + encodeURIComponent(subFilter) : '';
+    const { submissions } = await api('/api/v1/admin/submissions' + q);
+    const pend = submissions.filter(s => s.status === 'pending' || s.status === 'flagged').length;
+    document.getElementById('subCount').textContent = pend ? pend : '';
+    list.innerHTML = submissions.map(s => {
+      let review = {};
+      try { review = JSON.parse(s.ai_review || '{}'); } catch (e) {}
+      let images = [];
+      try { images = JSON.parse(s.images || '[]'); } catch (e) {}
+      const per = (review.per_image || []).map((p, i) =>
+        `<span class="verdict ${p.nudity ? 'bad' : (p.all_adult === 'yes' ? 'ok' : 'warn')}">` +
+        `photo ${i + 1}: ${p.nudity ? 'nudity' : ''}${p.nudity && p.all_adult !== 'yes' ? ' · ' : ''}` +
+        `${p.all_adult === 'yes' ? 'adult ✓' : (p.all_adult === 'no' ? 'NOT adult' : 'age?')}</span>`
+      ).join(' ');
+      return `
+      <div class="girl sub">
+        <div class="sub-photos">${images.map(u => `<img src="${u}" alt="">`).join('')}</div>
+        <div class="meta">
+          <div class="nm">${esc(s.name)} <span class="src">${esc(s.status)}</span>
+            ${s.verified_fictional ? '<span class="src ok">verified fictional</span>' : ''}</div>
+          <div class="id">by ${esc(s.user_email || s.user_id)} · ${esc(s.created_at || '')}</div>
+          ${s.persona ? `<div class="blurb">${esc(s.persona)}</div>` : ''}
+          ${s.blurb ? `<div class="id">“${esc(s.blurb)}”</div>` : ''}
+          <div class="verdicts">AI review: <b>${esc(review.verdict || '?')}</b> ${per}</div>
+          ${review.notes ? `<div class="id">${esc(review.notes)}</div>` : ''}
+          ${s.status === 'pending' || s.status === 'flagged' ? `
+          <label class="chk"><input type="checkbox" id="vf-${esc(s.id)}">
+            Verified <b>not a real person</b> — unlocks nude renditions for this character</label>
+          <div class="row">
+            <button class="btn" data-approve="${esc(s.id)}">Approve → goes live</button>
+            <button class="btn danger" data-reject="${esc(s.id)}">Reject</button>
+          </div>` : ''}
+        </div>
+      </div>`;
+    }).join('') || '<p class="sub">No submissions.</p>';
+    list.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => {
+      const vf = document.getElementById('vf-' + b.dataset.approve).checked;
+      if (!vf && !confirm('Approve WITHOUT the "not a real person" verification? Nude renditions stay blocked for this character.')) return;
+      if (vf && !confirm('You verified this is NOT a real person? This unlocks nude renditions for this character.')) return;
+      await api('/api/v1/admin/submissions/' + b.dataset.approve + '/approve',
+        { method: 'POST', body: JSON.stringify({ verified_fictional: vf }) });
+      loadSubmissions(); loadGirls();
+    });
+    list.querySelectorAll('[data-reject]').forEach(b => b.onclick = async () => {
+      const reason = prompt('Reject reason (shown to the customer):', '') || '';
+      await api('/api/v1/admin/submissions/' + b.dataset.reject + '/reject',
+        { method: 'POST', body: JSON.stringify({ reason }) });
+      loadSubmissions();
+    });
+  } catch (e) { list.innerHTML = `<p class="sub">Failed to load: ${esc(e.message)}</p>`; }
+}
+document.querySelectorAll('[data-sf]').forEach(b => b.onclick = () => { subFilter = b.dataset.sf; loadSubmissions(); });
 
 // -- accounts -----------------------------------------------------------
 async function loadAccounts() {
