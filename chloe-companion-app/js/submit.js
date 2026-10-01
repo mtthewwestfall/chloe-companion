@@ -1,5 +1,5 @@
 /* SubmitFlow — custom-companion submissions (2026-10-01).
-   Approval-only: customers design him or her (any gender), submit name +
+   Approval-only: any customer can create a companion, submit name +
    persona + up to 3 photos. Every photo is AI-reviewed (18+ / no nudity)
    before the owner ever sees it. Nothing goes live without owner approval.
 

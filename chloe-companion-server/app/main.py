@@ -885,8 +885,8 @@ def assist_due_reminders(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Custom-companion submissions (2026-10-01): approval-only. Any gender —
-# customers can design him or her. Images are AI-reviewed (nudity / 18+)
+# Custom-companion submissions (2026-10-01): approval-only. Any customer
+# can create a companion — design the companion you want. Images are AI-reviewed (nudity / 18+)
 # before the owner ever sees them; nothing goes live without owner approval.
 # ---------------------------------------------------------------------------
 
@@ -948,7 +948,7 @@ def admin_list_submissions(request: Request, status: str = ""):
     conn = _conn()
     try:
         q = ("SELECT s.*, u.email AS user_email FROM submissions s "
-             "LEFT JOIN users u ON u.id = s.user_id")
+             "LEFT JOIN users u ON u.user_id = s.user_id")
         params: list = []
         if status:
             q += " WHERE s.status = ?"

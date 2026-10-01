@@ -216,7 +216,7 @@ def create_submission(conn: sqlite3.Connection, user_id: str,
 
 def approve_submission(conn: sqlite3.Connection, sub_id: str,
                        verified_fictional: bool) -> dict[str, Any]:
-    """Owner approval: flip the submission and create the local girl."""
+    """Owner approval: flip the submission and create the local character."""
     row = conn.execute(
         "SELECT * FROM submissions WHERE id = ?", (sub_id,)).fetchone()
     if not row:
@@ -263,7 +263,7 @@ def reject_submission(conn: sqlite3.Connection, sub_id: str,
     if not row:
         raise ValueError("submission not found")
     if row["status"] == "approved":
-        raise ValueError("already approved — delete the girl instead")
+        raise ValueError("already approved — delete the character instead")
     conn.execute(
         "UPDATE submissions SET status = 'rejected', reviewed_at = "
         "datetime('now') WHERE id = ?",
