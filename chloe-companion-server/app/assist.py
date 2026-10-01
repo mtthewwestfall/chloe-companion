@@ -16,10 +16,12 @@ SECURITY — the credential rule, non-negotiable:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import sqlite3
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -177,6 +179,64 @@ def _gemini_post(payload: dict, timeout: int = 30) -> dict | None:
         return None
 
 
+_REDIRECT_HOST = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
+
+
+def _resolve_grounding_url(url: str, timeout: int = 5) -> str:
+    """Resolve a Gemini grounding redirect link to its real destination.
+
+    The API returns vertexaisearch.cloud.google.com/grounding-api-redirect/
+    links with long opaque tokens. If she retypes one from memory she will
+    corrupt it (seen: user got a Google 404). A short real URL like
+    https://www.indeed.com/viewjob?jk=... survives copying. Manual HEAD via
+    http.client so we read the Location header without following it.
+    Falls back to the original URL on any failure.
+    """
+    if _REDIRECT_HOST not in (url or ""):
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+        conn_cls = (http.client.HTTPSConnection
+                    if parts.scheme == "https" else http.client.HTTPConnection)
+        conn = conn_cls(parts.hostname,
+                        parts.port or (443 if parts.scheme == "https" else 80),
+                        timeout=timeout)
+        path = parts.path + ("?" + parts.query if parts.query else "")
+        conn.request("HEAD", path,
+                     headers={"User-Agent": "Mozilla/5.0",
+                              "Host": parts.hostname})
+        loc = conn.getresponse().getheader("Location")
+        conn.close()
+        if loc:
+            real = urllib.parse.urljoin(url, loc)
+            print(f"[assist] resolved grounding link -> "
+                  f"{urllib.parse.urlsplit(real).netloc}", flush=True)
+            return real
+    except Exception as e:
+        print(f"[assist] grounding resolve failed: {type(e).__name__}",
+              flush=True)
+    return url
+
+
+def _grounding_sources(data: dict, limit: int = 4) -> list[dict]:
+    """Extract [{title, url}] from grounding chunks, resolving redirects."""
+    out: list[dict] = []
+    try:
+        chunks = (data["candidates"][0].get("groundingMetadata", {})
+                  .get("groundingChunks") or [])
+    except Exception:
+        return out
+    for chunk in chunks:
+        web = chunk.get("web") or {}
+        uri = web.get("uri")
+        if uri and all(u != uri for u in (s["url"] for s in out)):
+            out.append({"title": web.get("title") or uri,
+                        "url": _resolve_grounding_url(uri)})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def web_search(query: str) -> dict | None:
     """Grounded web lookup. Returns {answer, sources[]} or None on failure."""
     data = _gemini_post({
@@ -192,15 +252,9 @@ def web_search(query: str) -> dict | None:
         cand = data["candidates"][0]
         answer = "".join(p.get("text", "")
                          for p in cand["content"]["parts"]).strip()
-        sources: list[str] = []
-        for chunk in (cand.get("groundingMetadata", {})
-                        .get("groundingChunks") or []):
-            web = chunk.get("web") or {}
-            if web.get("uri") and web["uri"] not in sources:
-                sources.append(web["uri"])
         if not answer:
             return None
-        return {"answer": answer, "sources": sources[:4]}
+        return {"answer": answer, "sources": _grounding_sources(data)}
     except Exception:
         return None
 
@@ -401,13 +455,9 @@ def job_search(query: str) -> dict | None:
         cand = data["candidates"][0]
         answer = "".join(p.get("text", "")
                          for p in cand["content"]["parts"]).strip()
-        sources: list[str] = []
-        for chunk in (cand.get("groundingMetadata", {})
-                        .get("groundingChunks") or []):
-            web = chunk.get("web") or {}
-            if web.get("uri") and web["uri"] not in sources:
-                sources.append(web["uri"])
-        return {"answer": answer, "sources": sources[:4]} if answer else None
+        if not answer:
+            return None
+        return {"answer": answer, "sources": _grounding_sources(data)}
     except Exception:
         return None
 
@@ -421,15 +471,19 @@ def job_search(query: str) -> dict | None:
 def _brief_with_links(lead: str, res: dict) -> str:
     """Build the prompt brief for a grounded lookup.
 
-    The raw URLs go in — she can only paste links she actually has.
-    Without them she improvises "here they are" with nothing to send.
+    Real destination URLs go in (redirects already resolved server-side) —
+    she can only paste links she actually has. Without them she improvises
+    "here they are" with nothing to send. Copy-exact: she must never retype
+    a URL from memory, which corrupts long tokens (seen: Google 404).
     """
     brief = lead + res.get("answer", "")
-    urls = [u for u in (res.get("sources") or []) if u]
-    if urls:
-        brief += ("\n\nPaste these real links with the results, exactly as "
-                  "written (never invent other URLs):\n" +
-                  "\n".join(f"- {u}" for u in urls))
+    srcs = [s for s in (res.get("sources") or []) if s.get("url")]
+    if srcs:
+        brief += ("\n\nPut the matching link right after each result. Copy "
+                  "each URL below EXACTLY character-for-character — never "
+                  "retype one from memory and never invent other URLs. If a "
+                  "result has no matching link, give it with no link.\n" +
+                  "\n".join(f"- {s['title']}: {s['url']}" for s in srcs))
     return brief
 
 
