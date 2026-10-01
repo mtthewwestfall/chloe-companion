@@ -652,7 +652,7 @@ def add_girl_footage(conn: sqlite3.Connection, girl_id: str, label: str,
     exists = conn.execute(
         "SELECT 1 FROM local_characters WHERE id = ?", (gid,)
     ).fetchone()
-    if not exists:
+    if not exists and gid != "chloe":
         raise ValueError("unknown girl id")
     cur = conn.execute(
         "INSERT INTO girl_footage (girl_id, label, url, sort_order) "
