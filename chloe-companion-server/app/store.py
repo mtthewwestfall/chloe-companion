@@ -606,9 +606,11 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
 
 
 def delete_local_character(conn: sqlite3.Connection, char_id: str) -> bool:
-    cur = conn.execute(
-        "DELETE FROM local_characters WHERE id = ?", ((char_id or "").strip().lower(),)
-    )
+    gid = (char_id or "").strip().lower()
+    # Manual cascade: girl_footage no longer has an FK to local_characters
+    # (girl_id may be the reserved builtin 'chloe').
+    conn.execute("DELETE FROM girl_footage WHERE girl_id = ?", (gid,))
+    cur = conn.execute("DELETE FROM local_characters WHERE id = ?", (gid,))
     conn.commit()
     return cur.rowcount > 0
 

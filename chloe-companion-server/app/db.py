@@ -134,8 +134,10 @@ CREATE TABLE IF NOT EXISTS girl_footage (
     label      TEXT NOT NULL,   -- typing-main | main | give | activity
     url        TEXT NOT NULL,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (girl_id) REFERENCES local_characters(id) ON DELETE CASCADE
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    -- NOTE: no FOREIGN KEY on girl_id — it may hold the reserved builtin id
+    -- 'chloe', which has no local_characters row. Deletes cascade manually in
+    -- store.delete_local_character.
 );
 CREATE INDEX IF NOT EXISTS idx_girl_footage_girl ON girl_footage(girl_id);
 
@@ -313,6 +315,36 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+
+def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
+    """One-time rebuild of girl_footage without the local_characters FK."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'girl_footage'"
+    ).fetchone()
+    if not row or "REFERENCES" not in (row[0] or "").upper():
+        return
+    conn.execute(
+        """CREATE TABLE girl_footage_new (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            girl_id    TEXT NOT NULL,
+            label      TEXT NOT NULL,
+            url        TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO girl_footage_new (id, girl_id, label, url, sort_order, created_at) "
+        "SELECT id, girl_id, label, url, sort_order, created_at FROM girl_footage"
+    )
+    conn.execute("DROP TABLE girl_footage")
+    conn.execute("ALTER TABLE girl_footage_new RENAME TO girl_footage")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_girl_footage_girl ON girl_footage(girl_id)"
+    )
+    conn.commit()
+
+
 def init_db(db_path: str | None = None) -> None:
     conn = connect(db_path)
     try:
@@ -323,6 +355,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_character_columns(conn)
         _migrate_auth_columns(conn)
         conn.executescript(SCHEMA)
+        _migrate_girl_footage_no_fk(conn)
         conn.commit()
     finally:
         conn.close()
