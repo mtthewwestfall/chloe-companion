@@ -992,37 +992,6 @@ def diag_image_review(request: Request):
             "got_response": got, "http_status": http_status, "error": error}
 
 
-@app.post("/api/v1/admin/diag/submit-test")
-def diag_submit_test(request: Request, body: dict):
-    """TEMPORARY diagnostic (remove after): runs the FULL submission pipeline
-    (clean -> review -> insert) with timing per phase, using the owner's user
-    id. The test row is deleted before returning."""
-    _require_admin(request)
-    phases = {}
-    t0 = time.time()
-    try:
-        conn = _conn()
-        try:
-            row = submit.create_submission(conn, "cm_ZexuDeKs7WrpRKCi", {
-                "name": body.get("name", "DiagTest"),
-                "persona": "diagnostic",
-                "blurb": "diag",
-                "images": body.get("images", []),
-                "policy_ack": True,
-            })
-            phases["verdict"] = row.get("status")
-            phases["inserted_id"] = row.get("id")
-            conn.execute("DELETE FROM submissions WHERE id = ?", (row["id"],))
-            conn.commit()
-            phases["cleaned_up"] = True
-        finally:
-            conn.close()
-    except Exception as e:
-        phases["error"] = f"{type(e).__name__}: {str(e)[:200]}"
-    phases["total_s"] = round(time.time() - t0, 2)
-    return phases
-
-
 @app.get("/api/v1/admin/submissions")
 def admin_list_submissions(request: Request, status: str = ""):
     _require_admin(request)
