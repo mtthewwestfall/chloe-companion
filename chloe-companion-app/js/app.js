@@ -304,6 +304,7 @@
   });
 
   // Mic: voice-note sending unlocks with her reply tiers.
+  $('picBtn').addEventListener('click', openReqSheet);
   $('micBtn').addEventListener('click', () => {
     showToast('Voice notes come with her Plus and VIP plans');
   });
@@ -625,6 +626,8 @@
     $('profileName').textContent = (me && me.name) || localStorage.getItem('chloe_name') || 'You';
     $('statMsgs').textContent = me ? me.messages_remaining : '—';
     $('statVoice').textContent = me ? me.voice_notes_remaining : '—';
+    $('statReqs').textContent = (me && typeof me.requests_remaining === 'number')
+      ? me.requests_remaining : '—';
     const tier = me && me.tier ? me.tier : 'basic';
     $('tierName').textContent = 'Companion — ' + tier.charAt(0).toUpperCase() + tier.slice(1);
     $('tierSub').textContent = me ? 'live on companion server' : 'couldn’t reach the server';
@@ -787,6 +790,170 @@
     } else if (returning) {
       addText('her', 'hey, welcome back. missed you.');
     }
+  }
+
+  /* ---------- request-a-pic (2026-10-01) ----------
+     Custom media requests: regular (she generates it from your prompt,
+     ~1-2 min) and give (a clip from her pre-approved stash, instant). */
+  const reqState = { balance: null, kind: null, media: null, busy: false };
+
+  function reqTotal(b) {
+    return (b.included_remaining || 0) + (b.overage_regular || 0) + (b.overage_give || 0);
+  }
+
+  function openReqSheet() {
+    if (!ApiClient.getToken()) { showAuth(); return; }
+    openSheet('reqSheet');
+    $('reqBody').innerHTML = '<p class="sheet-sub">checking your balance…</p>';
+    reqState.balance = null; reqState.kind = null; reqState.media = null;
+    ApiClient.mediaBalance(currentChar.id)
+      .then((b) => { reqState.balance = b; renderReqKind(); })
+      .catch(() => {
+        $('reqBody').innerHTML = '<p class="sheet-sub">couldn’t reach the server — try again in a bit.</p>';
+      });
+  }
+
+  function reqBalanceLine() {
+    const b = reqState.balance;
+    const left = reqTotal(b);
+    const dailyLeft = Math.max(0, (b.daily_cap || 0) - (b.daily_used || 0));
+    return '<div class="req-balance">📸 <b>' + left + '</b> request' + (left === 1 ? '' : 's') +
+      ' left this month · <b>' + dailyLeft + '</b> today</div>';
+  }
+
+  function renderReqKind() {
+    reqState.media = null;
+    const b = reqState.balance;
+    const giveOk = !!b.give_available;
+    $('reqBody').innerHTML =
+      reqBalanceLine() +
+      '<button class="req-opt" id="reqKindRegular">' +
+        '<span class="req-opt-title">✨ Make one for me</span>' +
+        '<span class="req-opt-sub">tell her what to wear, where she is… she’ll make it in a minute or two</span>' +
+      '</button>' +
+      '<button class="req-opt" id="reqKindGive"' + (giveOk ? '' : ' disabled') + '>' +
+        '<span class="req-opt-title">🎁 From her collection</span>' +
+        '<span class="req-opt-sub">' + (giveOk ? 'a clip from her private stash, instantly' : 'she hasn’t shared any yet') + '</span>' +
+      '</button>';
+    $('reqKindRegular').addEventListener('click', () => { reqState.kind = 'regular'; renderReqMedia(); });
+    if (giveOk) $('reqKindGive').addEventListener('click', () => { reqState.kind = 'give'; renderReqMedia(); });
+  }
+
+  function renderReqMedia() {
+    const isGive = reqState.kind === 'give';
+    const media = reqState.media;
+    $('reqBody').innerHTML =
+      reqBalanceLine() +
+      '<div class="req-back-row"><button class="btn-ghost" id="reqBack">← back</button></div>' +
+      '<div class="req-label">' + (isGive ? 'Pick from her collection' : 'What should she make?') + '</div>' +
+      '<div class="req-media-row">' +
+        '<button class="req-opt req-half' + (media === 'pic' ? ' selected' : '') + '" data-media="pic"><span class="req-opt-title">🖼️ Pic</span></button>' +
+        '<button class="req-opt req-half' + (media === 'video' ? ' selected' : '') + '" data-media="video"><span class="req-opt-title">🎬 Video</span><span class="req-opt-sub">~6 seconds</span></button>' +
+      '</div>' +
+      (isGive ? '' :
+        '<textarea id="reqPrompt" class="req-prompt" maxlength="500" placeholder="describe it for her… e.g. red dress on the balcony at sunset"></textarea>' +
+        '<button class="btn-primary" id="reqSend">Send request 💌</button>' +
+        '<p class="sheet-sub">uses 1 request · she’ll make it in a minute or two</p>');
+    $('reqBack').addEventListener('click', () => { reqState.media = null; renderReqKind(); });
+    document.querySelectorAll('#reqBody [data-media]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (isGive) { reqState.media = btn.dataset.media; sendMediaRequest(''); }
+        else {
+          const cur = ($('reqPrompt') || {}).value || '';
+          reqState.media = btn.dataset.media;
+          renderReqMedia();
+          const ta = $('reqPrompt');
+          if (ta) ta.value = cur;
+        }
+      });
+    });
+    const sendBtn = $('reqSend');
+    if (sendBtn) sendBtn.addEventListener('click', () => {
+      if (!reqState.media) { showToast('pick a pic or a video first 📸'); return; }
+      sendMediaRequest(($('reqPrompt') || {}).value || '');
+    });
+  }
+
+  function reqErrorText(e) {
+    const d = (e && e.detail) || '';
+    if (d === 'no_requests_left') return 'You’re out of requests, babe — they refill on the 1st 💕';
+    if (d === 'daily_request_cap') return 'That’s your daily limit — more tomorrow 😘';
+    if (d === 'generation_unavailable') return 'She can’t make those right now — try again later';
+    if (d === 'give_unavailable') return 'She hasn’t shared any of those yet';
+    return ApiClient.friendlyDetail(d);
+  }
+
+  async function sendMediaRequest(prompt) {
+    if (reqState.busy) return;
+    reqState.busy = true;
+    $('reqBody').innerHTML = '<p class="sheet-sub">sending… 💌</p>';
+    try {
+      const res = await ApiClient.createMediaRequest({
+        girl_id: currentChar.id, kind: reqState.kind,
+        media: reqState.media, prompt,
+      });
+      closeSheet('reqSheet');
+      if (res.status === 'rejected') {
+        addText('her', res.deflection || 'hmm, not that one, babe 😘');
+      } else if (res.status === 'ready') {
+        addText('her', reqState.kind === 'give'
+          ? 'just for you, babe 😘' : 'here you go 😘');
+        addMediaDrop(res.result_url, res.media);
+      } else {
+        // Regular, still generating: she acknowledged in character already.
+        addText('her', res.ack || 'give me a minute 😘');
+        const pending = addPendingDrop();
+        pollMediaRequest(res.id, pending, 0);
+      }
+    } catch (e) {
+      closeSheet('reqSheet');
+      showToast(reqErrorText(e), 3200);
+    } finally {
+      reqState.busy = false;
+    }
+  }
+
+  async function pollMediaRequest(id, pendingWrap, tries) {
+    if (tries >= 24) { // ~2 minutes: stop polling, it'll land when it lands
+      const b = pendingWrap.querySelector('.bubble');
+      if (b) b.innerHTML = '<div class="media-drop media-pending">still working on it — it’ll pop in when it’s ready 💕</div>';
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+    let res = null;
+    try { res = await ApiClient.pollMediaRequest(id); } catch (e) { /* retry */ }
+    if (!res) return pollMediaRequest(id, pendingWrap, tries + 1);
+    if (res.status === 'ready') {
+      const b = pendingWrap.querySelector('.bubble');
+      if (b) b.innerHTML = mediaDropHtml(res.result_url, res.media);
+      scrollBottom();
+      return;
+    }
+    if (res.status === 'failed') {
+      pendingWrap.remove();
+      addText('her', res.failed_line || 'that one didn’t come out right — I put your request back 💕');
+      return;
+    }
+    return pollMediaRequest(id, pendingWrap, tries + 1);
+  }
+
+  function mediaDropHtml(url, media) {
+    const u = esc(url || '');
+    const inner = media === 'video'
+      ? '<video class="media-drop-vid" src="' + u + '" autoplay muted loop playsinline controls></video>'
+      : '<img class="media-drop-img" src="' + u + '" alt="for you">';
+    return '<div class="media-drop">' + inner + '</div>';
+  }
+
+  function addMediaDrop(url, media) {
+    addMsg('her', mediaDropHtml(url, media),
+      { caption: charDisplayName() + ' · ' + timeNow() });
+  }
+
+  function addPendingDrop() {
+    return addMsg('her',
+      '<div class="media-drop media-pending"><div class="req-spinner"></div><div>making it for you…</div></div>',
+      { caption: charDisplayName() + ' · ' + timeNow() });
   }
 
   // Go: pick up the session from an email verify link, else require login.

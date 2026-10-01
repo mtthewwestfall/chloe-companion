@@ -175,6 +175,53 @@ CREATE TABLE IF NOT EXISTS memory_digest (
     PRIMARY KEY (user_id, character_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
+
+-- Custom media requests ("request-a-pic", 2026-10-01).
+-- media_requests: one row per ask. kind = regular (user prompt -> Sogni
+-- on-demand generation, async) | give (pre-approved library, instant, $0).
+-- media = pic | video. pool_source remembers which bucket the request drew
+-- from (included | overage_regular | overage_give) so a failed generation
+-- refunds to the right place.
+CREATE TABLE IF NOT EXISTS media_requests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    girl_id    TEXT NOT NULL DEFAULT 'chloe',
+    kind       TEXT NOT NULL,   -- regular | give
+    media      TEXT NOT NULL,   -- pic | video
+    prompt     TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'pending',  -- pending | ready | failed | rejected
+    result_url TEXT NOT NULL DEFAULT '',
+    cost_usd   REAL NOT NULL DEFAULT 0,
+    pool_source TEXT NOT NULL DEFAULT 'included',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_requests_user ON media_requests(user_id);
+
+-- Per-user request pool. included_remaining refills to the tier allocation
+-- monthly (no stacking); overage_* balances only grow via the $5.99
+-- overage pack (and the free-signup give grant) and persist across months.
+CREATE TABLE IF NOT EXISTS request_pools (
+    user_id                TEXT PRIMARY KEY,
+    period                 TEXT NOT NULL DEFAULT '',  -- YYYY-MM of included pool
+    included_remaining     INTEGER NOT NULL DEFAULT 0,
+    overage_regular_videos INTEGER NOT NULL DEFAULT 0,
+    overage_give_videos    INTEGER NOT NULL DEFAULT 0,
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+-- Per-user give history: which pre-approved give clips each user has
+-- already received, per girl. Drives the no-repeat rotation.
+CREATE TABLE IF NOT EXISTS user_give_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    girl_id    TEXT NOT NULL,
+    footage_id INTEGER NOT NULL,
+    sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_give_history_user_girl ON user_give_history(user_id, girl_id);
 """
 
 

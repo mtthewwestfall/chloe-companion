@@ -32,6 +32,13 @@ POST /api/v1/memory/export [auth] {character_id?} -> {memories:[...]}
 POST /api/v1/memory/delete [auth] {character_id?} -> {ok:true}
 POST /api/v1/stripe/webhook  (live: Stripe-signature-verified; credits message banks on purchase/renewal)
 POST /api/v1/jvzoo/ipn  (live: JVZIPN-v2-verified; fulfills tiers for JVZoo affiliate sales — tiers only)
+
+Custom media requests ("request-a-pic", 2026-10-01):
+GET  /api/v1/media-requests/balance [auth] ?girl_id=
+POST /api/v1/media-requests [auth] {girl_id, kind, media, prompt?}
+GET  /api/v1/media-requests/{id} [auth]
+GET  /api/v1/admin/media-requests  (prompt review)
+POST /api/v1/admin/credit-overage  ($5.99 Shopify overage pack fulfillment hook)
 """
 from __future__ import annotations
 
@@ -39,6 +46,7 @@ import hashlib
 import hmac
 import hmac
 import json
+import os
 import re
 import sqlite3
 import time
@@ -48,11 +56,16 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, brain, characters, config, db, photos, shows, store, trust, voice
+from . import auth, brain, characters, config, db, media_gen, photos, shows, store, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
+
+# Finished regular media-request generations are served from /generated/.
+os.makedirs(config.GENERATED_DIR, exist_ok=True)
+app.mount("/generated", StaticFiles(directory=config.GENERATED_DIR), name="generated")
 
 # Chloe's opener for a brand-new verified user who hasn't sent anything yet
 # (user's words, 2026-09-30). Seeded into her chat at email-verification time.
@@ -129,6 +142,17 @@ class FootageIn(BaseModel):
     sort_order: int = 0
 
 
+class MediaRequestIn(BaseModel):
+    girl_id: str = "chloe"
+    kind: str                        # regular | give
+    media: str                       # pic | video
+    prompt: str = ""                 # regular only; give ignores it
+
+
+class CreditOverageIn(BaseModel):
+    user_id: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -167,6 +191,49 @@ def _user_summary(user: dict[str, Any]) -> dict[str, Any]:
         "voice_notes_remaining": user["voice_notes_remaining"],
         "proactive_enabled": bool(user["proactive_enabled"]),
     }
+
+
+def _request_balance(conn: Any, user_id: str, girl_id: str = "") -> dict[str, Any]:
+    """Balance payload for the request-a-pic UI."""
+    user = store.get_or_create_user(conn, user_id)
+    pool = store.get_request_pool(conn, user_id)
+    tier = user.get("tier") or "basic"
+    return {
+        "tier": tier,
+        "period": pool["period"],
+        "included_remaining": pool["included_remaining"],
+        "overage_regular": pool["overage_regular_videos"],
+        "overage_give": pool["overage_give_videos"],
+        "daily_used": store.requests_used_today(conn, user_id),
+        "daily_cap": config.DAILY_REQUEST_CAPS.get(tier, 3),
+        "give_available": (store.girl_has_give(conn, girl_id)
+                           if girl_id else False),
+    }
+
+
+# In-character lines for the media-request flow. Chloe's exact voice is
+# preserved; other characters get the generic warm version.
+def _request_ack(character: dict[str, Any]) -> str:
+    if (character or {}).get("id", "chloe") == "chloe":
+        return "give me a minute, making it just for you \U0001F618"
+    name = (character or {}).get("name", "")
+    return f"give me a minute{name and ', ' + name or ''} — making it just for you \U0001F618"
+
+
+def _request_deflection(character: dict[str, Any]) -> str:
+    if (character or {}).get("id", "chloe") == "chloe":
+        return ("hmm, that one's off the table, babe — "
+                "tell me something else you'd like to see \U0001F609")
+    return ("hmm, I can't do that one — "
+            "tell me something else you'd like to see \U0001F609")
+
+
+def _request_failed_line(character: dict[str, Any]) -> str:
+    if (character or {}).get("id", "chloe") == "chloe":
+        return ("ugh, that one didn't come out right, babe — "
+                "I put it back, try again in a bit \U0001F496")
+    return ("that one didn't come out right — "
+            "I've put your request back, try again in a bit \U0001F496")
 
 
 def _send_verify_email(conn: Any, user: dict[str, Any]) -> None:
@@ -540,7 +607,163 @@ def me(user_id: str = "", request: Request = None):
     conn = _conn()
     try:
         user = store.get_or_create_user(conn, auth_id)
-        return _user_summary(user)
+        summary = _user_summary(user)
+        pool = store.get_request_pool(conn, auth_id)
+        summary["requests_remaining"] = (pool["included_remaining"]
+                                         + pool["overage_regular_videos"]
+                                         + pool["overage_give_videos"])
+        return summary
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Custom media requests ("request-a-pic", 2026-10-01).
+#
+# GET  /api/v1/media-requests/balance [auth] ?girl_id=
+#      -> {tier, period, included_remaining, overage_regular, overage_give,
+#          daily_used, daily_cap, give_available}
+# POST /api/v1/media-requests [auth] {girl_id, kind, media, prompt?}
+#      -> {id, status, result_url?, ack?}
+#         give  -> fulfilled instantly from her pre-approved library ($0)
+#         regular -> pending; she acknowledges in character, the app polls
+#                    until ready (~1-2 min). Failures auto-refund.
+# GET  /api/v1/media-requests/{id} [auth] -> {id, status, result_url, ...}
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/media-requests/balance")
+def media_balance(request: Request, girl_id: str = ""):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        return _request_balance(conn, user_id, girl_id)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/media-requests")
+def create_media_request(body: MediaRequestIn, request: Request):
+    user_id = _current_user_id(request)
+    kind = (body.kind or "").strip().lower()
+    media = (body.media or "").strip().lower()
+    if kind not in store.REQUEST_KINDS:
+        raise HTTPException(status_code=400, detail="kind must be regular|give")
+    if media not in store.REQUEST_MEDIA:
+        raise HTTPException(status_code=400, detail="media must be pic|video")
+    conn = _conn()
+    try:
+        character = characters.get_character(body.girl_id)
+        cid = character["id"]
+        user = store.get_or_create_user(conn, user_id)
+        tier = user.get("tier") or "basic"
+
+        # Daily cap (anti-farming).
+        cap = config.DAILY_REQUEST_CAPS.get(tier, 3)
+        if store.requests_used_today(conn, user_id) >= cap:
+            raise HTTPException(status_code=429, detail="daily_request_cap")
+
+        # Give is only offered for girls that actually have give footage.
+        if kind == "give" and not store.girl_has_give(conn, cid):
+            raise HTTPException(status_code=400, detail="give_unavailable")
+
+        # Regular prompts are moderated server-side. Rejected prompts get an
+        # in-character deflection — never an error dump — and cost nothing.
+        if kind == "regular":
+            reason = store.moderate_prompt(body.prompt)
+            if reason:
+                req = store.create_media_request(
+                    conn, user_id, cid, kind, media, body.prompt,
+                    pool_source="included")
+                store.set_media_request_status(conn, req["id"], "rejected")
+                return {"id": req["id"], "status": "rejected",
+                        "deflection": _request_deflection(character),
+                        "character_id": cid}
+
+        # Regular generation needs the Sogni key; fail closed without
+        # consuming anything when it isn't configured.
+        if kind == "regular" and not config.SOGNI_API_KEY:
+            raise HTTPException(status_code=503,
+                                detail="generation_unavailable")
+
+        pool = store.consume_request(conn, user_id, kind)
+        if pool is None:
+            raise HTTPException(status_code=402, detail="no_requests_left")
+
+        req = store.create_media_request(
+            conn, user_id, cid, kind, media, body.prompt,
+            pool_source=pool["source"])
+
+        if kind == "give":
+            clip = store.pick_give_clip(conn, user_id, cid)
+            if not clip:  # raced with footage deletion — refund, fail soft
+                store.refund_request(conn, user_id, pool["source"])
+                store.set_media_request_status(conn, req["id"], "failed")
+                raise HTTPException(status_code=400, detail="give_unavailable")
+            store.record_give_send(conn, user_id, cid, clip["id"])
+            store.set_media_request_status(conn, req["id"], "ready",
+                                           result_url=clip["url"], cost_usd=0)
+            return {"id": req["id"], "status": "ready",
+                    "result_url": clip["url"], "media": media,
+                    "character_id": cid,
+                    "balance": _request_balance(conn, user_id, cid)}
+
+        # Regular: async generation. She acknowledges in character; the app
+        # polls GET /api/v1/media-requests/{id} until ready.
+        media_gen.spawn_generation(req["id"])
+        return {"id": req["id"], "status": "pending",
+                "ack": _request_ack(character), "media": media,
+                "character_id": cid,
+                "balance": _request_balance(conn, user_id, cid)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/media-requests/{req_id}")
+def poll_media_request(req_id: int, request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        req = store.get_media_request(conn, user_id, req_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="not_found")
+        out = {"id": req["id"], "status": req["status"],
+               "kind": req["kind"], "media": req["media"],
+               "girl_id": req["girl_id"], "character_id": req["girl_id"],
+               "created_at": req["created_at"]}
+        if req["status"] == "ready":
+            out["result_url"] = req["result_url"]
+        elif req["status"] == "failed":
+            character = characters.get_character(req["girl_id"])
+            out["failed_line"] = _request_failed_line(character)
+        return out
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin: review media requests (prompts) + credit the $5.99 overage pack
+# (the Shopify webhook calls this once product + webhook ship).
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/media-requests")
+def admin_media_requests(request: Request, limit: int = 100):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        return {"requests": store.recent_media_requests(conn, limit)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/credit-overage")
+def admin_credit_overage(body: CreditOverageIn, request: Request):
+    _require_admin(request)
+    if not (body.user_id or "").strip():
+        raise HTTPException(status_code=400, detail="user_id required")
+    conn = _conn()
+    try:
+        pool = store.credit_overage_pack(conn, body.user_id.strip())
+        return {"ok": True, "user_id": body.user_id.strip(),
+                "overage_regular": pool["overage_regular_videos"],
+                "overage_give": pool["overage_give_videos"]}
     finally:
         conn.close()
 

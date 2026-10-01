@@ -192,3 +192,60 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 DB_PATH = os.environ.get("CHLOE_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "chloe.db"))
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+# ---------------------------------------------------------------------------
+# Custom media requests ("request-a-pic", 2026-10-01). Per-tier monthly
+# included pools, shared across BOTH categories (regular + give) — user
+# locked 2026-09-30. Pools top up like the message banks (no stacking):
+# set_tier and the Stripe renewal path both refill included_remaining to
+# the tier allocation via store.refill_request_pool().
+# ---------------------------------------------------------------------------
+REQUEST_POOLS = {
+    "basic": 5,    # $9.99
+    "plus": 10,    # $19.99
+    "vip": 20,     # $29.99
+}
+
+# Daily per-user request caps (anti-farming). Admin-configurable later.
+DAILY_REQUEST_CAPS = {
+    "basic": 3,
+    "plus": 6,
+    "vip": 10,
+}
+
+# Overage pack ($5.99, paid through Shopify — product + webhook are a
+# separate item; fulfillment calls store.credit_overage_pack()).
+OVERAGE_PACK = {
+    "price_usd": 5.99,
+    "messages": 300,
+    "regular_videos": 7,
+    "give_videos": 7,
+}
+
+# Free verified-signup grant (first 200) also gets this many PRESET give
+# sends (kind=give only — never regular generation; $0 cost). Credited in
+# store.grant_free_signup_messages alongside the 50 free messages.
+FREE_SIGNUP_GIVE_VIDEOS = 2
+
+# Server-side Sogni generation for REGULAR requests. Raw API key as a
+# Railway env var; generation stays OFF until it is set. NEVER commit the
+# real value here.
+SOGNI_API_KEY = os.environ.get("SOGNI_API_KEY", "")
+SOGNI_VIDEO_MODEL = os.environ.get(
+    "SOGNI_VIDEO_MODEL", "minimax-h3-fastvideo-int8_i2v_turbo")
+SOGNI_IMAGE_MODEL = os.environ.get(
+    "SOGNI_IMAGE_MODEL", "qwen_image_edit_2511_fp8")
+
+# Booked cost per fulfilled regular request (live Sogni quotes 2026-09-30:
+# ~$0.1175 per 6s clip, ~$0.01-0.03 per image). Logged per request.
+MEDIA_REQUEST_COST_USD = {
+    "regular_pic": 0.03,
+    "regular_video": 0.12,
+    "give": 0.0,
+}
+
+# Where finished regular generations are saved and served from.
+GENERATED_DIR = os.environ.get(
+    "CHLOE_GENERATED_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "generated"))

@@ -119,6 +119,7 @@
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/></svg>
     </button>
     <input id="msgInput" type="text" placeholder="Talk to her…" autocomplete="off" enterkeyhint="send" maxlength="500">
+    <button id="picBtn" class="icon-btn" aria-label="Request a pic">📸</button>
     <button id="sendBtn" class="icon-btn send" aria-label="Send">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
     </button>
@@ -133,6 +134,15 @@
     <p class="sheet-sub">Her live webcam shows — on the website.</p>
     <div id="showsList" class="shows-list"></div>
     <button id="openSiteBtn" class="btn-primary">Open the website</button>
+  </div>
+</div>
+
+<!-- Request-a-pic sheet (2026-10-01) -->
+<div id="reqSheet" class="sheet hidden">
+  <div class="sheet-card">
+    <div class="sheet-grab"></div>
+    <div class="sheet-head"><h2>Request a pic 📸</h2><button class="sheet-close" data-close="reqSheet">✕</button></div>
+    <div id="reqBody"></div>
   </div>
 </div>
 
@@ -155,6 +165,7 @@
     <div class="stat-row">
       <div class="stat"><div class="stat-num" id="statMsgs">300</div><div class="stat-label">messages left</div></div>
       <div class="stat"><div class="stat-num" id="statVoice">60</div><div class="stat-label">voice notes left</div></div>
+      <div class="stat"><div class="stat-num" id="statReqs">–</div><div class="stat-label">request-a-pic left</div></div>
     </div>
 
     <label class="toggle-row">

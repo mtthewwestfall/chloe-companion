@@ -405,3 +405,23 @@ body {
   font-size: 14px; line-height: 1.45; color: var(--ink);
 }
 .promo-banner b { color: #e8a94c; letter-spacing: .5px; }
+
+/* ---------- request-a-pic (2026-10-01) ---------- */
+.req-balance { font-size: 14px; color: var(--muted, #9a9aa0); margin: 4px 0 12px; }
+.req-balance b { color: #fff; }
+.req-label { font-size: 13px; font-weight: 600; color: var(--muted, #9a9aa0); margin: 10px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+.req-back-row { margin: 2px 0 4px; }
+.req-opt { display: block; width: 100%; text-align: left; background: #1c1c1e; border: 1px solid #2c2c2e; color: #fff; border-radius: 14px; padding: 14px 16px; margin: 8px 0; font-size: 15px; cursor: pointer; }
+.req-opt:active { transform: scale(.98); }
+.req-opt:disabled { opacity: .45; cursor: default; }
+.req-opt.selected { border-color: var(--amber, #ffb020); box-shadow: 0 0 0 1px var(--amber, #ffb020); }
+.req-opt-title { display: block; font-weight: 600; font-size: 16px; }
+.req-opt-sub { display: block; font-size: 13px; color: var(--muted, #9a9aa0); margin-top: 3px; }
+.req-media-row { display: flex; gap: 10px; }
+.req-half { flex: 1; margin: 0; }
+.req-prompt { width: 100%; min-height: 88px; background: #1c1c1e; border: 1px solid #2c2c2e; border-radius: 14px; color: #fff; padding: 12px 14px; font-size: 15px; font-family: inherit; margin: 10px 0; resize: vertical; box-sizing: border-box; }
+.req-prompt:focus { outline: none; border-color: var(--amber, #ffb020); }
+.media-drop img.media-drop-img, .media-drop video.media-drop-vid { width: 100%; border-radius: 14px; display: block; max-height: 70vh; object-fit: cover; }
+.media-pending { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--muted, #9a9aa0); padding: 6px 2px; }
+.req-spinner { width: 20px; height: 20px; border-radius: 50%; border: 2px solid #3a3a3c; border-top-color: var(--amber, #ffb020); animation: req-spin 0.9s linear infinite; flex: none; }
+@keyframes req-spin { to { transform: rotate(360deg); } }

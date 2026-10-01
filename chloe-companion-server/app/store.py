@@ -6,7 +6,9 @@ construction as long as callers use this module (tested).
 """
 from __future__ import annotations
 
+import random
 import sqlite3
+import time
 from typing import Any
 
 from . import config, db
@@ -47,6 +49,9 @@ def set_tier(conn: sqlite3.Connection, user_id: str, tier: str) -> dict[str, Any
         (tier, t["messages_per_month"], t["voice_notes_per_month"],
          1 if t["proactive"] else 0, user_id),
     )
+    # Custom media requests (2026-10-01): refill the included request pool
+    # to the new tier's allocation, same no-stacking rule as the banks.
+    refill_request_pool(conn, user_id)
     conn.commit()
     return dict(conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone())
 
@@ -175,6 +180,10 @@ def grant_free_signup_messages(conn: sqlite3.Connection, user_id: str, n: int,
            WHERE user_id = ?""",
         (n, user_id),
     )
+    # Free verified-signup grant also includes 2 PRESET give requests
+    # (2026-10-01, user decision): kind=give only — never regular
+    # generation; $0 cost. Only when the grant itself succeeded.
+    credit_free_give(conn, user_id, config.FREE_SIGNUP_GIVE_VIDEOS)
     conn.commit()
     return True
 
@@ -662,3 +671,325 @@ def delete_girl_footage(conn: sqlite3.Connection, footage_id: int) -> bool:
     cur = conn.execute("DELETE FROM girl_footage WHERE id = ?", (footage_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Custom media requests ("request-a-pic", 2026-10-01).
+#
+# Two kinds:
+#   regular — the user's prompt goes to Sogni for on-demand generation
+#             (async; ~$0.03/pic, ~$0.12/video). Prompt is moderated.
+#   give    — a pre-approved clip from the girl's give-labeled footage,
+#             served instantly ($0 marginal). Never in any free rotation.
+#
+# Balance model: each user has a request_pools row. included_remaining
+# refills to the tier allocation monthly (no stacking); overage_* balances
+# grow only via the $5.99 overage pack (credit_overage_pack) or the free
+# verified-signup grant's 2 preset give sends (credit_free_give).
+# ---------------------------------------------------------------------------
+REQUEST_KINDS = ("regular", "give")
+REQUEST_MEDIA = ("pic", "video")
+REQUEST_STATUSES = ("pending", "ready", "failed", "rejected")
+
+
+def _pool_period() -> str:
+    """YYYY-MM of the included pool (UTC)."""
+    return time.strftime("%Y-%m", time.gmtime())
+
+
+def get_request_pool(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]:
+    """Fetch the user's request pool, auto-creating it and rolling the
+    included pool when the month turns over. Overage balances persist."""
+    user = get_or_create_user(conn, user_id)  # ensure row exists
+    tier = user.get("tier") or "basic"
+    period = _pool_period()
+    row = conn.execute(
+        "SELECT * FROM request_pools WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO request_pools (user_id, period, included_remaining) "
+            "VALUES (?, ?, ?)",
+            (user_id, period, config.REQUEST_POOLS.get(tier, 5)),
+        )
+        conn.commit()
+    elif row["period"] != period:
+        conn.execute(
+            "UPDATE request_pools SET period = ?, included_remaining = ?, "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (period, config.REQUEST_POOLS.get(tier, 5), user_id),
+        )
+        conn.commit()
+    row = conn.execute(
+        "SELECT * FROM request_pools WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    return dict(row)
+
+
+def refill_request_pool(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]:
+    """Top the included pool back UP TO the tier allocation (no stacking).
+    Called from set_tier and therefore from every purchase/renewal path."""
+    user = get_or_create_user(conn, user_id)  # ensure row exists
+    tier = user.get("tier") or "basic"
+    period = _pool_period()
+    conn.execute(
+        """INSERT INTO request_pools (user_id, period, included_remaining,
+                                      updated_at)
+           VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id) DO UPDATE SET
+               period = excluded.period,
+               included_remaining = excluded.included_remaining,
+               updated_at = datetime('now')""",
+        (user_id, period, config.REQUEST_POOLS.get(tier, 5)),
+    )
+    conn.commit()
+    return dict(
+        conn.execute(
+            "SELECT * FROM request_pools WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    )
+
+
+def consume_request(conn: sqlite3.Connection, user_id: str,
+                    kind: str) -> dict[str, Any] | None:
+    """Consume one request from the pool: included_remaining first, then the
+    matching overage bucket (regular -> overage_regular_videos,
+    give -> overage_give_videos). Returns the pool dict with a "source" key
+    (included | overage_regular | overage_give), or None when empty."""
+    pool = get_request_pool(conn, user_id)  # rolls the period
+    if pool["included_remaining"] > 0:
+        conn.execute(
+            "UPDATE request_pools SET included_remaining = included_remaining - 1, "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (user_id,),
+        )
+        conn.commit()
+        pool["included_remaining"] -= 1
+        pool["source"] = "included"
+        return pool
+    col = ("overage_regular_videos" if kind == "regular"
+           else "overage_give_videos")
+    if pool[col] > 0:
+        conn.execute(
+            f"UPDATE request_pools SET {col} = {col} - 1, "
+            "updated_at = datetime('now') WHERE user_id = ?",
+            (user_id,),
+        )
+        conn.commit()
+        pool[col] -= 1
+        pool["source"] = ("overage_regular" if kind == "regular"
+                          else "overage_give")
+        return pool
+    return None
+
+
+def refund_request(conn: sqlite3.Connection, user_id: str,
+                   pool_source: str) -> None:
+    """Return one consumed request to the bucket it came from (used when a
+    regular generation fails or a request is rejected after consuming)."""
+    col = {
+        "included": "included_remaining",
+        "overage_regular": "overage_regular_videos",
+        "overage_give": "overage_give_videos",
+    }.get(pool_source or "included", "included_remaining")
+    get_request_pool(conn, user_id)  # ensure row exists
+    conn.execute(
+        f"UPDATE request_pools SET {col} = {col} + 1, "
+        "updated_at = datetime('now') WHERE user_id = ?",
+        (user_id,),
+    )
+    conn.commit()
+
+
+def credit_overage_pack(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]:
+    """Fulfill the $5.99 overage pack (paid through Shopify — product and
+    webhook are a separate item; the Shopify webhook will call this):
+    +300 messages, +7 regular videos, +7 give videos."""
+    get_or_create_user(conn, user_id)  # ensure row exists
+    pack = config.OVERAGE_PACK
+    conn.execute(
+        """UPDATE users SET messages_remaining = messages_remaining + ?,
+                              updated_at = datetime('now') WHERE user_id = ?""",
+        (pack["messages"], user_id),
+    )
+    pool = get_request_pool(conn, user_id)
+    conn.execute(
+        """UPDATE request_pools
+           SET overage_regular_videos = overage_regular_videos + ?,
+               overage_give_videos = overage_give_videos + ?,
+               updated_at = datetime('now')
+           WHERE user_id = ?""",
+        (pack["regular_videos"], pack["give_videos"], user_id),
+    )
+    conn.commit()
+    return get_request_pool(conn, user_id)
+
+
+def credit_free_give(conn: sqlite3.Connection, user_id: str, n: int) -> None:
+    """Free verified-signup grant add-on: n PRESET give sends (kind=give
+    only — never regular generation; $0 marginal cost)."""
+    get_request_pool(conn, user_id)  # ensure row exists
+    conn.execute(
+        "UPDATE request_pools SET overage_give_videos = overage_give_videos + ?, "
+        "updated_at = datetime('now') WHERE user_id = ?",
+        (int(n or 0), user_id),
+    )
+    conn.commit()
+
+
+def requests_used_today(conn: sqlite3.Connection, user_id: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM media_requests "
+        "WHERE user_id = ? AND date(created_at) = date('now')",
+        (user_id,),
+    ).fetchone()
+    return row["c"] if row else 0
+
+
+# ---------------------------------------------------------------------------
+# media_requests rows
+# ---------------------------------------------------------------------------
+def create_media_request(conn: sqlite3.Connection, user_id: str, girl_id: str,
+                         kind: str, media: str, prompt: str = "",
+                         pool_source: str = "included") -> dict[str, Any]:
+    if kind not in REQUEST_KINDS:
+        raise ValueError(f"kind must be one of {REQUEST_KINDS}")
+    if media not in REQUEST_MEDIA:
+        raise ValueError(f"media must be one of {REQUEST_MEDIA}")
+    cur = conn.execute(
+        """INSERT INTO media_requests
+               (user_id, girl_id, kind, media, prompt, status, pool_source)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+        (user_id, (girl_id or "chloe").strip().lower(),
+         kind, media, prompt or "", pool_source),
+    )
+    conn.commit()
+    return dict(
+        conn.execute(
+            "SELECT * FROM media_requests WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+    )
+
+
+def get_media_request(conn: sqlite3.Connection, user_id: str,
+                      req_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM media_requests WHERE id = ? AND user_id = ?",
+        (req_id, user_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_media_request_status(conn: sqlite3.Connection, req_id: int,
+                             status: str, result_url: str = "",
+                             cost_usd: float = 0.0) -> None:
+    if status not in REQUEST_STATUSES:
+        raise ValueError(f"status must be one of {REQUEST_STATUSES}")
+    conn.execute(
+        "UPDATE media_requests SET status = ?, result_url = ?, cost_usd = ? "
+        "WHERE id = ?",
+        (status, result_url or "", float(cost_usd or 0.0), req_id),
+    )
+    conn.commit()
+
+
+def recent_media_requests(conn: sqlite3.Connection,
+                          limit: int = 100) -> list[dict[str, Any]]:
+    """Admin review: newest requests with prompts, for moderation oversight."""
+    return [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, user_id, girl_id, kind, media, prompt, status, "
+            "result_url, cost_usd, created_at FROM media_requests "
+            "ORDER BY id DESC LIMIT ?",
+            (max(1, min(int(limit or 100), 500)),),
+        ).fetchall()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Prompt moderation (regular requests only). Server-side blocklist; every
+# prompt is logged (the row itself) for admin review. Rejected prompts get
+# an in-character deflection from the endpoint — never an error dump.
+# ---------------------------------------------------------------------------
+_PROMPT_BLOCKLIST = (
+    # minors / non-consent / extreme — hard reject
+    "child", "kid", "teen", "minor", "underage", "baby",
+    "forced", "non-consent", "nonconsent", "rape", "drugged",
+    "unconscious", "sleeping",  # sexualized unconsciousness
+    "incest", "bestiality", "animal",
+    "gore", "blood", "torture", "mutilat",
+    # explicit sexual content stays in the GIVE lane (pre-approved only);
+    # regular prompts must stay non-explicit.
+    "nude", "naked", "topless", "explicit", "porn", "sex ",
+    " sex", "blowjob", "handjob", "orgasm", "masturbat",
+    "nipple", "pussy", "dick", "cock", "tits",
+)
+
+
+def moderate_prompt(prompt: str) -> str | None:
+    """Return a rejection reason when the prompt is blocked, else None."""
+    p = (prompt or "").strip()
+    if not p:
+        return "empty prompt — tell her what you'd like to see"
+    if len(p) > 500:
+        return "prompt too long (500 chars max)"
+    low = p.lower()
+    for bad in _PROMPT_BLOCKLIST:
+        if bad in low:
+            return "that one's off the table, babe"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Give library: pre-approved clips only. Rotation never repeats a clip to
+# the same user until every clip has been sent (then it reshuffles), and
+# never sends the same clip twice in a row.
+# ---------------------------------------------------------------------------
+def girl_has_give(conn: sqlite3.Connection, girl_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM girl_footage WHERE girl_id = ? AND label = 'give' LIMIT 1",
+        ((girl_id or "").strip().lower(),),
+    ).fetchone()
+    return bool(row)
+
+
+def pick_give_clip(conn: sqlite3.Connection, user_id: str,
+                   girl_id: str) -> dict[str, Any] | None:
+    """Pick a give clip for this user: prefer clips never sent to them,
+    never the most recent one. Returns {id, url} or None."""
+    gid = (girl_id or "").strip().lower()
+    clips = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, url FROM girl_footage WHERE girl_id = ? AND label = 'give' "
+            "ORDER BY sort_order, id",
+            (gid,),
+        ).fetchall()
+    ]
+    if not clips:
+        return None
+    sent = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT footage_id FROM user_give_history "
+            "WHERE user_id = ? AND girl_id = ? ORDER BY id",
+            (user_id, gid),
+        ).fetchall()
+    ]
+    sent_ids = [r["footage_id"] for r in sent]
+    last_id = sent_ids[-1] if sent_ids else None
+    fresh = [c for c in clips
+             if c["id"] not in sent_ids and c["id"] != last_id]
+    pool = fresh or [c for c in clips if c["id"] != last_id] or clips
+    return random.choice(pool)
+
+
+def record_give_send(conn: sqlite3.Connection, user_id: str, girl_id: str,
+                     footage_id: int) -> None:
+    conn.execute(
+        "INSERT INTO user_give_history (user_id, girl_id, footage_id) "
+        "VALUES (?, ?, ?)",
+        (user_id, (girl_id or "").strip().lower(), int(footage_id)),
+    )
+    conn.commit()

@@ -183,10 +183,26 @@ const ApiClient = (() => {
     }
   }
 
+  /* ---------- custom media requests ("request-a-pic", 2026-10-01) ---------- */
+
+  async function mediaBalance(girlId) {
+    const q = girlId ? '?girl_id=' + encodeURIComponent(girlId) : '';
+    return request('GET', '/api/v1/media-requests/balance' + q);
+  }
+
+  function createMediaRequest(payload) {
+    return request('POST', '/api/v1/media-requests', payload);
+  }
+
+  function pollMediaRequest(id) {
+    return request('GET', '/api/v1/media-requests/' + id);
+  }
+
   return {
     getToken, setToken, clearToken,
     signup, login, logout, resendVerification, setName, me, userId,
     chat, history, shows, tiers, characters,
+    mediaBalance, createMediaRequest, pollMediaRequest,
     onStatus, onAuthRequired, isConnected: () => connected,
     friendlyDetail,
   };
