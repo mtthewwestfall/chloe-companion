@@ -163,6 +163,10 @@ body {
 .msg-time { font-size: 10.5px; color: var(--ink-dim); margin-top: 4px; padding: 0 4px; }
 .msg.him .msg-time { align-self: flex-end; }
 
+/* links inside chat bubbles: visible + tappable on both themes */
+.bubble a { color: #8fd0ff; text-decoration: underline; word-break: break-all; }
+.msg.him .bubble a { color: #fff3d6; }
+
 /* voice-note bubble */
 .voice-bubble {
   display: flex; align-items: center; gap: 10px;

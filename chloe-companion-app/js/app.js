@@ -43,10 +43,20 @@
     return wrap;
   }
 
-  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // Escape HTML, then make URLs tappable. Escape-first keeps this safe:
+  // &amp; inside href decodes back to & when the link is followed.
+  function linkify(s) {
+    return esc(s).replace(/(https?:\/\/[^\s<]+)/g, (m) => {
+      const url = m.replace(/[.,;:!?)\]]+$/, '');
+      const trail = m.slice(url.length);
+      return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url + '</a>' + trail;
+    });
+  }
 
   function addText(who, text) {
-    addMsg(who, esc(text), { caption: who === 'her' ? charDisplayName() + ' · ' + timeNow() : timeNow() });
+    addMsg(who, linkify(text), { caption: who === 'her' ? charDisplayName() + ' · ' + timeNow() : timeNow() });
   }
 
   // Restore a saved turn: server stores UTC ("YYYY-MM-DD HH:MM:SS"), so
@@ -59,7 +69,7 @@
     const who = role === 'user' ? 'him' : 'her';
     const t = histDate(created_at);
     const stamp = t ? t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
-    addMsg(who, esc(text || ''), {
+    addMsg(who, linkify(text || ''), {
       caption: who === 'her' ? charDisplayName() + (stamp ? ' · ' + stamp : '') : stamp,
     });
   }
