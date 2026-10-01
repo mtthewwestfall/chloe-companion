@@ -695,6 +695,23 @@
       card.appendChild(btn);
       list.appendChild(card);
     });
+
+    // Overage Pack: $5.99 Shopify top-up — 300 messages + 14 preset videos.
+    // Credit lands automatically when they check out with their
+    // companion-account email (a 5-minute poll fulfills new orders).
+    const topCard = document.createElement('div');
+    topCard.className = 'plan-card';
+    topCard.innerHTML = `
+      <div class="plan-head"><div class="plan-name">Overage Pack</div><div class="plan-price">$5.99<span>one-time</span></div></div>
+      <ul class="plan-benefits"><li>300 messages</li><li>14 preset videos</li></ul>
+      <div class="sheet-sub">Check out with your companion-account email so credit lands automatically.</div>`;
+    const topBtn = document.createElement('button');
+    topBtn.className = 'btn-primary';
+    topBtn.textContent = 'Top up · $5.99';
+    topBtn.addEventListener('click', () => window.open(
+      'https://lockeddoorai.myshopify.com/cart/67593656107098:1', '_blank', 'noopener'));
+    topCard.appendChild(topBtn);
+    list.appendChild(topCard);
   }
 
   $('proactiveToggle').addEventListener('change', (e) => {
@@ -876,7 +893,7 @@
 
   function reqErrorText(e) {
     const d = (e && e.detail) || '';
-    if (d === 'no_requests_left') return 'You’re out of requests, babe — they refill on the 1st 💕';
+    if (d === 'no_requests_left') return 'You’re out of requests, babe — they refill on the 1st, or grab the Overage Pack in Plans anytime 💕';
     if (d === 'daily_request_cap') return 'That’s your daily limit — more tomorrow 😘';
     if (d === 'generation_unavailable') return 'She can’t make those right now — try again later';
     if (d === 'give_unavailable') return 'She hasn’t shared any of those yet';

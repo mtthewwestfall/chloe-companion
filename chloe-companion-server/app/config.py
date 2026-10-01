@@ -216,11 +216,13 @@ DAILY_REQUEST_CAPS = {
 
 # Overage pack ($5.99, paid through Shopify — product + webhook are a
 # separate item; fulfillment calls store.credit_overage_pack()).
+# All-preset since 2026-09-30: no custom generation in the pack — the 14
+# video sends are preset give clips only ($0 marginal generation cost).
 OVERAGE_PACK = {
     "price_usd": 5.99,
     "messages": 300,
-    "regular_videos": 7,
-    "give_videos": 7,
+    "regular_videos": 0,
+    "give_videos": 14,
 }
 
 # Free verified-signup grant (first 200) also gets this many PRESET give

@@ -802,9 +802,9 @@ def refund_request(conn: sqlite3.Connection, user_id: str,
 
 
 def credit_overage_pack(conn: sqlite3.Connection, user_id: str) -> dict[str, Any]:
-    """Fulfill the $5.99 overage pack (paid through Shopify — product and
-    webhook are a separate item; the Shopify webhook will call this):
-    +300 messages, +7 regular videos, +7 give videos."""
+    """Fulfill the $5.99 overage pack (paid through Shopify — fulfillment
+    polls new orders and calls this): +300 messages, +14 preset video
+    sends (give clips only — no custom generation in the pack)."""
     get_or_create_user(conn, user_id)  # ensure row exists
     pack = config.OVERAGE_PACK
     conn.execute(
