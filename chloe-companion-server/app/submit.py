@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import concurrent.futures
 import json
 import re
 import sqlite3
@@ -122,7 +123,7 @@ def _gemini_vision_post(parts: list[dict], timeout: int = 60) -> dict | None:
         return None
 
 
-def review_images(images: list[str]) -> dict:
+def _review_images_sync(images: list[str]) -> dict:
     """AI-review submitted images. Returns {verdict, per_image, notes}.
 
     verdict: "pass" | "flag" | "reject"
@@ -174,6 +175,29 @@ def review_images(images: list[str]) -> dict:
         notes.append("AI review covered fewer photos than submitted")
     return {"verdict": verdict, "per_image": cleaned,
             "notes": "; ".join(notes) if notes else "all photos passed"}
+
+
+# ---------------------------------------------------------------------------
+# Review timeout guard (2026-10-01): the vision HTTP call has its own
+# socket timeout, but a hung connection can still stall the request past
+# it. Run the review in a worker thread and fail CLOSED to "flagged" if
+# it doesn't finish in time — the owner still reviews before anything
+# goes live, and the customer gets an answer instead of a hung spinner.
+# ---------------------------------------------------------------------------
+REVIEW_TIMEOUT_S = 55
+
+
+def review_images(images: list[str]) -> dict:
+    """AI-review with a hard wall-clock cap. Never raises; fail closed."""
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = ex.submit(_review_images_sync, images)
+        return fut.result(timeout=REVIEW_TIMEOUT_S)
+    except Exception:
+        return {"verdict": "flag", "per_image": [],
+                "notes": "AI review timed out — needs human review"}
+    finally:
+        ex.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------

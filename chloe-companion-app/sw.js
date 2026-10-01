@@ -1,6 +1,6 @@
 /* Service worker: cache-first app shell. All assets are local, so the app
    works offline-ish once installed. Version the cache name on changes. */
-const CACHE = 'chloe-companion-v9';
+const CACHE = 'chloe-companion-v10';
 const SHELL = [
   './',
   './index.html',
@@ -10,6 +10,8 @@ const SHELL = [
   './js/mock.js',
   './js/api.js',
   './js/app.js',
+  './js/submit.js',
+  './css/submit.css',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png'
