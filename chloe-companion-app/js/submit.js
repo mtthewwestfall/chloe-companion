@@ -1,17 +1,18 @@
-/* SubmitFlow — custom-companion submissions (2026-10-01).
-   Approval-only: any customer can create a companion, submit name +
-   persona + up to 3 photos. Every photo is AI-reviewed (18+ / no nudity)
-   before the owner ever sees it. Nothing goes live without owner approval.
+/* CreatorFlow — custom-companion creator (2026-10-01), ported from the
+   Sorority-house companion creator. Paid members create a companion with a
+   name, gender, personality, tagline, and 1-3 REAL photos, plus 18+ / rights
+   attestation. Every photo is AI-moderated server-side; the character goes
+   live immediately with the real photos (no painted portrait, no queue).
 
-   Plain script (no modules), exposes window.SubmitFlow.
-   Uses window.ApiClient for server calls.
+   Plain script (no modules), exposes window.SubmitFlow (name kept for its
+   existing callers). Uses window.ApiClient for server calls.
 */
 window.SubmitFlow = (() => {
   'use strict';
 
   const MAX_PHOTOS = 3;
   let photos = []; // data URIs, downscaled
-  let policyText = '';
+  let gender = 'female';
 
   function $(id) { return document.getElementById(id); }
   function esc(s) {
@@ -70,6 +71,12 @@ window.SubmitFlow = (() => {
     if (count) count.textContent = `${photos.length}/${MAX_PHOTOS} photos`;
   }
 
+  function setGender(g) {
+    gender = g === 'male' ? 'male' : 'female';
+    document.querySelectorAll('#subGenderPills button').forEach((b) =>
+      b.classList.toggle('active', b.dataset.gender === gender));
+  }
+
   /* ---------- sheet ---------- */
 
   async function openSubmissionSheet() {
@@ -80,22 +87,17 @@ window.SubmitFlow = (() => {
     if (prof) prof.classList.add('hidden');
     photos = [];
     renderPhotoStrip();
+    setGender('female');
     const nameEl = $('subName'), personaEl = $('subPersona'),
-          blurbEl = $('subBlurb'), ackEl = $('subPolicyAck');
+          blurbEl = $('subBlurb');
     if (nameEl) nameEl.value = '';
     if (personaEl) personaEl.value = '';
     if (blurbEl) blurbEl.value = '';
-    if (ackEl) ackEl.checked = false;
+    const a18 = $('subAttest18'), ar = $('subAttestRights');
+    if (a18) a18.checked = false;
+    if (ar) ar.checked = false;
     const status = $('subStatus');
     if (status) { status.textContent = ''; status.className = 'sheet-sub'; }
-    if (!policyText) {
-      try {
-        const r = await window.ApiClient.submissionPolicy();
-        policyText = r.policy || '';
-      } catch (e) { policyText = ''; }
-    }
-    const pol = $('subPolicyText');
-    if (pol) pol.textContent = policyText || 'Submission policy unavailable — try again in a bit.';
     $('submitSheet').classList.remove('hidden');
   }
 
@@ -103,7 +105,7 @@ window.SubmitFlow = (() => {
     $('submitSheet').classList.add('hidden');
   }
 
-  async function submitForm() {
+  async function createCompanion() {
     const status = $('subStatus');
     const say = (t, bad) => {
       if (!status) return;
@@ -113,33 +115,39 @@ window.SubmitFlow = (() => {
     const name = ($('subName').value || '').trim();
     const persona = ($('subPersona').value || '').trim();
     const blurb = ($('subBlurb').value || '').trim();
-    const ack = $('subPolicyAck').checked;
+    const a18 = $('subAttest18').checked;
+    const ar = $('subAttestRights').checked;
     if (!name) { say('Give them a name.', true); return; }
-    if (!ack) { say('Please accept the submission policy.', true); return; }
     if (!photos.length) { say('Add at least one photo.', true); return; }
-    say('Submitting — your photos are being AI-reviewed…');
-    $('subSubmitBtn').disabled = true;
+    if (!a18) { say('Please confirm everyone in the photos is 18 or older.', true); return; }
+    if (!ar) { say('Please confirm you have the right to use these photos.', true); return; }
+    const btn = $('subSubmitBtn');
+    btn.disabled = true;
+    // Bounded visible phases — a stall shows progress, never a dead button.
+    const t0 = Date.now();
+    say('Checking your photos…');
+    const phaseTimer = setInterval(() => {
+      if (Date.now() - t0 > 12000) say('Building their personality…');
+    }, 4000);
     try {
-      const res = await window.ApiClient.createSubmission({
-        name, persona, blurb, images: photos, policy_ack: ack,
+      const res = await window.ApiClient.createCompanion({
+        name, persona, blurb, gender,
+        attest_18: a18, attest_rights: ar, images: photos,
       });
-      if (res.status === 'rejected') {
-        say('Not approved: ' + (res.review && res.review.notes || 'did not pass review.'), true);
-      } else if (res.status === 'flagged') {
-        say('Received — it needs a closer look before approval. We\'ll be in touch.', false);
-      } else {
-        say('Sent for review! You\'ll see them here when approved.', false);
-      }
-      photos = [];
-      renderPhotoStrip();
-      refreshMySubmissions();
+      const comp = (res && res.companion) || {};
+      closeSubmissionSheet();
+      toast('Say hi to ' + (comp.name || name) + ' ✨');
+      // Land on the new companion: the picker restores the saved id on boot.
+      try { localStorage.setItem('chloe_char_id', comp.id); } catch (e) {}
+      location.reload();
     } catch (e) {
       const d = (e && e.detail) || '';
       say(d === 'paid_tier_required'
         ? 'Custom companions are for paid members — pick a plan in your profile.'
-        : 'Couldn\'t submit: ' + (window.ApiClient.friendlyDetail(d) || d || 'try again.'), true);
+        : 'Couldn\'t create: ' + (window.ApiClient.friendlyDetail(d) || d || 'try again.'), true);
     } finally {
-      $('subSubmitBtn').disabled = false;
+      clearInterval(phaseTimer);
+      btn.disabled = false;
     }
   }
 
@@ -199,8 +207,10 @@ window.SubmitFlow = (() => {
     }
     const add = $('subPhotoAdd');
     if (add) add.addEventListener('click', () => $('subPhotoInput').click());
+    document.querySelectorAll('#subGenderPills button').forEach((b) =>
+      b.addEventListener('click', () => setGender(b.dataset.gender)));
     const btn = $('subSubmitBtn');
-    if (btn) btn.addEventListener('click', submitForm);
+    if (btn) btn.addEventListener('click', createCompanion);
     document.querySelectorAll('[data-close="submitSheet"]').forEach((b) =>
       b.addEventListener('click', closeSubmissionSheet));
     const openBtn = $('createCompanionBtn');

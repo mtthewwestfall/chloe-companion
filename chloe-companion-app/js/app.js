@@ -240,8 +240,8 @@
       chip.addEventListener('click', () => switchCharacter(c.id, roster));
       bar.appendChild(chip);
     });
-    // "Create your own" chip (2026-10-01): opens the submission sheet —
-    // any gender, approval-only.
+    // "Create your own" chip (2026-10-01): opens the companion creator —
+    // any gender, 3 real photos, live immediately.
     const plus = document.createElement('button');
     plus.className = 'char-chip char-chip-create';
     plus.title = 'Create your own companion';

@@ -59,7 +59,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, db, media_gen, photos, shows, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, db, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
@@ -162,6 +162,16 @@ class SubmissionApproveIn(BaseModel):
 
 class SubmissionRejectIn(BaseModel):
     reason: str = ""
+
+
+class CompanionCreateIn(BaseModel):
+    name: str = ""
+    persona: str = ""
+    blurb: str = ""
+    gender: str = "female"
+    attest_18: bool = False
+    attest_rights: bool = False
+    images: list[str] = []           # data URIs, 1-3 real photos
 
 
 class CreditOverageIn(BaseModel):
@@ -916,6 +926,29 @@ def create_submission(body: SubmissionIn, request: Request):
                                             body.model_dump())
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        conn.close()
+
+
+# Companion creator (2026-10-01): ported from the Sorority-house companion
+# creator. Paid members create a custom companion with 1-3 REAL photos;
+# every photo is AI-moderated and the character goes live immediately.
+@app.post("/api/v1/companions/create")
+def create_companion(body: CompanionCreateIn, request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        if (user.get("tier") or "free") not in ("basic", "plus", "vip"):
+            raise HTTPException(status_code=402,
+                                detail="paid_tier_required")
+        try:
+            comp = creator.create_companion(conn, user_id,
+                                            body.model_dump())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        characters.bust_cache()
+        return {"ok": True, "companion": comp}
     finally:
         conn.close()
 

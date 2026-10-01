@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS local_characters (
     sort_order       INTEGER NOT NULL DEFAULT 0,
     enabled          INTEGER NOT NULL DEFAULT 1,
     verified_fictional INTEGER NOT NULL DEFAULT 0,  -- 2026-10-01: owner-verified not a real person
+    photos           TEXT NOT NULL DEFAULT '[]',  -- 2026-10-01: creator photo set (JSON data URIs)
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -351,6 +352,18 @@ def _migrate_submission_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_creator_columns(conn: sqlite3.Connection) -> None:
+    """2026-10-01: ported companion creator. Existing installs get a photos
+    JSON column on local_characters for the creator's real-photo set."""
+    if _table_exists(conn, "local_characters") and not _column_exists(
+        conn, "local_characters", "photos"
+    ):
+        conn.execute(
+            "ALTER TABLE local_characters ADD COLUMN photos "
+            "TEXT NOT NULL DEFAULT '[]'"
+        )
+
+
 def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     """One-time rebuild of girl_footage without the local_characters FK."""
     row = conn.execute(
@@ -390,6 +403,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_character_columns(conn)
         _migrate_auth_columns(conn)
         _migrate_submission_columns(conn)
+        _migrate_creator_columns(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)
         conn.commit()

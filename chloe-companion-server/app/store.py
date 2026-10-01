@@ -6,6 +6,8 @@ construction as long as callers use this module (tested).
 """
 from __future__ import annotations
 
+import json
+
 import random
 import sqlite3
 import time
@@ -563,8 +565,8 @@ def list_local_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         dict(r)
         for r in conn.execute(
             "SELECT id, name, avatar_url, persona, companion_voice, blurb, "
-            "door_title, sort_order, enabled, verified_fictional, created_at, "
-            "updated_at "
+            "door_title, sort_order, enabled, verified_fictional, photos, "
+            "created_at, updated_at "
             "FROM local_characters ORDER BY sort_order, name"
         ).fetchall()
     ]
@@ -576,17 +578,22 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
     cid = (char.get("id") or "").strip().lower()
     if not cid or cid == "chloe":
         raise ValueError("character id must be a non-empty slug other than 'chloe'")
+    _photos = char.get("photos")
+    if isinstance(_photos, list):
+        _photos = json.dumps(_photos)
+    _photos = _photos if isinstance(_photos, str) and _photos else "[]"
     conn.execute(
         "INSERT INTO local_characters "
         "(id, name, avatar_url, persona, companion_voice, blurb, door_title, "
-        " sort_order, enabled, verified_fictional, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        " sort_order, enabled, verified_fictional, photos, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
         "ON CONFLICT(id) DO UPDATE SET "
         "name=excluded.name, avatar_url=excluded.avatar_url, "
         "persona=excluded.persona, companion_voice=excluded.companion_voice, "
         "blurb=excluded.blurb, door_title=excluded.door_title, "
         "sort_order=excluded.sort_order, enabled=excluded.enabled, "
         "verified_fictional=excluded.verified_fictional, "
+        "photos=excluded.photos, "
         "updated_at=datetime('now')",
         (
             cid,
@@ -599,6 +606,7 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
             int(char.get("sort_order") or 0),
             1 if char.get("enabled", True) else 0,
             1 if char.get("verified_fictional") else 0,
+            _photos,
         ),
     )
     conn.commit()

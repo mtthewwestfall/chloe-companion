@@ -208,6 +208,10 @@ const ApiClient = (() => {
     return request('POST', '/api/v1/submissions', payload, { timeoutMs: 90000 });
   }
 
+  function createCompanion(payload) {
+    return request('POST', '/api/v1/companions/create', payload, { timeoutMs: 120000 });
+  }
+
   function mySubmissions() {
     return request('GET', '/api/v1/submissions/mine');
   }
@@ -217,7 +221,7 @@ const ApiClient = (() => {
     signup, login, logout, resendVerification, setName, me, userId,
     chat, history, shows, tiers, characters,
     mediaBalance, createMediaRequest, pollMediaRequest,
-    submissionPolicy, createSubmission, mySubmissions,
+    submissionPolicy, createSubmission, mySubmissions, createCompanion,
     onStatus, onAuthRequired, isConnected: () => connected,
     friendlyDetail,
   };

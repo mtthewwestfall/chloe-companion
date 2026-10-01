@@ -29,3 +29,5 @@
 .sub-row-status.st-rejected { background:rgba(220,80,80,.25); }
 .sheet-sub.bad { color:#ff9d9d; }
 .char-chip-create { opacity:.85; border-style:dashed !important; }
+.gender-pills { display:flex; gap:8px; margin:2px 0 4px; }
+.gender-pills .btn-ghost.active { border-color:#fff; background:rgba(255,255,255,.14); }

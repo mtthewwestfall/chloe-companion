@@ -147,7 +147,7 @@
   </div>
 </div>
 
-<!-- Create-your-own companion sheet (2026-10-01): submission only, any gender -->
+<!-- Create-your-own companion sheet (2026-10-01): ported creator — 3 real photos, live immediately -->
 <div id="submitSheet" class="sheet hidden">
   <div class="sheet-card">
     <div class="sheet-grab"></div>
@@ -155,6 +155,11 @@
     <p class="sheet-sub">Create your own companion — choose their name, appearance, and personality.</p>
     <label class="fld-label">Their name</label>
     <input id="subName" type="text" placeholder="e.g. Derek, Valentina…" maxlength="60">
+    <label class="fld-label">They are a…</label>
+    <div class="gender-pills" id="subGenderPills">
+      <button type="button" class="btn-ghost small active" data-gender="female">Woman</button>
+      <button type="button" class="btn-ghost small" data-gender="male">Man</button>
+    </div>
     <label class="fld-label">Personality <span class="dim">(how they act, what they're like)</span></label>
     <textarea id="subPersona" rows="3" placeholder="Charming, teasing, loves late-night talks…" maxlength="2000"></textarea>
     <label class="fld-label">Tagline <span class="dim">(optional, one line)</span></label>
@@ -164,14 +169,16 @@
     <div id="subPhotoStrip" class="sub-photo-strip"></div>
     <button id="subPhotoAdd" class="btn-ghost small">+ Add photos</button>
     <div class="policy-box">
-      <p id="subPolicyText" class="sheet-sub"></p>
-      <label class="toggle-row"><span>I accept the submission policy</span>
-        <input type="checkbox" id="subPolicyAck"><span class="toggle"></span>
+      <label class="toggle-row"><span>Everyone in these photos is 18 or older</span>
+        <input type="checkbox" id="subAttest18"><span class="toggle"></span>
+      </label>
+      <label class="toggle-row"><span>I have the right to use these photos</span>
+        <input type="checkbox" id="subAttestRights"><span class="toggle"></span>
       </label>
     </div>
     <p id="subStatus" class="sheet-sub"></p>
-    <button id="subSubmitBtn" class="btn-primary">Submit for review</button>
-    <p class="sheet-sub dim">Submission only — nothing goes live until it's personally approved.</p>
+    <button id="subSubmitBtn" class="btn-primary">Create companion</button>
+    <p class="sheet-sub dim">Your photos are AI-checked, then they go live right away — using your real photos.</p>
   </div>
 </div>
 
