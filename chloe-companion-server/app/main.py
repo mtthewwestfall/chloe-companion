@@ -942,6 +942,50 @@ def my_submissions(request: Request):
         conn.close()
 
 
+@app.get("/api/v1/admin/diag/image-review")
+def diag_image_review(request: Request):
+    """Admin-only diagnostic: does the Gemini image-review call work?
+
+    Sends a tiny embedded test image to the same model/endpoint the
+    submission review uses. Returns timing + outcome only — never the
+    API key, never image bytes.
+    """
+    _require_admin(request)
+    t0 = time.time()
+    key_set = bool(config.GEMINI_API_KEY)
+    if not key_set:
+        return {"key_set": False, "duration_s": 0.0, "got_response": False,
+                "http_status": None, "error": "no_key"}
+    tiny_png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+        "hQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    payload = {"contents": [{"role": "user", "parts": [
+        {"text": "Reply with ONLY this JSON: "
+                 "[{\"nudity\": \"no\", \"all_adult\": \"yes\", "
+                 "\"note\": \"diag test\"}]"},
+        {"inline_data": {"mime_type": "image/png", "data": tiny_png_b64}},
+    ]}], "generationConfig": {"temperature": 0.0, "maxOutputTokens": 200}}
+    req = urllib.request.Request(
+        submit._GEMINI_URL, data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json",
+                 "x-goog-api-key": config.GEMINI_API_KEY},
+    )
+    http_status, error, got = None, None, False
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            http_status = resp.status
+            body = resp.read().decode("utf-8")
+            got = bool(json.loads(body).get("candidates"))
+    except urllib.error.HTTPError as e:
+        http_status, error = e.code, "http_error"
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        error = type(e).__name__
+    return {"key_set": True, "duration_s": round(time.time() - t0, 2),
+            "got_response": got, "http_status": http_status, "error": error}
+
+
 @app.get("/api/v1/admin/submissions")
 def admin_list_submissions(request: Request, status: str = ""):
     _require_admin(request)
