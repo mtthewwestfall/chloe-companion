@@ -1,4 +1,7 @@
 /* Custom-companion submissions (2026-10-01) */
+/* sits above other sheets (z-40) so it can't open underneath the profile
+   sheet, but stays below the toast (z-60) */
+#submitSheet { z-index: 50; }
 .fld-label { display:block; font-weight:600; margin:14px 0 6px; font-size:14px; }
 .fld-label .dim { font-weight:400; }
 #submitSheet input[type="text"], #submitSheet textarea {
