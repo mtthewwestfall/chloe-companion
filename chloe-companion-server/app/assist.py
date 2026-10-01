@@ -31,9 +31,12 @@ from . import config
 # web_search: lookups per day. reminders: max active reminders.
 # email_drafts / job_lookup: feature flags.
 # ---------------------------------------------------------------------------
+# Job lookup is on every paid tier (2026-10-01, user-directed): someone
+# hunting for work shouldn't have to pay extra for the thing that helps
+# them afford us. Email drafts stay Plus/VIP.
 CAPS = {
     "basic": {"web_search": 20, "reminders": 10, "email_drafts": False,
-              "job_lookup": False},
+              "job_lookup": True},
     "plus": {"web_search": 50, "reminders": 25, "email_drafts": True,
              "job_lookup": True},
     "vip": {"web_search": 100, "reminders": 50, "email_drafts": True,
