@@ -178,6 +178,9 @@
   /* ---------- character picker ---------- */
 
   const DEFAULT_CHAR = { id: 'chloe', name: 'Chloe', avatar_url: '' };
+  // Fallback so Chloe's tab never renders as a bare initial when the
+  // roster ships without her avatar_url (Keyhole backend may omit it).
+  const CHLOE_AVATAR_FALLBACK = 'https://keyhole-latest-production.up.railway.app/assets/chloe-1.jpg';
   let currentChar = { ...DEFAULT_CHAR };
   try {
     const savedId = localStorage.getItem('chloe_char_id');
@@ -233,8 +236,9 @@
     roster.forEach((c) => {
       const chip = document.createElement('button');
       chip.className = 'char-chip' + (c.id === currentChar.id ? ' selected' : '');
-      const face = c.avatar_url
-        ? `<img class="char-chip-face" src="${esc(c.avatar_url)}" alt="">`
+      const _avatar = c.avatar_url || (c.id === 'chloe' ? CHLOE_AVATAR_FALLBACK : '');
+      const face = _avatar
+        ? `<img class="char-chip-face" src="${esc(_avatar)}" alt="">`
         : `<span class="char-chip-face char-chip-initial">${esc((c.name || '?').charAt(0).toUpperCase())}</span>`;
       chip.innerHTML = `${face}<span class="char-chip-name">${esc(c.name || c.id)}</span>`;
       chip.addEventListener('click', () => switchCharacter(c.id, roster));
