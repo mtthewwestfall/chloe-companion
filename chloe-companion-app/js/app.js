@@ -181,6 +181,23 @@
   // Fallback so Chloe's tab never renders as a bare initial when the
   // roster ships without her avatar_url (Keyhole backend may omit it).
   const CHLOE_AVATAR_FALLBACK = 'https://keyhole-latest-production.up.railway.app/assets/chloe-1.jpg';
+  // Per-girl bedroom backgrounds, unique to each girl. Custom companions
+  // fall back to their own avatar photo.
+  const BEDROOMS = {
+    chloe: './img/bedrooms/chloe.jpg',
+    mara: './img/bedrooms/mara.jpg',
+  };
+  function roomFor(c) {
+    if (c && BEDROOMS[c.id]) return BEDROOMS[c.id];
+    return (c && c.avatar_url) || '';
+  }
+  function updateRoomBackground() {
+    const el = document.getElementById('roomBg');
+    if (!el) return;
+    const url = roomFor(currentChar);
+    if (url) { el.style.backgroundImage = 'url("' + url + '")'; el.classList.remove('hidden'); }
+    else { el.classList.add('hidden'); }
+  }
   let currentChar = { ...DEFAULT_CHAR };
   try {
     const savedId = localStorage.getItem('chloe_char_id');
@@ -258,6 +275,7 @@
     bar.classList.toggle('hidden', roster.length < 2);
     await loadCharFootage(currentChar.id);
     updateCharTile();
+    updateRoomBackground();
   }
 
   async function switchCharacter(id, roster) {
@@ -271,6 +289,7 @@
     });
     await loadCharFootage(currentChar.id);
     updateCharTile();
+    updateRoomBackground();
     chatLog.innerHTML = '';
     // Each character keeps their own saved conversation — restore it rather
     // than starting blank.
