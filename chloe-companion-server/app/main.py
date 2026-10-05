@@ -711,9 +711,10 @@ def create_media_request(body: MediaRequestIn, request: Request):
         user = store.get_or_create_user(conn, user_id)
         tier = user.get("tier") or "basic"
 
-        # Daily cap (anti-farming).
+        # Daily cap (anti-farming). Owners bypass (2026-10-05).
+        is_owner = user_id in assist._owner_ids()
         cap = config.DAILY_REQUEST_CAPS.get(tier, 3)
-        if store.requests_used_today(conn, user_id) >= cap:
+        if not is_owner and store.requests_used_today(conn, user_id) >= cap:
             raise HTTPException(status_code=429, detail="daily_request_cap")
 
         # Give is only offered for girls that actually have give footage.
@@ -748,9 +749,12 @@ def create_media_request(body: MediaRequestIn, request: Request):
             raise HTTPException(status_code=503,
                                 detail="generation_unavailable")
 
-        pool = store.consume_request(conn, user_id, kind)
-        if pool is None:
-            raise HTTPException(status_code=402, detail="no_requests_left")
+        if is_owner:
+            pool = {"source": "owner"}  # unlimited: nothing consumed
+        else:
+            pool = store.consume_request(conn, user_id, kind)
+            if pool is None:
+                raise HTTPException(status_code=402, detail="no_requests_left")
 
         req = store.create_media_request(
             conn, user_id, cid, kind, media, body.prompt,
@@ -759,7 +763,8 @@ def create_media_request(body: MediaRequestIn, request: Request):
         if kind == "give":
             clip = store.pick_give_clip(conn, user_id, cid)
             if not clip:  # raced with footage deletion — refund, fail soft
-                store.refund_request(conn, user_id, pool["source"])
+                if not is_owner:
+                    store.refund_request(conn, user_id, pool["source"])
                 store.set_media_request_status(conn, req["id"], "failed")
                 raise HTTPException(status_code=400, detail="give_unavailable")
             store.record_give_send(conn, user_id, cid, clip["id"])
