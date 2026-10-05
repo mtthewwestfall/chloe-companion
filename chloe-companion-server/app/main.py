@@ -134,6 +134,7 @@ class GirlUpdate(BaseModel):
     door_title: str | None = None
     sort_order: int | None = None
     enabled: bool | None = None
+    verified_fictional: bool | None = None
 
 
 class FootageIn(BaseModel):
