@@ -607,7 +607,9 @@ def auth_telegram(body: dict):
         user_id = f"tg_{tid}"
         user = store.get_or_create_user(conn, user_id)
         # Create a session token for API calls
-        token = import secrets; token = secrets.token_urlsafe(32); store.create_session(conn, user_id, token)
+        import secrets
+        token = secrets.token_urlsafe(32)
+        store.create_session(conn, user_id, token)
         return {"ok": True, "user_id": user_id, "token": token, "name": name}
     finally:
         conn.close()
