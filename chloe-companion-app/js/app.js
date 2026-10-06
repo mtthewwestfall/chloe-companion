@@ -74,7 +74,7 @@
     });
   }
 
-  function openChat(girlId) {
+  async function openChat(girlId) {
     const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[1];
     currentGirl = girl;
     $('chatName').textContent = girl.name;
@@ -91,7 +91,25 @@
     chatLog.appendChild(enc);
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
-    bootChat(false);
+    // Load last 8 turns so the conversation picks up where it left off
+    let hasHistory = false;
+    if (isLoggedIn()) {
+      try {
+        const res = await fetch(
+          CONFIG.API_BASE_URL + '/api/v1/chat/history?character_id=' + girl.id + '&limit=8',
+          { headers: { 'Authorization': 'Bearer ' + getToken() } }
+        );
+        const data = await res.json();
+        const turns = (data.turns || []).slice(-8);
+        hasHistory = turns.length > 0;
+        turns.forEach(t => {
+          const who = t.role === 'user' ? 'him' : 'her';
+          addText(who, t.text || '');
+        });
+        scrollBottom();
+      } catch (e) {}
+    }
+    bootChat(false, hasHistory);
   }
 
   $('backBtn').addEventListener('click', () => {
@@ -147,7 +165,7 @@
 
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  function addText(who, text) {
+  function addText(who, text, opts = {}) {
     addMsg(who, esc(text), { caption: who === 'her' ? currentGirl.name + ' · ' + timeNow() : timeNow() });
   }
 
@@ -720,7 +738,7 @@
     }
   }
 
-  async function bootChat(isFirstHello) {
+  async function bootChat(isFirstHello, hasHistory = false) {
     dayDividerIfNeeded();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';
@@ -740,7 +758,7 @@
     if (isFirstHello) {
       const name = localStorage.getItem('chloe_name') || 'friend';
       addText('her', `hey ${name}. i'm ${currentGirl.name.toLowerCase()}. this is my little corner — come talk to me anytime.`);
-    } else if (returning) {
+    } else if (returning && !hasHistory) {
       addText('her', MockEngine.returnOpener());
     }
   }

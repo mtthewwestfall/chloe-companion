@@ -1,6 +1,6 @@
 /* Service worker: cache-first app shell. All assets are local, so the app
    works offline-ish once installed. Version the cache name on changes. */
-const CACHE = 'chloe-companion-v19';
+const CACHE = 'chloe-companion-v20';
 const SHELL = [
   './',
   './index.html',
