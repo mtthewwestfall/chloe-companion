@@ -530,6 +530,17 @@ def admin_girl_footage(girl_id: str, request: Request):
         conn.close()
 
 
+@app.get("/api/v1/admin/girls/{girl_id}/requested-actions")
+def admin_requested_actions(girl_id: str, request: Request):
+    """View user-requested give actions for a girl, most-requested first."""
+    _require_admin(request)
+    conn = _conn()
+    try:
+        return {"actions": store.get_requested_actions(conn, girl_id)}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/admin/girls/{girl_id}/footage")
 def admin_add_girl_footage(girl_id: str, body: FootageIn, request: Request):
     _require_admin(request)
@@ -557,6 +568,31 @@ def admin_delete_girl_footage(girl_id: str, footage_id: int, request: Request):
     return {"ok": True}
 
 
+_ACTION_REQUEST_RE = None
+def _get_action_re():
+    global _ACTION_REQUEST_RE
+    if _ACTION_REQUEST_RE is None:
+        import re
+        # Matches "show me your X", "suck my X", "let me see your X", etc.
+        _ACTION_REQUEST_RE = re.compile(
+            r"\b(show me|let me see|wanna see|want to see|suck|lick|touch|"
+            r"show|strip|take off|remove)\b.{0,40}\b"
+            r"(tits|titties|boobs|breasts|pussy|ass|dick|cock|nipples|body|"
+            r"thighs|panties|bra)\b",
+            re.IGNORECASE,
+        )
+    return _ACTION_REQUEST_RE
+
+
+def _maybe_save_requested_action(conn, girl_id: str, user_text: str) -> None:
+    """Detect explicit action requests in chat and save them as give presets."""
+    try:
+        if _get_action_re().search(user_text or ""):
+            store.save_requested_action(conn, girl_id, user_text)
+    except Exception:
+        pass  # never break chat on a save failure
+
+
 @app.post("/api/v1/chat")
 def chat(body: ChatIn, request: Request):
     user_id = _current_user_id(request)  # login required — no free use
@@ -568,6 +604,10 @@ def chat(body: ChatIn, request: Request):
 
         user = store.get_or_create_user(conn, user_id)
         store.log_turn(conn, user_id, "user", body.message, cid)
+
+        # Requested give actions (2026-10-06): if he's asking for a specific
+        # explicit action, save it as a preset for this girl's give system.
+        _maybe_save_requested_action(conn, cid, body.message)
 
         if not store.consume_message(conn, user_id):
             return _empty_bank_reply(user, character,

@@ -1026,3 +1026,97 @@ def record_give_send(conn: sqlite3.Connection, user_id: str, girl_id: str,
         (user_id, (girl_id or "").strip().lower(), int(footage_id)),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Requested give actions (2026-10-06): user-requested actions saved per girl,
+# usable as presets in the give flow.
+# ---------------------------------------------------------------------------
+def _normalize_action(text: str) -> str:
+    """Normalize an action request for dedup matching."""
+    import re
+    t = (text or "").lower().strip()
+    t = re.sub(r"[^a-z0-9\s]", "", t)
+    t = re.sub(r"\s+", " ", t)
+    # Strip common prefixes
+    for prefix in ("show me your ", "show me ", "let me see your ", "let me see ",
+                   "i want to see your ", "i want to see ", "can i see your ",
+                   "can i see ", "wanna see your ", "wanna see "):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+            break
+    return t.strip()[:200]
+
+
+def save_requested_action(conn: sqlite3.Connection, girl_id: str,
+                          action_text: str) -> dict[str, Any] | None:
+    """Save a user-requested action. Dedups on normalized text per girl,
+    incrementing the request count. Returns the row or None if empty."""
+    gid = (girl_id or "").strip().lower()
+    text = (action_text or "").strip()[:500]
+    if not text or not gid:
+        return None
+    norm = _normalize_action(text)
+    if not norm:
+        return None
+    row = conn.execute(
+        "SELECT id, request_count FROM girl_requested_actions "
+        "WHERE girl_id = ? AND normalized = ?",
+        (gid, norm),
+    ).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE girl_requested_actions SET request_count = request_count + 1, "
+            "last_requested = datetime('now') WHERE id = ?",
+            (row["id"],),
+        )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM girl_requested_actions WHERE id = ?", (row["id"],)
+        ).fetchone())
+    cur = conn.execute(
+        "INSERT INTO girl_requested_actions (girl_id, action_text, normalized) "
+        "VALUES (?, ?, ?)",
+        (gid, text, norm),
+    )
+    conn.commit()
+    return dict(conn.execute(
+        "SELECT * FROM girl_requested_actions WHERE id = ?", (cur.lastrowid,)
+    ).fetchone())
+
+
+def get_requested_actions(conn: sqlite3.Connection, girl_id: str,
+                          limit: int = 50) -> list[dict[str, Any]]:
+    """List requested actions for a girl, most-requested first."""
+    gid = (girl_id or "").strip().lower()
+    return [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM girl_requested_actions WHERE girl_id = ? "
+            "ORDER BY request_count DESC, last_requested DESC LIMIT ?",
+            (gid, limit),
+        ).fetchall()
+    ]
+
+
+def match_requested_action(conn: sqlite3.Connection, girl_id: str,
+                           user_text: str) -> dict[str, Any] | None:
+    """Find a saved requested action matching the user's text."""
+    norm = _normalize_action(user_text)
+    if not norm:
+        return None
+    gid = (girl_id or "").strip().lower()
+    # Exact normalized match first, then substring
+    row = conn.execute(
+        "SELECT * FROM girl_requested_actions "
+        "WHERE girl_id = ? AND normalized = ? LIMIT 1",
+        (gid, norm),
+    ).fetchone()
+    if row:
+        return dict(row)
+    row = conn.execute(
+        "SELECT * FROM girl_requested_actions "
+        "WHERE girl_id = ? AND (normalized LIKE ? OR ? LIKE '%' || normalized || '%') "
+        "ORDER BY request_count DESC LIMIT 1",
+        (gid, f"%{norm}%", norm),
+    ).fetchone()
+    return dict(row) if row else None

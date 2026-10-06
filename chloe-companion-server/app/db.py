@@ -247,6 +247,21 @@ CREATE TABLE IF NOT EXISTS user_give_history (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_give_history_user_girl ON user_give_history(user_id, girl_id);
+
+-- Requested give actions (2026-10-06): actions users request in chat, per
+-- girl. These become presets in the give system — the give flow matches a
+-- user's requested action to an available clip when possible.
+CREATE TABLE IF NOT EXISTS girl_requested_actions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    girl_id          TEXT NOT NULL,
+    action_text      TEXT NOT NULL,
+    normalized       TEXT NOT NULL,
+    request_count    INTEGER NOT NULL DEFAULT 1,
+    fulfilled_clip_id INTEGER,
+    first_requested  TEXT NOT NULL DEFAULT (datetime('now')),
+    last_requested   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_requested_actions_girl ON girl_requested_actions(girl_id, normalized);
 """
 
 

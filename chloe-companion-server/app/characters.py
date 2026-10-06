@@ -46,6 +46,7 @@ CHLOE_FALLBACK: dict[str, Any] = {
     "blurb": "",
     "door_title": "",
     "sort_order": 0,
+    "verified_fictional": True,  # flagship AI character, inherently fictional
 }
 
 
