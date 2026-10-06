@@ -142,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_girl_media_girl ON girl_media(girl_id, kind);
 
 -- Give escalation stages (2026-10-06): 1=lift tease, 2=shirt off,
 -- 3=boob grabs, 4=nipple pinches, 5=pants off, 6=plays with herself,
--- 7=oral, 8=sex
+-- 7=titty fuck, 8=oral, 9=sex
 -- Per-user per-girl progress through the sequence.
 CREATE TABLE IF NOT EXISTS user_give_progress (
     user_id       TEXT NOT NULL,

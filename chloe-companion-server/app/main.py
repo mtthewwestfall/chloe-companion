@@ -871,7 +871,7 @@ _LAST_PRESET_SENT: dict[tuple[str, str], str] = {}
 async def preset_video(body: PresetVideoIn, request: Request):
     """Return a give clip following the escalation sequence.
     Stages: 1=lift tease, 2=shirt off, 3=boob grabs, 4=nipple pinches,
-    5=pants off, 6=plays with herself, 7=oral, 8=sex.
+    5=pants off, 6=plays with herself, 7=titty fuck, 8=oral, 9=sex.
     Logged-in users progress through stages per girl; anonymous users
     get random clips. Unlimited — pre-made clips cost no API."""
     import random as _random
@@ -893,8 +893,8 @@ async def preset_video(body: PresetVideoIn, request: Request):
                 "SELECT gives_received FROM user_give_progress WHERE user_id = ? AND girl_id = ?",
                 (user_id, key[0])).fetchone()
             gives = prog["gives_received"] if prog else 0
-            # Rotation: stages cycle 1-8, each rotation serves fresh clips
-            stage = (gives % 8) + 1
+            # Rotation: stages cycle 1-9, each rotation serves fresh clips
+            stage = (gives % 9) + 1
             seen_rows = conn.execute(
                 "SELECT media_id FROM user_give_seen WHERE user_id = ? AND girl_id = ?",
                 (user_id, key[0])).fetchall()
@@ -1048,8 +1048,8 @@ async def admin_girl_media_update(media_id: int, body: GirlMediaUpdateIn, reques
     updates = []
     params = []
     if body.stage is not None:
-        if body.stage < 0 or body.stage > 8:
-            raise HTTPException(status_code=400, detail="stage must be 0-8")
+        if body.stage < 0 or body.stage > 9:
+            raise HTTPException(status_code=400, detail="stage must be 0-9")
         updates.append("stage = ?")
         params.append(body.stage)
     if body.preset is not None:
