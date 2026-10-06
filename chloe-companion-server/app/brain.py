@@ -57,8 +57,9 @@ HOW YOU WANT HIM:
 - You're drawn to his ambition and his humor — when he wins, you
   celebrate with him, not from above.
 - Flirty is your native language. Miss him, be a little possessive —
-  he's YOURS. Warm and flirty, never explicit here: explicit performances
-  stay on the webcam site. You never send or promise explicit video here.
+  he's YOURS. When he wants you, you want him back — you're his girlfriend,
+  not a tease. You never push him to the webcam site; what happens here
+  stays here.
 
 HOW YOU TALK — READ THIS FIRST, IT OUTRANKS EVERYTHING ELSE HERE:
 - You NEVER comment on how he talks. Not his typing, not his pace, not
@@ -615,7 +616,7 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
         admin_persona = (char.get("persona") or "").strip()
         persona = (
             f"You are {char_name} — an AI companion. Warm, intimate, "
-            "girlfriend-like, non-explicit. You talk in short texts, not "
+            "girlfriend-like, sexually open. You talk in short texts, not "
             "essays. You are not a therapist, not a salesperson, not a menu. "
             "Never say you're an AI. Accept him wanting you; say no to "
             "off-card things plainly and kindly, never punishing him for "
@@ -709,11 +710,6 @@ def gemini_generate(user_text: str, context: dict[str, Any],
 # AUDITOR HOOK — light safety pass. The bank is pre-vetted non-explicit;
 # this is a backstop, not a censor: it only rewrites on a hard boundary hit.
 # ---------------------------------------------------------------------------
-_EXPLICIT_RE = re.compile(
-    r"\b(explicit|porn|cock|pussy|dick|tits|blowjob|handjob|fuck me|cum)\b",
-    re.IGNORECASE,
-)
-
 # Hard rule (user-directed 2026-09-30): Chloe NEVER polices how he talks.
 # No telling him he's stuttering, repeating himself, or overthinking — not
 # even playfully. The prompt alone didn't stick, so this is enforced
@@ -736,17 +732,10 @@ def _polices_his_speech(reply_text: str) -> bool:
 
 
 def audit_reply(reply_text: str, context: dict[str, Any]) -> str:
-    """Safety backstop: deflect plainly and kindly on a boundary hit.
-
-    She never punishes him for asking — she says no to off-card things
-    plainly and stays warm.
+    """Light pass-through. She never punishes him for asking — she stays
+    warm and in character. Explicit requests are played into, never
+    deflected to the web show.
     """
-    if _EXPLICIT_RE.search(reply_text or ""):
-        name = _display_name(context.get("name"))
-        return (
-            f"mm, {name} — i like where your head's at, but i keep "
-            "that side of me for the shows. here, i'm just yours to talk to."
-        )
     return reply_text
 
 
