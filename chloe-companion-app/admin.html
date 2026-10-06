@@ -70,9 +70,19 @@
   </div>
 
   <div id="tab-media">
-    <div class="filter-bar">
+    <div class="filter-bar" style="flex-wrap:wrap;">
       <button class="filter-btn active" onclick="setMediaFilter('untagged')">Untagged</button>
       <button class="filter-btn" onclick="setMediaFilter('all')">All</button>
+      <span style="color:#888;font-size:13px;align-self:center;margin-left:4px;">Stage:</span>
+      <button class="filter-btn" onclick="setMediaFilter('stage1')">1</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage2')">2</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage3')">3</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage4')">4</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage5')">5</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage6')">6</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage7')">7</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage8')">8</button>
+      <button class="filter-btn" onclick="setMediaFilter('stage9')">9</button>
     </div>
     <div style="color:#888;font-size:12px;margin-bottom:12px;">Stages: 1=lift tease · 2=shirt off · 3=boob grabs · 4=nipple pinch · 5=pants off · 6=plays w/ herself · 7=titty fuck · 8=oral · 9=sex</div>
     <div id="mediaList"></div>
@@ -159,6 +169,7 @@ function renderMedia() {
   const byGirl = {};
   allMedia.forEach(m => {
     if (mediaFilter === 'untagged' && m.kind === 'give' && (m.stage || 0) > 0) return;
+    if (mediaFilter.startsWith('stage') && m.kind === 'give' && (m.stage || 0) !== parseInt(mediaFilter.slice(5))) return;
     if (!byGirl[m.girl_id]) byGirl[m.girl_id] = { give: [], main: [], typing: [], activity: [] };
     byGirl[m.girl_id][m.kind].push(m);
   });
