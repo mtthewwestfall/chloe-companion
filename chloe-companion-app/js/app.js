@@ -339,11 +339,13 @@
     });
     const b = wrap.firstChild;
     const mediaHtml = mediaType === 'image'
-      ? `<img src="${url}" style="width:100%;height:100%;object-fit:cover;" alt="${presetName}">`
-      : `<video src="${url}" controls playsinline preload="metadata" style="width:100%;height:100%;object-fit:cover;"></video>`;
+      ? `<img src="${url}" style="width:100%;display:block;" alt="${presetName}">`
+      : `<video src="${url}" muted loop playsinline autoplay preload="metadata"
+           style="width:100%;display:block;cursor:pointer;"
+           onclick="this.muted=!this.muted;this.play();"></video>`;
     b.innerHTML = `
-      <div class="photo-scene">${mediaHtml}</div>
-      <div class="photo-caption">💕 ${presetName}</div>`;
+      <div class="photo-scene" style="height:auto;min-height:200px;">${mediaHtml}</div>
+      <div class="photo-caption">💕 ${presetName} <span style="font-size:11px;color:var(--sub);">· tap for sound</span></div>`;
   }
 
   /* ---------- pricing ---------- */
