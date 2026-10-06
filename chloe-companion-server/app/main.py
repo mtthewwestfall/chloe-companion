@@ -605,6 +605,13 @@ def chat(body: ChatIn, request: Request):
         user = store.get_or_create_user(conn, user_id)
         store.log_turn(conn, user_id, "user", body.message, cid)
 
+        # Referral activation (2026-10-06): check if this message activates
+        # a pending referral (3 messages + email verified)
+        try:
+            check_referral_activation(conn, user_id)
+        except Exception:
+            pass
+
         # Requested give actions (2026-10-06): if he's asking for a specific
         # explicit action, save it as a preset for this girl's give system.
         _maybe_save_requested_action(conn, cid, body.message)
@@ -869,6 +876,165 @@ async def preset_video(body: PresetVideoIn):
     clip = _random.choice(clips)
     return {"video_url": clip["url"], "media_type": clip["media_type"],
             "preset": body.preset, "girl_id": body.girl_id}
+
+
+
+# ---------------------------------------------------------------------------
+# Referral program "Whispr VIP Access" (2026-10-06)
+# 1 referral = 1 month VIP · 6 referrals = 1 year VIP
+# ---------------------------------------------------------------------------
+
+import secrets as _secrets
+
+def _get_or_create_referral_code(conn, user_id: str) -> str:
+    row = conn.execute(
+        "SELECT referral_code FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    if row and row["referral_code"]:
+        return row["referral_code"]
+    code = _secrets.token_urlsafe(8)[:10]
+    try:
+        conn.execute(
+            "UPDATE users SET referral_code = ? WHERE user_id = ?", (code, user_id))
+        conn.commit()
+    except Exception:
+        # collision — retry once
+        code = _secrets.token_urlsafe(8)[:10]
+        conn.execute(
+            "UPDATE users SET referral_code = ? WHERE user_id = ?", (code, user_id))
+        conn.commit()
+    return code
+
+
+def _evaluate_referral_reward(conn, referrer_id: str) -> dict:
+    """Count active referrals; grant 30 days per referral, 365 at 6."""
+    rows = conn.execute(
+        "SELECT COUNT(*) AS c FROM referrals WHERE referrer_id = ? AND status = 'active'",
+        (referrer_id,)).fetchone()
+    active = rows["c"] if rows else 0
+    days = 0
+    if active >= 6:
+        days = 365
+    elif active >= 1:
+        days = 30 * active
+    result = {"active_referrals": active, "days_granted": 0}
+    if days > 0:
+        # Extend vip_expires_at
+        row = conn.execute(
+            "SELECT vip_expires_at, vip_months_earned FROM users WHERE user_id = ?",
+            (referrer_id,)).fetchone()
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        current_exp = None
+        if row and row["vip_expires_at"]:
+            try:
+                current_exp = datetime.fromisoformat(row["vip_expires_at"])
+            except Exception:
+                pass
+        base = max(current_exp, now) if current_exp and current_exp > now else now
+        new_exp = base + timedelta(days=days)
+        months = (row["vip_months_earned"] or 0) + (12 if active >= 6 else active)
+        conn.execute(
+            "UPDATE users SET vip_expires_at = ?, vip_months_earned = ?, tier = 'vip' WHERE user_id = ?",
+            (new_exp.isoformat(), months, referrer_id))
+        conn.commit()
+        result["days_granted"] = days
+        result["vip_expires_at"] = new_exp.isoformat()
+    return result
+
+
+@app.get("/api/v1/referral/me")
+async def referral_me(request: Request):
+    """Get my referral code, link, and progress."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        code = _get_or_create_referral_code(conn, user_id)
+        rows = conn.execute(
+            "SELECT COUNT(*) AS c FROM referrals WHERE referrer_id = ? AND status = 'active'",
+            (user_id,)).fetchone()
+        active = rows["c"] if rows else 0
+        pending = conn.execute(
+            "SELECT COUNT(*) AS c FROM referrals WHERE referrer_id = ? AND status = 'pending'",
+            (user_id,)).fetchone()
+        user = conn.execute(
+            "SELECT vip_expires_at, vip_months_earned FROM users WHERE user_id = ?",
+            (user_id,)).fetchone()
+        base_url = config.PUBLIC_APP_URL or "https://lockeddoor.ai"
+        return {
+            "referral_code": code,
+            "referral_link": f"{base_url}/?ref={code}",
+            "active_referrals": active,
+            "pending_referrals": pending["c"] if pending else 0,
+            "vip_expires_at": user["vip_expires_at"] if user else None,
+            "vip_months_earned": user["vip_months_earned"] if user else 0,
+            "next_milestone": 6 if active < 6 else None,
+        }
+    finally:
+        conn.close()
+
+
+class ReferralTrackIn(BaseModel):
+    referral_code: str
+
+
+@app.post("/api/v1/referral/track")
+async def referral_track(body: ReferralTrackIn, request: Request):
+    """Called at signup: link new user to referrer. Creates pending referral."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        # Find referrer by code
+        ref = conn.execute(
+            "SELECT user_id FROM users WHERE referral_code = ?",
+            (body.referral_code,)).fetchone()
+        if not ref:
+            raise HTTPException(status_code=404, detail="invalid referral code")
+        referrer_id = ref["user_id"]
+        if referrer_id == user_id:
+            raise HTTPException(status_code=400, detail="cannot refer yourself")
+        # Record referred_by on new user
+        conn.execute(
+            "UPDATE users SET referred_by = ? WHERE user_id = ?",
+            (body.referral_code, user_id))
+        # Create pending referral (ignore if already tracked)
+        try:
+            conn.execute(
+                "INSERT INTO referrals (referrer_id, referred_id, status) VALUES (?, ?, 'pending')",
+                (referrer_id, user_id))
+        except Exception:
+            pass  # already tracked
+        conn.commit()
+        return {"ok": True, "referrer": referrer_id}
+    finally:
+        conn.close()
+
+
+def check_referral_activation(conn, user_id: str):
+    """Call after each user message. If referred user hit 3 messages and is
+    email-verified, mark referral active and evaluate referrer reward."""
+    ref = conn.execute(
+        "SELECT referrer_id, messages_sent, status FROM referrals WHERE referred_id = ?",
+        (user_id,)).fetchone()
+    if not ref or ref["status"] == "active":
+        return None
+    # Count messages sent by this user
+    new_count = (ref["messages_sent"] or 0) + 1
+    conn.execute(
+        "UPDATE referrals SET messages_sent = ? WHERE referred_id = ?",
+        (new_count, user_id))
+    # Check email verified
+    user = conn.execute(
+        "SELECT email_verified FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    verified = user and user["email_verified"]
+    if new_count >= 3 and verified:
+        conn.execute(
+            "UPDATE referrals SET status = 'active' WHERE referred_id = ?",
+            (user_id,))
+        conn.commit()
+        reward = _evaluate_referral_reward(conn, ref["referrer_id"])
+        return {"activated": True, "reward": reward}
+    conn.commit()
+    return {"activated": False, "messages_sent": new_count}
 
 
 # ---------------------------------------------------------------------------

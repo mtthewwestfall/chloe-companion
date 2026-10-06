@@ -108,6 +108,17 @@ CREATE TABLE IF NOT EXISTS free_grants (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
+-- Referral program "Whispr VIP Access" (2026-10-06)
+CREATE TABLE IF NOT EXISTS referrals (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_id   TEXT NOT NULL REFERENCES users(user_id),
+    referred_id   TEXT NOT NULL UNIQUE REFERENCES users(user_id),
+    status        TEXT NOT NULL DEFAULT 'pending',
+    messages_sent INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
+
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS local_characters (
@@ -408,6 +419,20 @@ def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_referral_columns(conn: sqlite3.Connection) -> None:
+    """Referral program (2026-10-06): add referral columns to users."""
+    for col, ddl in [
+        ("referral_code", "TEXT"),
+        ("referred_by", "TEXT"),
+        ("vip_months_earned", "INTEGER DEFAULT 0"),
+        ("vip_expires_at", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError:
+            pass  # already exists
+
+
 def init_db(db_path: str | None = None) -> None:
     conn = connect(db_path)
     try:
@@ -419,6 +444,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_auth_columns(conn)
         _migrate_submission_columns(conn)
         _migrate_creator_columns(conn)
+        _migrate_referral_columns(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)
         conn.commit()
