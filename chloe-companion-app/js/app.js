@@ -8,14 +8,18 @@
   const typingRow = $('typingRow'), toast = $('toast');
 
   /* ---------- characters ---------- */
+  const AVATAR_BASE = 'https://keyhole-latest-production.up.railway.app';
   const CHARACTERS = [
-    { id: 'isabella', name: 'Isabella', color: '#8e6fb8', initial: 'I',
+    { id: 'isabella', name: 'Isabella',
+      avatar: AVATAR_BASE + '/media/files/isabella_6c8d820baed84544.png',
       desc: 'Bold, charming, and playfully confident.',
       bestFor: 'Flirty banter, late-night laughs, and someone who keeps you on your toes.' },
-    { id: 'chloe', name: 'Chloe', color: '#e8a94c', initial: 'C',
+    { id: 'chloe', name: 'Chloe',
+      avatar: AVATAR_BASE + '/media/files/chloe_a6647f142096672f.jpg',
       desc: 'Bright, radiant, and effortlessly magnetic.',
       bestFor: 'Unwinding after a long day, deep late-night chats, and feel-good conversations.' },
-    { id: 'mara', name: 'Mara', color: '#c98f3a', initial: 'M',
+    { id: 'mara', name: 'Mara',
+      avatar: AVATAR_BASE + '/media/files/mara_bcd8ffe5d877fead.png',
       desc: 'Sweet, witty, and subtly captivating.',
       bestFor: 'Honest check-ins, shared secrets, and effortless chemistry.' },
   ];
@@ -28,7 +32,7 @@
       const el = document.createElement('div');
       el.className = 'girl-card';
       el.innerHTML = `
-        <div class="girl-photo" style="background:${c.color}"><span>${c.initial}</span></div>
+        <img class="girl-photo" src="${c.avatar}" alt="${c.name}" loading="lazy">
         <div class="girl-info">
           <div class="girl-name">${c.name} <span class="online-dot">● Online Now</span></div>
           <div class="girl-desc">${c.desc}<br><b>Best for:</b> ${c.bestFor}</div>
@@ -44,7 +48,7 @@
     currentGirl = girl;
     $('chatName').textContent = girl.name;
     const av = $('chatAvatar');
-    av.style.background = girl.color;
+    av.src = girl.avatar;
     av.alt = girl.name;
     // day divider + encryption note
     chatLog.innerHTML = '';
@@ -249,6 +253,68 @@
     $('nameInput').value = localStorage.getItem('chloe_name') || '';
     $('nameInput').focus();
   });
+
+  /* ---------- preset videos ---------- */
+
+  const PRESETS = {
+    chloe: [{ name: 'love', count: 6, emoji: '💕' }],
+    mara: [{ name: 'love', count: 1, emoji: '💕' }],
+    isabella: [{ name: 'love', count: 1, emoji: '💕' }],
+  };
+
+  $('plusBtn').addEventListener('click', () => {
+    const list = $('presetList');
+    list.innerHTML = '';
+    const presets = PRESETS[currentGirl.id] || [];
+    if (!presets.length) {
+      list.innerHTML = '<div class="sheet-sub">No presets yet for ' + currentGirl.name + '.</div>';
+    }
+    presets.forEach((p) => {
+      const el = document.createElement('div');
+      el.className = 'preset-item';
+      el.innerHTML = `
+        <div class="preset-thumb">${p.emoji}</div>
+        <div><div class="preset-name">${p.name}</div>
+        <div class="preset-count">${p.count} video${p.count === 1 ? '' : 's'}</div></div>`;
+      el.addEventListener('click', () => {
+        closeSheet('presetSheet');
+        sendPresetVideo(p.name);
+      });
+      list.appendChild(el);
+    });
+    openSheet('presetSheet');
+  });
+
+  async function sendPresetVideo(presetName) {
+    addText('him', `send me a ${presetName} video`);
+    typingRow.classList.remove('hidden');
+    scrollBottom();
+    await new Promise((r) => setTimeout(r, 1200));
+    typingRow.classList.add('hidden');
+    try {
+      const res = await ApiClient.requestPreset(currentGirl.id, presetName);
+      if (res.video_url) {
+        addPresetVideoBubble(res.video_url, presetName);
+      } else {
+        addText('her', 'let me find that for you… one sec');
+      }
+    } catch (e) {
+      addText('her', 'hmm, couldn\'t pull that one up. try again?');
+    }
+  }
+
+  function addPresetVideoBubble(url, presetName) {
+    const wrap = addMsg('her', '', {
+      bubbleClass: 'photo-bubble',
+      caption: currentGirl.name + ' · ' + timeNow(),
+    });
+    const b = wrap.firstChild;
+    b.innerHTML = `
+      <div class="photo-scene">
+        <video src="${url}" controls playsinline preload="metadata" style="width:100%;height:100%;object-fit:cover;"></video>
+      </div>
+      <div class="photo-caption">💕 ${presetName}</div>`;
+  }
 
   /* ---------- sheets ---------- */
 
