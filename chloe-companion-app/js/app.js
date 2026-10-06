@@ -371,6 +371,52 @@
     } catch (e) { /* pricing unavailable offline */ }
   }
 
+  /* ---------- referral ---------- */
+
+  async function openReferral() {
+    openSheet('referralSheet');
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/referral/me', {
+        headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('whispr_token') || '') }
+      });
+      const data = await res.json();
+      $('refLinkInput').value = data.referral_link || '';
+      const active = data.active_referrals || 0;
+      $('refProgressFill').style.width = Math.min(100, (active / 6) * 100) + '%';
+      $('refProgressText').textContent = `${active} / 6 friends` +
+        (active >= 6 ? ' — 1 Year VIP unlocked!' : active >= 1 ? ` — ${6 - active} more for a full year!` : '');
+    } catch (e) {
+      $('refProgressText').textContent = 'Sign in to get your referral link';
+    }
+  }
+
+  $('referralBtn').addEventListener('click', () => { closeSheet('profileSheet'); openReferral(); });
+  $('refCopyBtn').addEventListener('click', () => {
+    $('refLinkInput').select();
+    document.execCommand('copy');
+    showToast('Link copied!');
+  });
+  $('refShareTelegram').addEventListener('click', () => {
+    const link = $('refLinkInput').value;
+    window.open('https://t.me/share/url?url=' + encodeURIComponent(link) +
+      '&text=' + encodeURIComponent("I've been testing this new AI companion app called Whispr. Use my link for free VIP access:"), '_blank');
+  });
+  $('refShareX').addEventListener('click', () => {
+    const link = $('refLinkInput').value;
+    window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent("Check out Whispr on Lockeddoor.ai: " + link), '_blank');
+  });
+  $('refShareReddit').addEventListener('click', () => {
+    const link = $('refLinkInput').value;
+    window.open('https://www.reddit.com/submit?url=' + encodeURIComponent(link) + '&title=' + encodeURIComponent("Whispr AI Girlfriend - free VIP with referral"), '_blank');
+  });
+
+  // Check for ?ref= in URL at boot — store for signup
+  (function checkRefParam() {
+    const params = new URLSearchParams(window.location.search);
+    const ref = params.get('ref');
+    if (ref) localStorage.setItem('whispr_ref', ref);
+  })();
+
   /* ---------- sheets ---------- */
 
   function openSheet(id) { $(id).classList.remove('hidden'); }

@@ -136,6 +136,7 @@
           <p class="conn-line dim" id="apiBaseLine"></p>
           <button id="reconnectBtn" class="btn-ghost small">Retry connection</button>
           <button id="resetNameBtn" class="btn-ghost small">Change my name</button>
+          <button id="referralBtn" class="btn-ghost small" style="border-color:var(--pink);color:var(--pink);">🎁 Share & Get VIP Free</button>
         </div>
       </div>
     </div>
@@ -149,6 +150,37 @@
         <div class="sheet-head"><h2>Send a video</h2><button class="sheet-close" data-close="presetSheet">✕</button></div>
         <p class="sheet-sub">Pick a preset — she'll send it right in the chat.</p>
         <div id="presetList" class="preset-list"></div>
+      </div>
+    </div>
+
+    <!-- Referral sheet -->
+    <div id="referralSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Share Whispr</h2><button class="sheet-close" data-close="referralSheet">✕</button></div>
+        <p class="sheet-sub" style="font-size:15px;color:#fff;font-weight:600;">Share Whispr. Unlock Everything.</p>
+        <p class="sheet-sub">Don't pay for VIP. Invite your friends and get the full experience completely free.</p>
+        <div class="milestone-list">
+          <div class="milestone"><span>[ 1 Friend ]</span> → 1 Month Free VIP</div>
+          <div class="milestone"><span>[ 3 Friends ]</span> → 3 Months Free VIP</div>
+          <div class="milestone"><span>[ 6 Friends ]</span> → 1 Full Year Free VIP</div>
+        </div>
+        <div class="ref-progress">
+          <div class="ref-progress-bar"><div id="refProgressFill" class="ref-progress-fill"></div></div>
+          <div id="refProgressText" class="ref-progress-text">0 / 6 friends</div>
+        </div>
+        <div class="ref-link-box">
+          <div class="ref-link-label">Your Referral Link:</div>
+          <div class="ref-link-row">
+            <input id="refLinkInput" readonly>
+            <button id="refCopyBtn" class="btn-ghost small">Copy</button>
+          </div>
+        </div>
+        <div class="ref-share-btns">
+          <button class="btn-ghost small" id="refShareTelegram">Telegram</button>
+          <button class="btn-ghost small" id="refShareX">X</button>
+          <button class="btn-ghost small" id="refShareReddit">Reddit</button>
+        </div>
       </div>
     </div>
 

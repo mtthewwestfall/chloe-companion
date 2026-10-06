@@ -335,3 +335,17 @@ body {
 }
 .preset-name { font-size: 15px; font-weight: 600; text-transform: capitalize; }
 .preset-count { font-size: 12px; color: var(--sub); }
+
+/* referral */
+.milestone-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.milestone { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+.milestone span { color: var(--pink); font-weight: 700; }
+.ref-progress { margin: 14px 0; }
+.ref-progress-bar { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.ref-progress-fill { height: 100%; background: var(--grad); width: 0%; transition: width .3s; }
+.ref-progress-text { font-size: 13px; color: var(--sub); margin-top: 6px; text-align: center; }
+.ref-link-box { margin: 14px 0; }
+.ref-link-label { font-size: 13px; color: var(--sub); margin-bottom: 6px; }
+.ref-link-row { display: flex; gap: 8px; }
+.ref-link-row input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+.ref-share-btns { display: flex; gap: 8px; margin-top: 12px; }
