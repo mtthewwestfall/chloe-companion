@@ -901,18 +901,18 @@ async def preset_video(body: PresetVideoIn, request: Request):
             seen_ids = {r["media_id"] for r in seen_rows}
 
         # Get clips at the target stage
+        # If target stage is empty, walk forward through stages to find clips
+        # (never fall back to random - that breaks the 1->9 escalation)
+        db_rows = []
         if stage > 0:
-            db_rows = conn.execute(
-                """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
-                   AND (preset = ? OR preset IS NULL) AND stage = ?""",
-                (key[0], key[1], stage)).fetchall()
-        else:
-            db_rows = []
-        if not db_rows:
-            db_rows = conn.execute(
-                """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
-                   AND (preset = ? OR preset IS NULL)""",
-                (key[0], key[1])).fetchall()
+            for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+                db_rows = conn.execute(
+                    """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                       AND (preset = ? OR preset IS NULL) AND stage = ?""",
+                    (key[0], key[1], try_stage)).fetchall()
+                if db_rows:
+                    stage = try_stage  # use the actual stage we found clips at
+                    break
         clips = [{"id": r["id"], "url": r["url"], "media_type": "video"} for r in db_rows]
         # Prefer unseen clips at this stage; if all seen, start a fresh rotation
         fresh = [c for c in clips if c["id"] not in seen_ids] if user_id else clips
