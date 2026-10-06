@@ -826,6 +826,54 @@ def create_media_request(body: MediaRequestIn, request: Request):
         conn.close()
 
 
+
+# ---------------------------------------------------------------------------
+# Preset videos (2026-10-06): serve a girl's give clips by preset tag.
+# POST /api/v1/preset-video {girl_id, preset} -> {video_url, preset}
+# ---------------------------------------------------------------------------
+
+class PresetVideoIn(BaseModel):
+    girl_id: str
+    preset: str
+
+
+@app.post("/api/v1/preset-video")
+async def preset_video(body: PresetVideoIn, request: Request):
+    """Return a random give clip URL for a girl+preset tag. No auth required
+    for the URL itself — the app gates sending behind message balance."""
+    import random as _random
+    import urllib.request as _urlreq
+
+    keyhole_url = config.KEYHOLE_BACKEND_URL
+    if not keyhole_url:
+        raise HTTPException(status_code=503, detail="media backend not configured")
+    # Query Keyhole admin media for this girl's give clips
+    admin_token = getattr(config, "KEYHOLE_ADMIN_TOKEN", None)
+    qurl = (keyhole_url.rstrip("/") + "/admin/media"
+            f"?character_id={body.girl_id}&limit=100")
+    req = _urlreq.Request(qurl, method="GET")
+    if admin_token:
+        req.add_header("Authorization", f"Bearer {admin_token}")
+    try:
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"media lookup failed: {e}")
+    assets = data.get("assets", []) if isinstance(data, dict) else data
+    preset = body.preset.lower().strip()
+    matches = [
+        a for a in assets
+        if "give" in (a.get("tags") or []) and preset in [t.lower() for t in (a.get("tags") or [])]
+    ]
+    if not matches:
+        raise HTTPException(status_code=404, detail="no clips for preset")
+    clip = _random.choice(matches)
+    url = clip.get("url", "")
+    if url.startswith("/"):
+        url = keyhole_url.rstrip("/") + url
+    return {"video_url": url, "preset": preset, "girl_id": body.girl_id}
+
+
 # ---------------------------------------------------------------------------
 # Assistant capabilities ("her hands") — tier-gated, owner-only until rollout.
 # Credential rule: user logins NEVER touch these endpoints. Gmail OAuth tokens
