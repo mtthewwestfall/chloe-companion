@@ -239,7 +239,7 @@
     await new Promise((r) => setTimeout(r, 900 + Math.random() * 900));
 
     try {
-      const res = await ApiClient.chat(text);
+      const res = await ApiClient.chat(text, currentGirl.id);
       typingRow.classList.add('hidden');
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);
@@ -418,6 +418,108 @@
     const ref = params.get('ref');
     if (ref) localStorage.setItem('whispr_ref', ref);
   })();
+
+  /* ---------- auth ---------- */
+
+  function getToken() { return localStorage.getItem('whispr_token') || ''; }
+  function setToken(t) { localStorage.setItem('whispr_token', t); }
+  function isLoggedIn() { return !!getToken(); }
+
+  function showAuth() { openSheet('authSheet'); }
+
+  $('authTabSignup').addEventListener('click', () => {
+    $('authTabSignup').classList.add('active');
+    $('authTabLogin').classList.remove('active');
+    $('authSignupForm').classList.remove('hidden');
+    $('authLoginForm').classList.add('hidden');
+  });
+  $('authTabLogin').addEventListener('click', () => {
+    $('authTabLogin').classList.add('active');
+    $('authTabSignup').classList.remove('active');
+    $('authLoginForm').classList.remove('hidden');
+    $('authSignupForm').classList.add('hidden');
+  });
+
+  function authError(msg) {
+    $('authError').textContent = msg;
+    $('authError').classList.remove('hidden');
+  }
+
+  $('signupBtn').addEventListener('click', async () => {
+    $('authError').classList.add('hidden');
+    const name = $('signupName').value.trim();
+    const email = $('signupEmail').value.trim();
+    const password = $('signupPassword').value;
+    if (!email || !password) return authError('Enter email and password');
+    if (password.length < 8) return authError('Password must be 8+ characters');
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, name })
+      });
+      const data = await res.json();
+      if (!res.ok) return authError(data.detail || 'Signup failed');
+      // Track referral if ?ref= was present
+      const refCode = localStorage.getItem('whispr_ref');
+      if (refCode) {
+        // Will link after login
+        localStorage.setItem('whispr_pending_ref', refCode);
+      }
+      $('authVerifyMsg').classList.remove('hidden');
+      $('authSignupForm').classList.add('hidden');
+    } catch (e) {
+      authError('Network error — try again');
+    }
+  });
+
+  $('loginBtn').addEventListener('click', async () => {
+    $('authError').classList.add('hidden');
+    const email = $('loginEmail').value.trim();
+    const password = $('loginPassword').value;
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+      if (!res.ok) return authError(data.detail || 'Login failed');
+      setToken(data.token);
+      // Track pending referral
+      const refCode = localStorage.getItem('whispr_pending_ref') || localStorage.getItem('whispr_ref');
+      if (refCode) {
+        try {
+          await fetch(CONFIG.API_BASE_URL + '/api/v1/referral/track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
+            body: JSON.stringify({ referral_code: refCode })
+          });
+          localStorage.removeItem('whispr_pending_ref');
+        } catch (e) {}
+      }
+      closeSheet('authSheet');
+      showToast('Welcome back!');
+      updateBalance();
+    } catch (e) {
+      authError('Network error — try again');
+    }
+  });
+
+  async function updateBalance() {
+    try {
+      const me = await ApiClient.me();
+      if (typeof me.messages_remaining === 'number') $('statMsgs').textContent = me.messages_remaining;
+      if (typeof me.voice_notes_remaining === 'number') $('statVoice').textContent = me.voice_notes_remaining;
+    } catch (e) {}
+  }
+
+  // Show auth on boot if not logged in
+  if (!isLoggedIn()) {
+    setTimeout(showAuth, 800);
+  } else {
+    updateBalance();
+  }
 
   /* ---------- sheets ---------- */
 

@@ -349,3 +349,12 @@ body {
 .ref-link-row { display: flex; gap: 8px; }
 .ref-link-row input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
 .ref-share-btns { display: flex; gap: 8px; margin-top: 12px; }
+
+/* auth */
+.auth-tabs { display: flex; gap: 8px; margin: 14px 0; }
+.auth-tab { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--sub); font-size: 14px; font-weight: 600; cursor: pointer; }
+.auth-tab.active { background: var(--grad); color: #fff; border-color: transparent; }
+.auth-input { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 15px; margin-bottom: 10px; box-sizing: border-box; }
+.auth-error { color: #ff6b6b; font-size: 13px; margin-top: 10px; text-align: center; }
+.auth-verify { color: #51cf66; font-size: 13px; margin-top: 10px; text-align: center; }
+.btn-primary.full { width: 100%; margin-top: 4px; }

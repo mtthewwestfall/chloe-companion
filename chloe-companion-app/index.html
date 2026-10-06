@@ -153,6 +153,33 @@
       </div>
     </div>
 
+    <!-- Auth sheet -->
+    <div id="authSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Join Whispr</h2></div>
+        <p class="sheet-sub" style="font-size:15px;color:#fff;font-weight:600;">50 FREE messages when you sign up</p>
+        <p class="sheet-sub">No card required. Videos included.</p>
+        <div class="auth-tabs">
+          <button id="authTabSignup" class="auth-tab active">Sign Up</button>
+          <button id="authTabLogin" class="auth-tab">Log In</button>
+        </div>
+        <div id="authSignupForm">
+          <input id="signupName" class="auth-input" placeholder="Your name" autocomplete="name">
+          <input id="signupEmail" class="auth-input" placeholder="Email" type="email" autocomplete="email">
+          <input id="signupPassword" class="auth-input" placeholder="Password (8+ chars)" type="password" autocomplete="new-password">
+          <button id="signupBtn" class="btn-primary full">Create Account — Get 50 Free</button>
+        </div>
+        <div id="authLoginForm" class="hidden">
+          <input id="loginEmail" class="auth-input" placeholder="Email" type="email" autocomplete="email">
+          <input id="loginPassword" class="auth-input" placeholder="Password" type="password" autocomplete="current-password">
+          <button id="loginBtn" class="btn-primary full">Log In</button>
+        </div>
+        <div id="authError" class="auth-error hidden"></div>
+        <div id="authVerifyMsg" class="auth-verify hidden">Check your email to verify your account, then log in.</div>
+      </div>
+    </div>
+
     <!-- Referral sheet -->
     <div id="referralSheet" class="sheet hidden">
       <div class="sheet-card">

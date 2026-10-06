@@ -864,16 +864,23 @@ class PresetVideoIn(BaseModel):
     preset: str
 
 
+# Track last-sent clip per girl+preset to avoid immediate repeats.
+_LAST_PRESET_SENT: dict[tuple[str, str], str] = {}
+
 @app.post("/api/v1/preset-video")
 async def preset_video(body: PresetVideoIn):
     """Return a random give clip URL for a girl+preset. Unlimited — pre-made
-    clips cost no API, so no auth or balance check."""
+    clips cost no API, so no auth or balance check. Avoids sending the same
+    clip twice in a row when multiple clips exist."""
     import random as _random
     key = (body.girl_id.lower().strip(), body.preset.lower().strip())
     clips = PRESET_CLIPS.get(key, [])
     if not clips:
         raise HTTPException(status_code=404, detail="no clips for preset")
-    clip = _random.choice(clips)
+    last_url = _LAST_PRESET_SENT.get(key)
+    pool = [c for c in clips if c["url"] != last_url] if len(clips) > 1 else clips
+    clip = _random.choice(pool or clips)
+    _LAST_PRESET_SENT[key] = clip["url"]
     return {"video_url": clip["url"], "media_type": clip["media_type"],
             "preset": body.preset, "girl_id": body.girl_id}
 

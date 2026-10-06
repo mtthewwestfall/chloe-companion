@@ -33,9 +33,12 @@ const ApiClient = (() => {
 
   async function request(method, path, body) {
     const url = CONFIG.API_BASE_URL + path;
+    const token = localStorage.getItem('whispr_token') || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
     const opts = {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: body ? JSON.stringify(body) : undefined,
     };
     const resp = await withTimeout(fetch(url, opts), CONFIG.REQUEST_TIMEOUT_MS);
@@ -54,18 +57,15 @@ const ApiClient = (() => {
     return connected;
   }
 
-  async function chat(message) {
-    try {
-      const data = await request('POST', '/api/v1/chat', {
-        user_id: CONFIG.DEMO_USER_ID,
-        message,
-      });
-      setConnected(true);
-      return data;
-    } catch (e) {
-      setConnected(false);
-      return MockEngine.chat(message); // DEMO fallback
-    }
+  async function chat(message, characterId) {
+    // Real chat — requires login token. No demo fallback: if it fails,
+    // the caller shows the reconnect message.
+    const data = await request('POST', '/api/v1/chat', {
+      message,
+      character_id: characterId || 'chloe',
+    });
+    setConnected(true);
+    return data;
   }
 
   async function me() {
