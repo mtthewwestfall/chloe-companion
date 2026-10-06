@@ -1,470 +1,209 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="robots" content="noindex, nofollow">
-<title>Chloe Companion — Admin</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Whispr Admin</title>
 <style>
-  :root { --bg:#0a1128; --panel:#101a3a; --line:#24305e; --text:#eef1ff;
-          --muted:#9aa3c7; --gold:#e8a94c; --green:#58d68d; --red:#e86a6a; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text);
-         font-family:-apple-system, "Segoe UI", Roboto, sans-serif; }
-  .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 64px; }
-  h1 { font-size:22px; margin:0 0 4px; }
-  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
-  .tabs { display:flex; gap:8px; margin-bottom:20px; }
-  .tab { padding:10px 22px; border:1px solid var(--line); border-radius:10px;
-         background:transparent; color:var(--muted); font-size:15px; cursor:pointer; }
-  .tab.active { background:var(--gold); border-color:var(--gold); color:#201500;
-                font-weight:700; }
-  .cards { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
-          padding:14px 18px; min-width:130px; }
-  .card .n { font-size:26px; font-weight:700; }
-  .card .l { font-size:12px; color:var(--muted); margin-top:4px; }
-  table { width:100%; border-collapse:collapse; background:var(--panel);
-          border-radius:12px; overflow:hidden; font-size:13px; }
-  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; }
-  tr:last-child td { border-bottom:none; }
-  .pill { display:inline-block; padding:2px 10px; border-radius:20px; font-size:12px; }
-  .pill.ok { background:#123f2a; color:var(--green); }
-  .pill.no { background:#3a1a1a; color:var(--red); }
-  .pill.tier { background:#1c2547; color:var(--gold); }
-  .src { font-size:11px; padding:2px 8px; border-radius:12px; background:#1c2547;
-         color:var(--muted); }
-  .src.local { background:#123f2a; color:var(--green); }
-  .src.builtin { background:#3a2f10; color:var(--gold); }
-  .girl { display:flex; gap:14px; align-items:center; background:var(--panel);
-          border:1px solid var(--line); border-radius:12px; padding:12px 16px;
-          margin-bottom:10px; }
-  .girl img { width:52px; height:52px; border-radius:50%; object-fit:cover;
-              background:#1c2547; }
-  .girl .meta { flex:1; min-width:0; }
-  .girl .nm { font-weight:700; }
-  .girl .id { color:var(--muted); font-size:12px; }
-  .girl .blurb { color:var(--muted); font-size:13px; margin-top:2px;
-                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .foot { margin:-4px 0 10px 66px; background:#0b1330; border:1px solid var(--line);
-          border-radius:10px; padding:10px 14px; font-size:13px; }
-  .foot .clip { display:flex; gap:10px; align-items:center; padding:6px 0;
-                border-bottom:1px solid var(--line); }
-  .foot .clip:last-child { border-bottom:none; }
-  .foot .clip .u { flex:1; min-width:0; color:var(--muted); font-size:12px;
-                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .lbl { font-size:11px; padding:2px 9px; border-radius:12px; background:#1c2547;
-         color:var(--gold); white-space:nowrap; }
-  .lbl.give { background:#3a1a1a; color:var(--red); }
-  .foot .addrow { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
-  .foot .addrow input { flex:2; min-width:180px; padding:8px 10px; border-radius:8px;
-                        border:1px solid var(--line); background:#0a1128;
-                        color:var(--text); font-size:13px; }
-  .foot .addrow select { flex:1; min-width:140px; padding:8px 10px; border-radius:8px;
-                         border:1px solid var(--line); background:#0a1128;
-                         color:var(--text); font-size:13px; }
-  .btn { padding:8px 16px; border-radius:8px; border:1px solid var(--line);
-         background:#1c2547; color:var(--text); cursor:pointer; font-size:14px; }
-  .btn.primary { background:var(--gold); border-color:var(--gold); color:#201500;
-                 font-weight:700; }
-  .btn.danger { background:transparent; border-color:#5e2430; color:var(--red); }
-  .btn:disabled { opacity:.5; cursor:default; }
-  form.panel { background:var(--panel); border:1px solid var(--line);
-               border-radius:12px; padding:18px; margin:18px 0; }
-  form.panel h3 { margin:0 0 12px; font-size:16px; }
-  .row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
-  .field { flex:1; min-width:200px; }
-  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
-  .field input, .field textarea, .field select {
-    width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
-    background:#0b1330; color:var(--text); font-size:14px; }
-  .field textarea { min-height:90px; resize:vertical; }
-  #gate { max-width:380px; margin:80px auto; text-align:center;
-          background:var(--panel); border:1px solid var(--line);
-          border-radius:14px; padding:32px 28px; }
-  #gate input { width:100%; padding:11px; border-radius:8px; margin:14px 0;
-                border:1px solid var(--line); background:#0b1330; color:var(--text);
-                font-size:15px; text-align:center; }
-  #gate .err { color:var(--red); font-size:13px; min-height:20px; }
-  .hidden { display:none !important; }
-  .note { color:var(--muted); font-size:12px; margin-top:8px; }
-<style>
-.sub-filters { margin: 10px 0; display: flex; gap: 6px; flex-wrap: wrap; }
-.btn.sm { padding: 4px 10px; font-size: 12px; }
-.btn.sm.active { background: #2a2a2a; }
-.pill { background: #c33; color: #fff; border-radius: 12px; padding: 0 7px; font-size: 11px; margin-left: 4px; }
-.pill:empty { display: none; }
-.girl.sub { align-items: flex-start; }
-.sub-photos { display: flex; gap: 6px; }
-.sub-photos img { width: 90px; height: 90px; object-fit: cover; border-radius: 8px; }
-.verdicts { margin-top: 6px; font-size: 13px; }
-.verdict { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 12px; font-size: 12px; background: rgba(255,255,255,.08); }
-.verdict.ok { background: rgba(80,200,120,.25); }
-.verdict.warn { background: rgba(220,170,60,.25); }
-.verdict.bad { background: rgba(220,80,80,.3); }
-.chk { display: block; margin: 8px 0; font-size: 13px; }
-.chk input { margin-right: 6px; }
-.row { display: flex; gap: 8px; margin-top: 6px; }
-.src.ok { background: rgba(80,200,120,.25); }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; background: #0a0a0f; color: #fff; margin: 0; padding: 20px; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 20px; }
+  .login-box { max-width: 400px; margin: 60px auto; text-align: center; }
+  .login-box input { width: 100%; padding: 12px; margin: 8px 0; border-radius: 10px; border: 1px solid #333; background: #1a1a20; color: #fff; font-size: 15px; }
+  .login-box button { width: 100%; padding: 12px; border-radius: 10px; border: none; background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+  .tab { padding: 10px 20px; border-radius: 10px; border: 1px solid #333; background: #1a1a20; color: #aaa; cursor: pointer; font-size: 14px; }
+  .tab.active { background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; border-color: transparent; }
+  .girl-card { background: #1a1a20; border: 1px solid #333; border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+  .girl-name { font-size: 18px; font-weight: 700; margin-bottom: 12px; text-transform: capitalize; }
+  .media-section { margin-bottom: 14px; }
+  .media-title { font-size: 13px; color: #ff4d8d; font-weight: 700; margin-bottom: 8px; text-transform: uppercase; }
+  .media-item { display: flex; align-items: center; gap: 8px; padding: 8px; background: #0a0a0f; border-radius: 8px; margin-bottom: 6px; font-size: 12px; }
+  .media-item .url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #888; }
+  .media-item button { padding: 6px 12px; border-radius: 6px; border: none; background: #ff4444; color: #fff; cursor: pointer; font-size: 12px; }
+  .add-form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .add-form input, .add-form select { padding: 8px 10px; border-radius: 8px; border: 1px solid #333; background: #0a0a0f; color: #fff; font-size: 13px; }
+  .add-form input[type="text"] { flex: 1; min-width: 200px; }
+  .add-form button { padding: 8px 16px; border-radius: 8px; border: none; background: #51cf66; color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .add-girl { background: #1a1a20; border: 1px dashed #555; border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+  .add-girl input { padding: 10px; border-radius: 8px; border: 1px solid #333; background: #0a0a0f; color: #fff; font-size: 14px; margin-right: 8px; }
+  .add-girl button { padding: 10px 20px; border-radius: 8px; border: none; background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; cursor: pointer; font-weight: 600; }
+  .hidden { display: none; }
+  .preset-tag { background: #2a2a35; padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #ff4d8d; }
+  .acct-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .acct-table th { text-align: left; padding: 8px; color: #888; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #333; }
+  .acct-table td { padding: 10px 8px; border-bottom: 1px solid #222; }
+  .tier-badge { padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+  .tier-basic { background: #2a2a35; color: #aaa; }
+  .tier-plus { background: #1a3a5c; color: #6ab0ff; }
+  .tier-vip { background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; }
+  .grant-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid #51cf66; background: transparent; color: #51cf66; cursor: pointer; font-size: 12px; margin-right: 4px; }
+  .grant-btn:hover { background: #51cf66; color: #000; }
+  .verified { color: #51cf66; } .unverified { color: #ff6b6b; }
 </style>
 </head>
 <body>
-<div class="wrap">
-
-  <div id="gate">
-    <h1>Admin</h1>
-    <div class="sub">Chloe Companion</div>
-    <input id="tokenInput" type="password" placeholder="Admin token" autocomplete="off">
-    <div class="err" id="gateErr"></div>
-    <button class="btn primary" id="gateBtn" style="width:100%">Enter</button>
-  </div>
-
-  <div id="app" class="hidden">
-    <h1>Chloe Companion — Admin</h1>
-    <div class="sub">Accounts &amp; girls roster</div>
-    <div class="tabs">
-      <button class="tab active" data-tab="accounts">Accounts</button>
-      <button class="tab" data-tab="girls">
-<button class="tab" data-tab="submissions">
-  Submissions <span id="subCount" class="pill"></span>
-</button>Girls</button>
-    </div>
-
-    <div id="tab-accounts">
-      <div class="cards" id="statCards"></div>
-      <table>
-        <thead><tr>
-          <th>Name</th><th>Email</th><th>Tier</th><th>Verified</th>
-          <th>Msgs left</th><th>Voice left</th><th>Msgs used</th><th>Created</th><th>Last active</th>
-        </tr></thead>
-        <tbody id="acctBody"><tr><td colspan="9">Loading…</td></tr></tbody>
-      </table>
-    </div>
-
-    <div id="tab-submissions" class="hidden">
-  <p class="sub">Approval-only queue. Every photo was AI-reviewed (18+ / no nudity)
-  before landing here — the verdict is shown on each card. Nothing goes live until you approve it.</p>
-  <div class="sub-filters">
-    <button class="btn sm active" data-sf="">All</button>
-    <button class="btn sm" data-sf="pending">Pending</button>
-    <button class="btn sm" data-sf="flagged">Flagged</button>
-    <button class="btn sm" data-sf="approved">Approved</button>
-    <button class="btn sm" data-sf="rejected">Rejected</button>
-  </div>
-  <div id="subList"></div>
+<div id="loginView" class="login-box">
+  <h1>Whispr Admin</h1>
+  <p class="sub">Companion app management</p>
+  <input type="password" id="adminToken" placeholder="Admin token">
+  <button onclick="login()">Enter</button>
 </div>
 
-<div id="tab-girls" class="hidden">
-      <div id="girlList"><p class="sub">Loading…</p></div>
-      <form class="panel" id="girlForm">
-        <h3 id="girlFormTitle">Add a new girl</h3>
-        <input type="hidden" id="gEditId" value="">
-        <div class="row">
-          <div class="field"><label>Name *</label><input id="gName" required maxlength="40"></div>
-          <div class="field"><label>ID slug (optional — made from name)</label><input id="gId" maxlength="32" placeholder="e.g. nova"></div>
-        </div>
-        <div class="field" style="margin-bottom:12px"><label>Persona — how she talks, who she is *</label>
-          <textarea id="gPersona" placeholder="e.g. Playful stargazer, teases him about…"></textarea></div>
-        <div class="row">
-          <div class="field"><label>Avatar URL</label><input id="gAvatar" placeholder="https://…"></div>
-          <div class="field"><label>Voice</label>
-            <select id="gVoice"><option value="liora">liora</option></select></div>
-          <div class="field"><label>Sort order</label><input id="gSort" type="number" value="10"></div>
-        </div>
-        <div class="field" style="margin-bottom:12px"><label>Blurb (short tagline)</label>
-          <input id="gBlurb" maxlength="140"></div>
-        <div class="row">
-          <button type="submit" class="btn primary" id="gSubmit">Add girl</button>
-          <button type="button" class="btn hidden" id="gCancel">Cancel edit</button>
-        </div>
-        <div class="note">Girls added here are companion-local: they appear in the app's
-        character picker immediately and remember him separately. Chloe herself can't be edited or removed here.</div>
-      </form>
+<div id="mainView" class="hidden">
+  <h1>Whispr Admin</h1>
+  <p class="sub">Manage characters, gives, mains, typing, activities</p>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('media')">Media Library</button>
+    <button class="tab" onclick="showTab('girls')">Characters</button>
+    <button class="tab" onclick="showTab('accounts')">Accounts</button>
+  </div>
+
+  <div id="tab-media">
+    <div id="mediaList"></div>
+  </div>
+
+  <div id="tab-girls" class="hidden">
+    <div class="add-girl">
+      <input id="newGirlId" placeholder="girl id (e.g. luna)">
+      <input id="newGirlName" placeholder="Display name">
+      <button onclick="addGirl()">Add Character</button>
+    </div>
+    <div id="girlList"></div>
+  </div>
+
+  <div id="tab-accounts" class="hidden">
+    <div class="girl-card">
+      <div class="girl-name">Signed Up Accounts</div>
+      <table class="acct-table">
+        <thead><tr><th>Name / Email</th><th>Plan</th><th>Msgs</th><th>Verified</th><th>Grant Free Month</th></tr></thead>
+        <tbody id="acctBody"></tbody>
+      </table>
     </div>
   </div>
 </div>
 
 <script>
-const API = location.origin;
-const store = {
-  get token() { return sessionStorage.getItem('cc_admin_token') || ''; },
-  set token(v) { sessionStorage.setItem('cc_admin_token', v); }
-};
+const API = 'https://lockeddoor.ai';
+let token = localStorage.getItem('whispr_admin_token') || '';
 
-async function api(path, opts = {}) {
-  const r = await fetch(API + path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json',
-               'X-Admin-Token': store.token, ...(opts.headers || {}) }
+function login() {
+  token = document.getElementById('adminToken').value;
+  localStorage.setItem('whispr_admin_token', token);
+  document.getElementById('loginView').classList.add('hidden');
+  document.getElementById('mainView').classList.remove('hidden');
+  loadMedia();
+  loadGirls();
+}
+
+if (token) {
+  document.getElementById('loginView').classList.add('hidden');
+  document.getElementById('mainView').classList.remove('hidden');
+  loadMedia();
+  loadGirls();
+}
+
+function showTab(t) {
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-media').classList.toggle('hidden', t !== 'media');
+  document.getElementById('tab-girls').classList.toggle('hidden', t !== 'girls');
+  document.getElementById('tab-accounts').classList.toggle('hidden', t !== 'accounts');
+  if (t === 'accounts') loadAccounts();
+}
+
+async function api(method, path, body) {
+  const res = await fetch(API + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    body: body ? JSON.stringify(body) : undefined,
   });
-  if (r.status === 401 || r.status === 503) throw new Error('auth');
-  if (!r.ok) { const t = await r.text(); throw new Error(t || r.status); }
-  return r.status === 204 ? null : r.json();
+  if (res.status === 403) { alert('Invalid admin token'); localStorage.removeItem('whispr_admin_token'); location.reload(); }
+  return res.json();
 }
 
-function esc(s) { return String(s ?? '').replace(/[&<>"']/g,
-  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function fmtDate(s) { if (!s) return '—'; const d = new Date(s.replace(' ', 'T') + 'Z');
-  return isNaN(d) ? '—' : d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
-
-// -- gate ---------------------------------------------------------------
-async function tryLogin() {
-  const err = document.getElementById('gateErr');
-  err.textContent = '';
-  try {
-    await api('/api/v1/admin/accounts');
-    document.getElementById('gate').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
-    loadAccounts(); loadGirls();
-  } catch (e) {
-    err.textContent = e.message === 'auth' ? 'Wrong token.' : 'Admin not available: ' + e.message;
-  }
-}
-document.getElementById('gateBtn').onclick = () => {
-  store.token = document.getElementById('tokenInput').value.trim();
-  tryLogin();
-};
-document.getElementById('tokenInput').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('gateBtn').click(); });
-if (store.token) { document.getElementById('tokenInput').value = store.token; tryLogin(); }
-
-// -- tabs ---------------------------------------------------------------
-document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
-  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-  t.classList.add('active');
-  document.getElementById('tab-accounts').classList.toggle('hidden', t.dataset.tab !== 'accounts');
-  document.getElementById('tab-girls').classList.toggle('hidden', t.dataset.tab !== 'girls');
-  document.getElementById('tab-submissions').classList.toggle('hidden', t.dataset.tab !== 'submissions');
-  if (t.dataset.tab === 'submissions') loadSubmissions();
-});
-
-// -- submissions (approval-only queue, 2026-10-01) --------------------------
-let subFilter = '';
-async function loadSubmissions() {
-  const list = document.getElementById('subList');
-  document.querySelectorAll('[data-sf]').forEach(b =>
-    b.classList.toggle('active', b.dataset.sf === subFilter));
-  try {
-    const q = subFilter ? '?status=' + encodeURIComponent(subFilter) : '';
-    const { submissions } = await api('/api/v1/admin/submissions' + q);
-    const pend = submissions.filter(s => s.status === 'pending' || s.status === 'flagged').length;
-    document.getElementById('subCount').textContent = pend ? pend : '';
-    list.innerHTML = submissions.map(s => {
-      let review = {};
-      try { review = JSON.parse(s.ai_review || '{}'); } catch (e) {}
-      let images = [];
-      try { images = JSON.parse(s.images || '[]'); } catch (e) {}
-      const per = (review.per_image || []).map((p, i) =>
-        `<span class="verdict ${p.nudity ? 'bad' : (p.all_adult === 'yes' ? 'ok' : 'warn')}">` +
-        `photo ${i + 1}: ${p.nudity ? 'nudity' : ''}${p.nudity && p.all_adult !== 'yes' ? ' · ' : ''}` +
-        `${p.all_adult === 'yes' ? 'adult ✓' : (p.all_adult === 'no' ? 'NOT adult' : 'age?')}</span>`
-      ).join(' ');
-      return `
-      <div class="girl sub">
-        <div class="sub-photos">${images.map(u => `<img src="${u}" alt="">`).join('')}</div>
-        <div class="meta">
-          <div class="nm">${esc(s.name)} <span class="src">${esc(s.status)}</span>
-            ${s.verified_fictional ? '<span class="src ok">verified fictional</span>' : ''}</div>
-          <div class="id">by ${esc(s.user_email || s.user_id)} · ${esc(s.created_at || '')}</div>
-          ${s.persona ? `<div class="blurb">${esc(s.persona)}</div>` : ''}
-          ${s.blurb ? `<div class="id">“${esc(s.blurb)}”</div>` : ''}
-          <div class="verdicts">AI review: <b>${esc(review.verdict || '?')}</b> ${per}</div>
-          ${review.notes ? `<div class="id">${esc(review.notes)}</div>` : ''}
-          ${s.status === 'pending' || s.status === 'flagged' ? `
-          <label class="chk"><input type="checkbox" id="vf-${esc(s.id)}">
-            Verified <b>not a real person</b> — unlocks nude renditions for this character</label>
-          <div class="row">
-            <button class="btn" data-approve="${esc(s.id)}">Approve → goes live</button>
-            <button class="btn danger" data-reject="${esc(s.id)}">Reject</button>
-          </div>` : ''}
-        </div>
-      </div>`;
-    }).join('') || '<p class="sub">No submissions.</p>';
-    list.querySelectorAll('[data-approve]').forEach(b => b.onclick = async () => {
-      const vf = document.getElementById('vf-' + b.dataset.approve).checked;
-      if (!vf && !confirm('Approve WITHOUT the "not a real person" verification? Nude renditions stay blocked for this character.')) return;
-      if (vf && !confirm('You verified this is NOT a real person? This unlocks nude renditions for this character.')) return;
-      await api('/api/v1/admin/submissions/' + b.dataset.approve + '/approve',
-        { method: 'POST', body: JSON.stringify({ verified_fictional: vf }) });
-      loadSubmissions(); loadGirls();
-    });
-    list.querySelectorAll('[data-reject]').forEach(b => b.onclick = async () => {
-      const reason = prompt('Reject reason (shown to the customer):', '') || '';
-      await api('/api/v1/admin/submissions/' + b.dataset.reject + '/reject',
-        { method: 'POST', body: JSON.stringify({ reason }) });
-      loadSubmissions();
-    });
-  } catch (e) { list.innerHTML = `<p class="sub">Failed to load: ${esc(e.message)}</p>`; }
-}
-document.querySelectorAll('[data-sf]').forEach(b => b.onclick = () => { subFilter = b.dataset.sf; loadSubmissions(); });
-
-// -- accounts -----------------------------------------------------------
-async function loadAccounts() {
-  const body = document.getElementById('acctBody');
-  try {
-    const { stats, accounts } = await api('/api/v1/admin/accounts');
-    const tiers = Object.entries(stats.by_tier).map(([k, v]) => `${k}: ${v}`).join(' · ');
-    document.getElementById('statCards').innerHTML = [
-      [stats.total, 'total users'], [stats.verified, 'verified'],
-      [stats.stripe_paid_users + stats.jvzoo_active_subs, 'paying'],
-      [tiers || '—', 'by tier'],
-    ].map(([n, l]) => `<div class="card"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join('');
-    body.innerHTML = accounts.length ? accounts.map(a => `<tr>
-      <td>${esc(a.name) || '—'}</td><td>${esc(a.email) || '—'}</td>
-      <td><span class="pill tier">${esc(a.tier)}</span></td>
-      <td><span class="pill ${a.verified ? 'ok' : 'no'}">${a.verified ? 'yes' : 'no'}</span></td>
-      <td>${a.messages_remaining}</td><td>${a.voice_notes_remaining}</td>
-      <td>${a.messages_used_total}</td>
-      <td>${fmtDate(a.created_at)}</td><td>${fmtDate(a.last_active_at)}</td>
-    </tr>`).join('') : '<tr><td colspan="9">No accounts yet.</td></tr>';
-  } catch (e) { body.innerHTML = `<tr><td colspan="9">Failed to load: ${esc(e.message)}</td></tr>`; }
+async function loadMedia() {
+  const data = await api('GET', '/api/v1/admin/girl-media');
+  const byGirl = {};
+  (data.media || []).forEach(m => {
+    if (!byGirl[m.girl_id]) byGirl[m.girl_id] = { give: [], main: [], typing: [], activity: [] };
+    byGirl[m.girl_id][m.kind].push(m);
+  });
+  const html = Object.keys(byGirl).sort().map(girl => {
+    const sections = ['give', 'main', 'typing', 'activity'].map(kind => {
+      const items = byGirl[girl][kind].map(m =>
+        `<div class="media-item"><span class="url">${m.url}</span>${m.preset ? `<span class="preset-tag">${m.preset}</span>` : ''}<button onclick="delMedia(${m.id})">Delete</button></div>`
+      ).join('');
+      return `<div class="media-section"><div class="media-title">${kind === 'typing' ? 'Typing Main' : kind + 's'}</div>${items || '<div style="color:#555;font-size:12px;">none</div>'}
+        <div class="add-form">
+          <input type="text" id="url-${girl}-${kind}" placeholder="Video/image URL">
+          ${kind === 'give' ? `<input type="text" id="preset-${girl}-${kind}" placeholder="preset (e.g. love)" style="max-width:120px;">` : ''}
+          <button onclick="addMedia('${girl}','${kind}')">+ Add</button>
+        </div></div>`;
+    }).join('');
+    return `<div class="girl-card"><div class="girl-name">${girl}</div>${sections}</div>`;
+  }).join('');
+  document.getElementById('mediaList').innerHTML = html || '<p style="color:#888;">No media yet. Add a character first.</p>';
 }
 
-// -- girls --------------------------------------------------------------
+async function addMedia(girl, kind) {
+  const url = document.getElementById(`url-${girl}-${kind}`).value.trim();
+  if (!url) return alert('Enter a URL');
+  const preset = kind === 'give' ? (document.getElementById(`preset-${girl}-${kind}`).value.trim() || 'love') : '';
+  await api('POST', '/api/v1/admin/girl-media', { girl_id: girl, kind, url, preset });
+  loadMedia();
+}
+
+async function delMedia(id) {
+  if (!confirm('Delete this?')) return;
+  await api('DELETE', `/api/v1/admin/girl-media/${id}`);
+  loadMedia();
+}
+
 async function loadGirls() {
-  const list = document.getElementById('girlList');
-  try {
-    const { girls } = await api('/api/v1/admin/girls');
-    list.innerHTML = girls.map(g => `
-      <div class="girl">
-        ${g.avatar_url ? `<img src="${esc(g.avatar_url)}" alt="">` : '<img alt="">'}
-        <div class="meta">
-          <div class="nm">${esc(g.name)} <span class="src ${g.source}">${esc(g.source)}</span></div>
-          <div class="id">id: ${esc(g.id)}${g.sort_order ? ' · order ' + g.sort_order : ''}</div>
-          ${g.blurb ? `<div class="blurb">${esc(g.blurb)}</div>` : ''}
-        </div>
-        ${g.source === 'local' ? `
-          <button class="btn" data-foot="${esc(g.id)}">Footage</button>
-          <button class="btn" data-edit="${esc(g.id)}">Edit</button>
-          <button class="btn danger" data-del="${esc(g.id)}">Delete</button>` : ''}
-      </div>
-      ${g.source === 'local' ? `<div class="foot hidden" id="foot-${esc(g.id)}"></div>` : ''}`).join('')
-      || '<p class="sub">No girls found.</p>';
-    list.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => startEdit(b.dataset.edit, girls));
-    list.querySelectorAll('[data-del]').forEach(b => b.onclick = () => delGirl(b.dataset.del, girls));
-    list.querySelectorAll('[data-foot]').forEach(b => b.onclick = () => toggleFootage(b.dataset.foot));
-  } catch (e) { list.innerHTML = `<p class="sub">Failed to load: ${esc(e.message)}</p>`; }
+  const data = await api('GET', '/api/v1/admin/girls');
+  const girls = data.girls || data || [];
+  document.getElementById('girlList').innerHTML = girls.map(g =>
+    `<div class="girl-card"><div class="girl-name">${g.name || g.id}</div><div style="color:#888;font-size:13px;">ID: ${g.id}</div></div>`
+  ).join('');
 }
 
-function startEdit(id, girls) {
-  const g = girls.find(x => x.id === id); if (!g) return;
-  document.getElementById('gEditId').value = g.id;
-  document.getElementById('gName').value = g.name;
-  document.getElementById('gId').value = g.id;
-  document.getElementById('gId').disabled = true;
-  document.getElementById('gPersona').value = g.persona || '';
-  document.getElementById('gAvatar').value = g.avatar_url || '';
-  document.getElementById('gBlurb').value = g.blurb || '';
-  document.getElementById('gSort').value = g.sort_order || 0;
-  document.getElementById('girlFormTitle').textContent = 'Edit ' + g.name;
-  document.getElementById('gSubmit').textContent = 'Save changes';
-  document.getElementById('gCancel').classList.remove('hidden');
-  document.getElementById('girlForm').scrollIntoView({ behavior: 'smooth' });
-}
-function resetForm() {
-  document.getElementById('girlForm').reset();
-  document.getElementById('gEditId').value = '';
-  document.getElementById('gId').disabled = false;
-  document.getElementById('girlFormTitle').textContent = 'Add a new girl';
-  document.getElementById('gSubmit').textContent = 'Add girl';
-  document.getElementById('gCancel').classList.add('hidden');
-}
-document.getElementById('gCancel').onclick = resetForm;
-
-document.getElementById('girlForm').onsubmit = async e => {
-  e.preventDefault();
-  const editId = document.getElementById('gEditId').value;
-  const payload = {
-    id: document.getElementById('gId').value.trim(),
-    name: document.getElementById('gName').value.trim(),
-    persona: document.getElementById('gPersona').value.trim(),
-    avatar_url: document.getElementById('gAvatar').value.trim(),
-    companion_voice: document.getElementById('gVoice').value,
-    blurb: document.getElementById('gBlurb').value.trim(),
-    sort_order: parseInt(document.getElementById('gSort').value || '0', 10),
-    enabled: true
-  };
-  if (!payload.name) return;
-  const btn = document.getElementById('gSubmit');
-  btn.disabled = true;
-  try {
-    if (editId) await api('/api/v1/admin/girls/' + encodeURIComponent(editId),
-                          { method: 'PUT', body: JSON.stringify(payload) });
-    else await api('/api/v1/admin/girls', { method: 'POST', body: JSON.stringify(payload) });
-    resetForm(); loadGirls();
-  } catch (err) { alert('Failed: ' + err.message); }
-  btn.disabled = false;
-};
-
-const FOOTAGE_LABELS = [
-  ['typing-main', 'Typing main'],
-  ['main', 'Main'],
-  ['activity', 'Activity'],
-  ['give', 'Give — Keyhole only'],
-];
-const FOOTAGE_LABEL_NAME = Object.fromEntries(FOOTAGE_LABELS);
-
-async function toggleFootage(girlId) {
-  const panel = document.getElementById('foot-' + girlId);
-  if (!panel) return;
-  panel.classList.toggle('hidden');
-  if (!panel.classList.contains('hidden') && !panel.dataset.loaded) loadFootage(girlId);
+async function addGirl() {
+  const id = document.getElementById('newGirlId').value.trim().toLowerCase();
+  const name = document.getElementById('newGirlName').value.trim();
+  if (!id || !name) return alert('Enter id and name');
+  await api('POST', '/api/v1/admin/girls', { id, name });
+  document.getElementById('newGirlId').value = '';
+  document.getElementById('newGirlName').value = '';
+  loadGirls();
+  loadMedia();
 }
 
-async function loadFootage(girlId) {
-  const panel = document.getElementById('foot-' + girlId);
-  try {
-    const { footage } = await api('/api/v1/admin/girls/' + encodeURIComponent(girlId) + '/footage');
-    panel.dataset.loaded = '1';
-    panel.innerHTML = `
-      ${footage.map(c => `
-        <div class="clip">
-          <span class="lbl ${c.label === 'give' ? 'give' : ''}">${esc(FOOTAGE_LABEL_NAME[c.label] || c.label)}</span>
-          <span class="u">${esc(c.url)}</span>
-          <button class="btn danger" data-delfoot="${c.id}">Remove</button>
-        </div>`).join('') || '<div class="note">No footage yet — add her first clip below.</div>'}
-      <div class="addrow">
-        <input id="fu-${esc(girlId)}" placeholder="Video URL — https://…">
-        <select id="fl-${esc(girlId)}">
-          ${FOOTAGE_LABELS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
-        </select>
-        <button class="btn primary" id="fa-${esc(girlId)}">Add clip</button>
-      </div>
-      <div class="note">Typing main plays while she composes a reply · Main is her idle loop ·
-      Activity clips rotate during idle · Give is Keyhole-only and never plays in the companion app.</div>`;
-    panel.querySelectorAll('[data-delfoot]').forEach(b =>
-      b.onclick = () => delFootage(girlId, b.dataset.delfoot));
-    document.getElementById('fa-' + girlId).onclick = () => addFootage(girlId);
-  } catch (e) { panel.innerHTML = `<div class="note">Failed to load footage: ${esc(e.message)}</div>`; }
+async function loadAccounts() {
+  const data = await api('GET', '/api/v1/admin/accounts');
+  const rows = (data.accounts || []).map(a => {
+    const tier = (a.tier || 'basic').toLowerCase();
+    return `<tr>
+      <td><div style="font-weight:600;">${a.name || '—'}</div><div style="color:#888;font-size:11px;">${a.email || a.user_id}</div></td>
+      <td><span class="tier-badge tier-${tier}">${tier}</span></td>
+      <td>${a.messages_remaining ?? '—'}</td>
+      <td>${a.email_verified_at ? '<span class="verified">✓</span>' : '<span class="unverified">✗</span>'}</td>
+      <td>
+        <button class="grant-btn" onclick="grantMonth('${a.user_id}','basic')">Basic</button>
+        <button class="grant-btn" onclick="grantMonth('${a.user_id}','plus')">Plus</button>
+        <button class="grant-btn" onclick="grantMonth('${a.user_id}','vip')">VIP</button>
+      </td>
+    </tr>`;
+  }).join('');
+  document.getElementById('acctBody').innerHTML = rows || '<tr><td colspan="5" style="color:#888;">No accounts yet</td></tr>';
 }
 
-async function addFootage(girlId) {
-  const url = document.getElementById('fu-' + girlId).value.trim();
-  const label = document.getElementById('fl-' + girlId).value;
-  if (!url) return;
-  try {
-    await api('/api/v1/admin/girls/' + encodeURIComponent(girlId) + '/footage',
-              { method: 'POST', body: JSON.stringify({ label, url }) });
-    document.getElementById('foot-' + girlId).dataset.loaded = '';
-    loadFootage(girlId);
-  } catch (e) { alert('Failed: ' + e.message); }
-}
-
-async function delFootage(girlId, clipId) {
-  if (!confirm('Remove this clip?')) return;
-  try {
-    await api('/api/v1/admin/girls/' + encodeURIComponent(girlId) + '/footage/' + clipId,
-              { method: 'DELETE' });
-    document.getElementById('foot-' + girlId).dataset.loaded = '';
-    loadFootage(girlId);
-  } catch (e) { alert('Failed: ' + e.message); }
-}
-
-async function delGirl(id, girls) {
-  const g = girls.find(x => x.id === id);
-  if (!confirm(`Delete ${g ? g.name : id}? Her memories stay in the database but she'll leave the roster.`)) return;
-  try { await api('/api/v1/admin/girls/' + encodeURIComponent(id), { method: 'DELETE' }); loadGirls(); }
-  catch (e) { alert('Failed: ' + e.message); }
+async function grantMonth(userId, tier) {
+  if (!confirm(`Grant 1 free month of ${tier.toUpperCase()} to this account?`)) return;
+  const res = await api('POST', '/api/v1/admin/grant-month', { user_id: userId, tier });
+  if (res.ok) { alert(`Granted! Expires ${res.vip_expires_at}`); loadAccounts(); }
 }
 </script>
 </body>

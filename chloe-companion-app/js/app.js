@@ -438,6 +438,73 @@
     $('authTabSignup').classList.remove('active');
     $('authLoginForm').classList.remove('hidden');
     $('authSignupForm').classList.add('hidden');
+    $('authForgotForm').classList.add('hidden');
+    $('authResetForm').classList.add('hidden');
+  });
+
+  // Forgot password flow
+  $('forgotPwBtn').addEventListener('click', () => {
+    $('authLoginForm').classList.add('hidden');
+    $('authForgotForm').classList.remove('hidden');
+  });
+  $('forgotBackBtn').addEventListener('click', () => {
+    $('authForgotForm').classList.add('hidden');
+    $('authLoginForm').classList.remove('hidden');
+  });
+  $('forgotSendBtn').addEventListener('click', async () => {
+    $('authError').classList.add('hidden');
+    const email = $('forgotEmail').value.trim();
+    if (!email) return authError('Enter your email');
+    try {
+      await fetch(CONFIG.API_BASE_URL + '/api/v1/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      $('authVerifyMsg').textContent = 'If that email is registered, a reset link is on its way.';
+      $('authVerifyMsg').classList.remove('hidden');
+      $('authForgotForm').classList.add('hidden');
+    } catch (e) {
+      authError('Network error — try again');
+    }
+  });
+
+  // Handle ?reset_token= from email link
+  (function checkResetToken() {
+    const params = new URLSearchParams(window.location.search);
+    const rt = params.get('reset_token');
+    if (rt) {
+      localStorage.setItem('whispr_reset_token', rt);
+      showAuth();
+      $('authTabLogin').click();
+      setTimeout(() => {
+        $('authLoginForm').classList.add('hidden');
+        $('authResetForm').classList.remove('hidden');
+      }, 100);
+    }
+  })();
+  $('resetBtn').addEventListener('click', async () => {
+    $('authError').classList.add('hidden');
+    const token = localStorage.getItem('whispr_reset_token');
+    const pw = $('resetPassword').value;
+    if (!token) return authError('Reset link expired — request a new one');
+    if (pw.length < 8) return authError('Password must be 8+ characters');
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, new_password: pw })
+      });
+      const data = await res.json();
+      if (!res.ok) return authError(data.detail || 'Reset failed');
+      localStorage.removeItem('whispr_reset_token');
+      $('authVerifyMsg').textContent = 'Password updated! Log in with your new password.';
+      $('authVerifyMsg').classList.remove('hidden');
+      $('authResetForm').classList.add('hidden');
+      $('authLoginForm').classList.remove('hidden');
+    } catch (e) {
+      authError('Network error — try again');
+    }
   });
 
   function authError(msg) {

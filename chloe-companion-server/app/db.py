@@ -119,6 +119,27 @@ CREATE TABLE IF NOT EXISTS referrals (
 );
 CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
 
+-- Password reset tokens (2026-10-06)
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(user_id),
+    expires_at TEXT NOT NULL,
+    used       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pwd_reset_user ON password_reset_tokens(user_id);
+
+-- Girl media library (2026-10-06): admin-managed gives, mains, typing, activities
+CREATE TABLE IF NOT EXISTS girl_media (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    girl_id    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    preset     TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_girl_media_girl ON girl_media(girl_id, kind);
+
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS local_characters (

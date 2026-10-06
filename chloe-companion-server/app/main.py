@@ -874,7 +874,18 @@ async def preset_video(body: PresetVideoIn):
     clip twice in a row when multiple clips exist."""
     import random as _random
     key = (body.girl_id.lower().strip(), body.preset.lower().strip())
-    clips = PRESET_CLIPS.get(key, [])
+    # Check DB first (admin-managed), fall back to hardcoded
+    conn = _conn()
+    try:
+        _seed_girl_media(conn)
+        db_rows = conn.execute(
+            "SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give' AND (preset = ? OR preset IS NULL)",
+            (key[0], key[1])).fetchall()
+        clips = [{"url": r["url"], "media_type": "video"} for r in db_rows]
+    finally:
+        conn.close()
+    if not clips:
+        clips = PRESET_CLIPS.get(key, [])
     if not clips:
         raise HTTPException(status_code=404, detail="no clips for preset")
     last_url = _LAST_PRESET_SENT.get(key)
@@ -884,6 +895,166 @@ async def preset_video(body: PresetVideoIn):
     return {"video_url": clip["url"], "media_type": clip["media_type"],
             "preset": body.preset, "girl_id": body.girl_id}
 
+
+
+
+
+@app.get("/api/v1/girl-videos/{girl_id}")
+async def girl_videos(girl_id: str):
+    """Public: get a girl's main, typing, and activity videos for the chat UI."""
+    conn = _conn()
+    try:
+        _seed_girl_media(conn)
+        rows = conn.execute(
+            "SELECT kind, url FROM girl_media WHERE girl_id = ? AND kind IN ('main', 'typing', 'activity')",
+            (girl_id.lower().strip(),)).fetchall()
+        result = {"main": [], "typing": [], "activity": []}
+        for r in rows:
+            if r["kind"] in result:
+                result[r["kind"]].append(r["url"])
+        return result
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin: girl media library (2026-10-06)
+# Manage gives, mains, typing mains, activities per character.
+# Token-gated via X-Admin-Token (same as other admin endpoints).
+# ---------------------------------------------------------------------------
+
+def _require_admin(request: Request):
+    token = request.headers.get("X-Admin-Token", "")
+    if not token or token != config.ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="admin_required")
+
+
+class GirlMediaIn(BaseModel):
+    girl_id: str
+    kind: str  # give | main | typing | activity
+    url: str
+    preset: str = ""
+
+
+@app.get("/api/v1/admin/girl-media")
+async def admin_girl_media_list(request: Request, girl_id: str = ""):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        if girl_id:
+            rows = conn.execute(
+                "SELECT * FROM girl_media WHERE girl_id = ? ORDER BY kind, id",
+                (girl_id,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM girl_media ORDER BY girl_id, kind, id").fetchall()
+        return {"media": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/girl-media")
+async def admin_girl_media_add(body: GirlMediaIn, request: Request):
+    _require_admin(request)
+    if body.kind not in ("give", "main", "typing", "activity"):
+        raise HTTPException(status_code=400, detail="invalid kind")
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO girl_media (girl_id, kind, url, preset) VALUES (?, ?, ?, ?)",
+            (body.girl_id.lower().strip(), body.kind,
+             body.url.strip(), body.preset.lower().strip() or None))
+        conn.commit()
+        return {"ok": True, "id": cur.lastrowid}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/v1/admin/girl-media/{media_id}")
+async def admin_girl_media_delete(media_id: int, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        conn.execute("DELETE FROM girl_media WHERE id = ?", (media_id,))
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+# Seed hardcoded clips into DB on first admin list (one-time migration).
+def _seed_girl_media(conn):
+    existing = conn.execute("SELECT COUNT(*) AS c FROM girl_media").fetchone()
+    if existing and existing["c"] > 0:
+        return
+    for (girl, preset), clips in PRESET_CLIPS.items():
+        for clip in clips:
+            conn.execute(
+                "INSERT INTO girl_media (girl_id, kind, url, preset) VALUES (?, 'give', ?, ?)",
+                (girl, clip["url"], preset))
+    conn.commit()
+
+
+
+class GrantMonthIn(BaseModel):
+    user_id: str
+    tier: str  # basic | plus | vip
+
+
+@app.get("/api/v1/admin/accounts")
+async def admin_accounts_list(request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            """SELECT user_id, name, email, tier, messages_remaining,
+                      voice_notes_remaining, email_verified_at, created_at,
+                      vip_expires_at, vip_months_earned
+               FROM users ORDER BY created_at DESC LIMIT 200"""
+        ).fetchall()
+        return {"accounts": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/grant-month")
+async def admin_grant_month(body: GrantMonthIn, request: Request):
+    """Grant a free month at any plan level."""
+    _require_admin(request)
+    if body.tier not in ("basic", "plus", "vip"):
+        raise HTTPException(status_code=400, detail="invalid tier")
+    # Tier message allocations
+    tier_msgs = {"basic": 1000, "plus": 2000, "vip": 3000}
+    tier_voice = {"basic": 0, "plus": 60, "vip": 150}
+    conn = _conn()
+    try:
+        from datetime import datetime, timedelta
+        user = conn.execute(
+            "SELECT vip_expires_at FROM users WHERE user_id = ?",
+            (body.user_id,)).fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="user not found")
+        now = datetime.utcnow()
+        current_exp = None
+        if user["vip_expires_at"]:
+            try:
+                current_exp = datetime.fromisoformat(user["vip_expires_at"])
+            except Exception:
+                pass
+        base = max(current_exp, now) if current_exp and current_exp > now else now
+        new_exp = base + timedelta(days=30)
+        conn.execute(
+            """UPDATE users SET tier = ?, vip_expires_at = ?,
+                      messages_remaining = messages_remaining + ?,
+                      voice_notes_remaining = voice_notes_remaining + ?
+               WHERE user_id = ?""",
+            (body.tier, new_exp.isoformat(),
+             tier_msgs[body.tier], tier_voice[body.tier], body.user_id))
+        conn.commit()
+        return {"ok": True, "tier": body.tier,
+                "vip_expires_at": new_exp.isoformat()}
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1499,6 +1670,84 @@ def auth_resend(body: ResendIn, request: Request):
         # unverified accounts actually get a new email.
         if user and not user.get("email_verified_at"):
             _send_verify_email(conn, user)
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+
+class ForgotPasswordIn(BaseModel):
+    email: str
+
+
+@app.post("/api/v1/auth/forgot-password")
+async def auth_forgot_password(body: ForgotPasswordIn, request: Request):
+    """Send password reset email. Always returns ok (no email enumeration)."""
+    if auth.rate_limited("forgot:" + _client_ip(request)):
+        raise HTTPException(status_code=429, detail="too_many_attempts")
+    email = auth.normalize_email(body.email)
+    conn = _conn()
+    try:
+        user = store.get_user_by_email(conn, email)
+        if user:
+            token = "pr_" + auth.new_token(24)
+            from datetime import datetime, timedelta
+            expires = (datetime.utcnow() + timedelta(hours=2)).isoformat()
+            conn.execute(
+                "INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES (?, ?, ?)",
+                (token, user["user_id"], expires))
+            conn.commit()
+            # Send reset email via Resend
+            try:
+                reset_url = f"{config.PUBLIC_APP_URL}/?reset_token={token}"
+                import urllib.request as _urlreq, json as _json
+                _req = _urlreq.Request(
+                    "https://api.resend.com/emails",
+                    data=_json.dumps({
+                        "from": config.MAIL_FROM,
+                        "to": [email],
+                        "subject": "Reset your Whispr password",
+                        "html": f"<p>Click below to reset your password (expires in 2 hours):</p><p><a href='{reset_url}'>{reset_url}</a></p>",
+                    }).encode(),
+                    headers={"Authorization": f"Bearer {config.RESEND_API_KEY}",
+                             "Content-Type": "application/json"},
+                )
+                _urlreq.urlopen(_req, timeout=15)
+            except Exception as e:
+                print(f"[auth] reset email failed for {email}: {e}", flush=True)
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
+
+@app.post("/api/v1/auth/reset-password")
+async def auth_reset_password(body: ResetPasswordIn):
+    """Reset password with token from email."""
+    if not auth.valid_password(body.new_password):
+        raise HTTPException(status_code=400, detail="password must be 8-128 characters")
+    conn = _conn()
+    try:
+        from datetime import datetime
+        row = conn.execute(
+            "SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = ?",
+            (body.token,)).fetchone()
+        if not row or row["used"]:
+            raise HTTPException(status_code=400, detail="invalid_or_expired_link")
+        if datetime.fromisoformat(row["expires_at"]) < datetime.utcnow():
+            raise HTTPException(status_code=400, detail="invalid_or_expired_link")
+        # Update password
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE user_id = ?",
+            (auth.hash_password(body.new_password), row["user_id"]))
+        conn.execute(
+            "UPDATE password_reset_tokens SET used = 1 WHERE token = ?",
+            (body.token,))
+        conn.commit()
         return {"ok": True}
     finally:
         conn.close()

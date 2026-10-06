@@ -197,6 +197,16 @@
           <input id="loginEmail" class="auth-input" placeholder="Email" type="email" autocomplete="email">
           <input id="loginPassword" class="auth-input" placeholder="Password" type="password" autocomplete="current-password">
           <button id="loginBtn" class="btn-primary full">Log In</button>
+          <button id="forgotPwBtn" class="btn-ghost small" style="margin-top:8px;width:100%;">Forgot password?</button>
+        </div>
+        <div id="authForgotForm" class="hidden">
+          <input id="forgotEmail" class="auth-input" placeholder="Email" type="email" autocomplete="email">
+          <button id="forgotSendBtn" class="btn-primary full">Send Reset Link</button>
+          <button id="forgotBackBtn" class="btn-ghost small" style="margin-top:8px;width:100%;">Back to login</button>
+        </div>
+        <div id="authResetForm" class="hidden">
+          <input id="resetPassword" class="auth-input" placeholder="New password (8+ chars)" type="password" autocomplete="new-password">
+          <button id="resetBtn" class="btn-primary full">Set New Password</button>
         </div>
         <div id="authError" class="auth-error hidden"></div>
         <div id="authVerifyMsg" class="auth-verify hidden">Check your email to verify your account, then log in.</div>
