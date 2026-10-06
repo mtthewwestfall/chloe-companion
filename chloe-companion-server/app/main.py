@@ -593,7 +593,27 @@ def _maybe_save_requested_action(conn, girl_id: str, user_text: str) -> None:
         pass  # never break chat on a save failure
 
 
+
+# Telegram bot auth (2026-10-06): creates/links account via Telegram ID
+@app.post("/api/v1/auth/telegram")
+def auth_telegram(body: dict):
+    """Link a Telegram user to a companion account. Body: {telegram_id, name}"""
+    tid = str(body.get("telegram_id", ""))
+    name = body.get("name", "Telegram User")
+    if not tid:
+        raise HTTPException(status_code=400, detail="telegram_id required")
+    conn = _conn()
+    try:
+        # Use telegram_id as the user identifier
+        user_id = f"tg_{tid}"
+        user = store.get_or_create_user(conn, user_id)
+        # Ensure they have the free 50 messages if new
+        return {"ok": True, "user_id": user_id, "name": name}
+    finally:
+        conn.close()
+
 @app.post("/api/v1/chat")
+
 def chat(body: ChatIn, request: Request):
     user_id = _current_user_id(request)  # login required — no free use
     conn = _conn()
