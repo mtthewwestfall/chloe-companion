@@ -22,6 +22,7 @@ import json
 import re
 import sqlite3
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import config, store, submit
@@ -237,6 +238,8 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
     check_content_safety(name, persona_text, blurb)
 
     # Photo moderation gate: every photo, fail closed.
+    # Run in parallel — 3 photos take ~30s instead of ~90s sequential.
+    raws = []
     for i, uri in enumerate(images):
         m = submit._DATA_URI_RE.match(uri)
         mime = f"image/{m.group(1)}" if m else "image/jpeg"
@@ -244,7 +247,11 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
             raw = base64.b64decode(uri.split(",", 1)[1], validate=True)
         except (binascii.Error, ValueError):
             raise ValueError(f"photo {i + 1} is not valid")
-        moderate_photo(raw, mime)
+        raws.append((i, raw, mime))
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(moderate_photo, raw, mime): i for i, raw, mime in raws}
+        for fut in futs:
+            fut.result()  # raises ValueError on any moderation failure
 
     hidden_depth = _generate_hidden_depth(name, persona_text, gender)
     persona_file = _build_persona_file(name, gender, persona_text, blurb,
