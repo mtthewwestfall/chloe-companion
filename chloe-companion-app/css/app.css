@@ -87,9 +87,10 @@ body {
 /* --- girl select landing --- */
 .landing-view { display: flex; flex-direction: column; height: 100%; overflow-y: auto; padding: calc(20px + var(--sat)) 20px 20px; }
 .brand { text-align: center; margin-bottom: 6px; }
-.brand-logo { font-size: 22px; font-weight: 800; background: var(--grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.brand h1 { font-size: 24px; margin: 10px 0 6px; font-weight: 700; }
-.brand p { color: var(--sub); font-size: 13.5px; margin: 0 0 16px; }
+.brand-logo { font-size: 1.8rem; font-weight: 900; background: linear-gradient(90deg, #ec4899, #9d4edd); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: 1px; }
+.brand-tag { color: #b3a7c4; font-size: 0.95rem; margin-top: 6px; }
+.brand h1 { font-size: 2.5rem; font-weight: 800; color: #fff; margin: 24px 0 10px; }
+.brand p { color: #a49cb0; font-size: 14px; max-width: 500px; margin: 0 auto 16px; }
 .online-banner {
   position: relative; border-radius: 16px; overflow: hidden; margin-bottom: 18px;
   border: 1px solid rgba(255,45,120,.4);
