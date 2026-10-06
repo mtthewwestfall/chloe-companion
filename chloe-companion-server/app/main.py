@@ -988,6 +988,11 @@ def create_companion(body: CompanionCreateIn, request: Request):
         if (user.get("tier") or "free") not in ("basic", "plus", "vip"):
             raise HTTPException(status_code=402,
                                 detail="paid_tier_required")
+        # Temporarily owner-only until photo moderation is fixed.
+        if not creator._is_owner(user_id):
+            raise HTTPException(
+                status_code=503,
+                detail="Companion creation is temporarily disabled — please try again later.")
         try:
             comp = creator.create_companion(conn, user_id,
                                             body.model_dump())
