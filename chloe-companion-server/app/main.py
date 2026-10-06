@@ -604,11 +604,11 @@ def auth_telegram(body: dict):
         raise HTTPException(status_code=400, detail="telegram_id required")
     conn = _conn()
     try:
-        # Use telegram_id as the user identifier
         user_id = f"tg_{tid}"
         user = store.get_or_create_user(conn, user_id)
-        # Ensure they have the free 50 messages if new
-        return {"ok": True, "user_id": user_id, "name": name}
+        # Create a session token for API calls
+        token = store.create_session(conn, user_id)
+        return {"ok": True, "user_id": user_id, "token": token, "name": name}
     finally:
         conn.close()
 
