@@ -937,6 +937,21 @@ async def preset_video(body: PresetVideoIn, request: Request):
     clip = _random.choice(pool)
     if not user_id:
         _LAST_PRESET_SENT[key] = clip["url"]
+    # Enforce lifetime video cap for basic tier (free + $0.99 trial)
+    if user_id:
+        try:
+            _tier = _user_tier(conn, user_id) if '_user_tier' in dir() else 'basic'
+        except Exception:
+            _tier = 'basic'
+        _lifetime_cap = config.LIFETIME_VIDEO_CAPS.get(_tier)
+        if _lifetime_cap is not None:
+            _total = conn.execute(
+                "SELECT COUNT(*) as c FROM user_give_seen WHERE user_id = ?",
+                (user_id,)).fetchone()
+            if _total and _total["c"] >= _lifetime_cap:
+                raise HTTPException(
+                    status_code=402,
+                    detail="Free accounts get 2 videos. Upgrade for unlimited.")
     # Record progress + mark seen
     if user_id:
         conn = _conn()

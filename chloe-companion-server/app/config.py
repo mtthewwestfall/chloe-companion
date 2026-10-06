@@ -214,6 +214,12 @@ DAILY_REQUEST_CAPS = {
     "vip": 10,
 }
 
+# Lifetime video request cap for free/trial users (basic tier)
+# to encourage upgrades. Paid tiers (plus/vip) have no lifetime cap.
+LIFETIME_VIDEO_CAPS = {
+    "basic": 2,
+}
+
 # Overage pack ($5.99, paid through Shopify — product + webhook are a
 # separate item; fulfillment calls store.credit_overage_pack()).
 # All-preset since 2026-09-30: no custom generation in the pack — the 14
