@@ -1013,6 +1013,37 @@ async def admin_girl_media_add(body: GirlMediaIn, request: Request):
         conn.close()
 
 
+
+class GirlMediaUpdateIn(BaseModel):
+    stage: int = None
+    preset: str = None
+
+
+@app.patch("/api/v1/admin/girl-media/{media_id}")
+async def admin_girl_media_update(media_id: int, body: GirlMediaUpdateIn, request: Request):
+    _require_admin(request)
+    updates = []
+    params = []
+    if body.stage is not None:
+        if body.stage < 0 or body.stage > 7:
+            raise HTTPException(status_code=400, detail="stage must be 0-7")
+        updates.append("stage = ?")
+        params.append(body.stage)
+    if body.preset is not None:
+        updates.append("preset = ?")
+        params.append(body.preset.lower().strip() or None)
+    if not updates:
+        raise HTTPException(status_code=400, detail="nothing to update")
+    params.append(media_id)
+    conn = _conn()
+    try:
+        conn.execute(f"UPDATE girl_media SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @app.delete("/api/v1/admin/girl-media/{media_id}")
 async def admin_girl_media_delete(media_id: int, request: Request):
     _require_admin(request)
