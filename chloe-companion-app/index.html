@@ -55,15 +55,16 @@
         <header class="imsg-chat-header">
           <button id="backBtn" class="back-btn" aria-label="Back">Back</button>
           <button id="profileBtn" class="chat-avatar-btn" aria-label="Profile">
-            <img id="chatAvatar" class="chat-avatar" src="" alt="">
+            <video id="chatAvatarVideo" class="chat-avatar" muted loop playsinline></video>
             <span class="presence-dot"></span>
           </button>
           <div class="chat-header-titles">
             <div id="chatName" class="chat-name">Chloe</div>
-            <div class="chat-sub">AiMessage · Active Now</div>
+            <div class="chat-sub">Whispr AiMessage · Active Now</div>
           </div>
           <div class="header-icons">
-            <button id="showsBtn" aria-label="Shows">📹</button>
+            <button id="videoCallBtn" aria-label="Video call">📹</button>
+            <button id="phoneCallBtn" aria-label="Voice call">📞</button>
           </div>
         </header>
 
@@ -75,10 +76,7 @@
 
         <footer class="composer">
           <button class="plus-btn" id="plusBtn" aria-label="More">+</button>
-          <input id="msgInput" type="text" placeholder="AiMessage" autocomplete="off" enterkeyhint="send" maxlength="500">
-          <button id="micBtn" class="icon-btn" aria-label="Send a voice note" style="display:none">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 19v3"/></svg>
-          </button>
+          <input id="msgInput" type="text" placeholder="Whispr AiMessage" autocomplete="off" enterkeyhint="send" maxlength="500">
           <button id="sendBtn" class="icon-btn send" aria-label="Send">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
           </button>

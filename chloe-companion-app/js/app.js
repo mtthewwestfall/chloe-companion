@@ -9,21 +9,51 @@
 
   /* ---------- characters ---------- */
   const AVATAR_BASE = 'https://keyhole-latest-production.up.railway.app';
+  const MEDIA_BASE = 'https://keyhole-latest-production.up.railway.app';
   const CHARACTERS = [
     { id: 'isabella', name: 'Isabella',
       avatar: AVATAR_BASE + '/media/files/isabella_6c8d820baed84544.png',
+      videos: [
+        MEDIA_BASE + '/media/files/isabella_971b3e57d80692ee.mp4',  // main
+        MEDIA_BASE + '/media/files/isabella_b95153aa38c2db91.mp4',  // activity
+        MEDIA_BASE + '/media/files/isabella_2313f8b06e00d8a9.mp4',  // typing
+      ],
       desc: 'Bold, charming, and playfully confident.',
       bestFor: 'Flirty banter, late-night laughs, and someone who keeps you on your toes.' },
     { id: 'chloe', name: 'Chloe',
       avatar: AVATAR_BASE + '/media/files/chloe_a6647f142096672f.jpg',
+      videos: [
+        MEDIA_BASE + '/media/files/chloe_6f26366653c891fc.mp4',  // main
+      ],
       desc: 'Bright, radiant, and effortlessly magnetic.',
       bestFor: 'Unwinding after a long day, deep late-night chats, and feel-good conversations.' },
     { id: 'mara', name: 'Mara',
       avatar: AVATAR_BASE + '/media/files/mara_bcd8ffe5d877fead.png',
+      videos: [
+        MEDIA_BASE + '/media/files/mara_d5ec0d3886014ae4.mp4',  // main
+        MEDIA_BASE + '/media/files/mara_09578b3e20e2e7fa.mp4',  // typing
+      ],
       desc: 'Sweet, witty, and subtly captivating.',
       bestFor: 'Honest check-ins, shared secrets, and effortless chemistry.' },
   ];
   let currentGirl = CHARACTERS[1];
+  let avatarCycleTimer = null;
+
+  function startAvatarCycle() {
+    const video = $('chatAvatarVideo');
+    const clips = currentGirl.videos || [];
+    if (!clips.length) return;
+    let idx = 0;
+    const play = () => {
+      video.src = clips[idx % clips.length];
+      video.play().catch(() => {});
+      idx++;
+    };
+    play();
+    clearInterval(avatarCycleTimer);
+    // Cycle every 12s: main -> activity -> typing -> main...
+    avatarCycleTimer = setInterval(play, 12000);
+  }
 
   function renderGirlCards() {
     const wrap = $('girlCards');
@@ -48,14 +78,16 @@
     const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[1];
     currentGirl = girl;
     $('chatName').textContent = girl.name;
-    const av = $('chatAvatar');
-    av.src = girl.avatar;
-    av.alt = girl.name;
+    startAvatarCycle();
     // day divider + encryption note
     chatLog.innerHTML = '';
+    const dayDiv = document.createElement('div');
+    dayDiv.className = 'day-divider';
+    dayDiv.textContent = 'Today ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    chatLog.appendChild(dayDiv);
     const enc = document.createElement('div');
     enc.className = 'encryption-note';
-    enc.textContent = `AiMessage with ${girl.name} · End-to-End Encrypted`;
+    enc.textContent = `Whispr AiMessage with ${girl.name} · End-to-End Encrypted`;
     chatLog.appendChild(enc);
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
