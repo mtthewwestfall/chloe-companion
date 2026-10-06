@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import re
 import sqlite3
 import urllib.request
@@ -26,6 +27,15 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import config, store, submit
+
+
+def _is_owner(user_id: str) -> bool:
+    """Owner bypass for photo moderation — owner's own photos skip AI check."""
+    if not user_id:
+        return False
+    raw = os.environ.get("ASSIST_OWNER_IDS", "")
+    owners = {p.strip() for p in raw.split(",") if p.strip()}
+    return user_id in owners
 
 
 # ---------------------------------------------------------------------------
@@ -238,20 +248,29 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
     check_content_safety(name, persona_text, blurb)
 
     # Photo moderation gate: every photo, fail closed.
-    # Run in parallel — 3 photos take ~30s instead of ~90s sequential.
-    raws = []
-    for i, uri in enumerate(images):
-        m = submit._DATA_URI_RE.match(uri)
-        mime = f"image/{m.group(1)}" if m else "image/jpeg"
-        try:
-            raw = base64.b64decode(uri.split(",", 1)[1], validate=True)
-        except (binascii.Error, ValueError):
-            raise ValueError(f"photo {i + 1} is not valid")
-        raws.append((i, raw, mime))
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futs = {ex.submit(moderate_photo, raw, mime): i for i, raw, mime in raws}
-        for fut in futs:
-            fut.result()  # raises ValueError on any moderation failure
+    # Owners skip AI moderation (their own photos, their call).
+    if not _is_owner(user_id):
+        # Run in parallel — 3 photos take ~30s instead of ~90s sequential.
+        raws = []
+        for i, uri in enumerate(images):
+            m = submit._DATA_URI_RE.match(uri)
+            mime = f"image/{m.group(1)}" if m else "image/jpeg"
+            try:
+                raw = base64.b64decode(uri.split(",", 1)[1], validate=True)
+            except (binascii.Error, ValueError):
+                raise ValueError(f"photo {i + 1} is not valid")
+            raws.append((i, raw, mime))
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(moderate_photo, raw, mime): i for i, raw, mime in raws}
+            for fut in futs:
+                fut.result()  # raises ValueError on any moderation failure
+    else:
+        # Still validate the images are decodable.
+        for i, uri in enumerate(images):
+            try:
+                base64.b64decode(uri.split(",", 1)[1], validate=True)
+            except (binascii.Error, ValueError):
+                raise ValueError(f"photo {i + 1} is not valid")
 
     hidden_depth = _generate_hidden_depth(name, persona_text, gender)
     persona_file = _build_persona_file(name, gender, persona_text, blurb,
