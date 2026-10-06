@@ -1,0 +1,6 @@
+{
+  "$schema": "https://railpack.com/schema.json",
+  "deploy": {
+    "startCommand": "python chloe-companion-server/demo_serve.py"
+  }
+}
