@@ -9,55 +9,66 @@
 
   /* ---------- characters ---------- */
   const CHARACTERS = [
-    { id: 'chloe', name: 'Chloe', color: '#e8a94c', initial: 'C' },
-    { id: 'mara', name: 'Mara', color: '#c98f3a', initial: 'M' },
-    { id: 'isabella', name: 'Isabella', color: '#8e6fb8', initial: 'I' },
+    { id: 'isabella', name: 'Isabella', color: '#8e6fb8', initial: 'I',
+      desc: 'Bold, charming, and playfully confident.',
+      bestFor: 'Flirty banter, late-night laughs, and someone who keeps you on your toes.' },
+    { id: 'chloe', name: 'Chloe', color: '#e8a94c', initial: 'C',
+      desc: 'Bright, radiant, and effortlessly magnetic.',
+      bestFor: 'Unwinding after a long day, deep late-night chats, and feel-good conversations.' },
+    { id: 'mara', name: 'Mara', color: '#c98f3a', initial: 'M',
+      desc: 'Sweet, witty, and subtly captivating.',
+      bestFor: 'Honest check-ins, shared secrets, and effortless chemistry.' },
   ];
-  let currentGirl = CHARACTERS[0];
+  let currentGirl = CHARACTERS[1];
 
-  function renderConvoList() {
-    const items = $('convoItems');
-    items.innerHTML = '';
+  function renderGirlCards() {
+    const wrap = $('girlCards');
+    wrap.innerHTML = '';
     CHARACTERS.forEach((c) => {
       const el = document.createElement('div');
-      el.className = 'convo-item';
+      el.className = 'girl-card';
       el.innerHTML = `
-        <div class="convo-avatar" style="background:${c.color}">${c.initial}</div>
-        <div class="convo-main">
-          <div class="convo-name">${c.name}</div>
-          <div class="convo-preview">AiMessage</div>
-        </div>
-        <div class="convo-time">›</div>`;
+        <div class="girl-photo" style="background:${c.color}"><span>${c.initial}</span></div>
+        <div class="girl-info">
+          <div class="girl-name">${c.name} <span class="online-dot">● Online Now</span></div>
+          <div class="girl-desc">${c.desc}<br><b>Best for:</b> ${c.bestFor}</div>
+          <button class="start-chat-btn">[ Start Chatting ]</button>
+        </div>`;
       el.addEventListener('click', () => openChat(c.id));
-      items.appendChild(el);
+      wrap.appendChild(el);
     });
   }
 
   function openChat(girlId) {
-    const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[0];
+    const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[1];
     currentGirl = girl;
     $('chatName').textContent = girl.name;
-    $('chatAvatar').style.background = girl.color;
-    $('chatAvatar').textContent = '';
-    // Clear and reboot chat for this girl
+    const av = $('chatAvatar');
+    av.style.background = girl.color;
+    av.alt = girl.name;
+    // day divider + encryption note
     chatLog.innerHTML = '';
-    $('convoList').classList.add('hidden');
+    const enc = document.createElement('div');
+    enc.className = 'encryption-note';
+    enc.textContent = `AiMessage with ${girl.name} · End-to-End Encrypted`;
+    chatLog.appendChild(enc);
+    $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
     bootChat(false);
   }
 
   $('backBtn').addEventListener('click', () => {
     $('chatView').classList.add('hidden');
-    $('convoList').classList.remove('hidden');
-    renderConvoList();
+    $('landingView').classList.remove('hidden');
+    renderGirlCards();
   });
 
   function showListView() {
     $('onboarding').classList.add('hidden');
     $('app').classList.remove('hidden');
     $('chatView').classList.add('hidden');
-    $('convoList').classList.remove('hidden');
-    renderConvoList();
+    $('landingView').classList.remove('hidden');
+    renderGirlCards();
   }
 
   let toastTimer = null;
