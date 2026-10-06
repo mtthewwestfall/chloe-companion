@@ -1,11 +1,64 @@
-/* Chloe — AI Companion · app shell logic.
-   Chat home screen, onboarding-lite, sheets, demo voice-note playback. */
+/* your perfect girlfriend · AiMessage app shell.
+   Conversation list, chat view, onboarding-lite, sheets, demo voice-note playback. */
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
   const chatLog = $('chatLog'), msgInput = $('msgInput');
   const typingRow = $('typingRow'), toast = $('toast');
+
+  /* ---------- characters ---------- */
+  const CHARACTERS = [
+    { id: 'chloe', name: 'Chloe', color: '#e8a94c', initial: 'C' },
+    { id: 'mara', name: 'Mara', color: '#c98f3a', initial: 'M' },
+    { id: 'isabella', name: 'Isabella', color: '#8e6fb8', initial: 'I' },
+  ];
+  let currentGirl = CHARACTERS[0];
+
+  function renderConvoList() {
+    const items = $('convoItems');
+    items.innerHTML = '';
+    CHARACTERS.forEach((c) => {
+      const el = document.createElement('div');
+      el.className = 'convo-item';
+      el.innerHTML = `
+        <div class="convo-avatar" style="background:${c.color}">${c.initial}</div>
+        <div class="convo-main">
+          <div class="convo-name">${c.name}</div>
+          <div class="convo-preview">AiMessage</div>
+        </div>
+        <div class="convo-time">›</div>`;
+      el.addEventListener('click', () => openChat(c.id));
+      items.appendChild(el);
+    });
+  }
+
+  function openChat(girlId) {
+    const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[0];
+    currentGirl = girl;
+    $('chatName').textContent = girl.name;
+    $('chatAvatar').style.background = girl.color;
+    $('chatAvatar').textContent = '';
+    // Clear and reboot chat for this girl
+    chatLog.innerHTML = '';
+    $('convoList').classList.add('hidden');
+    $('chatView').classList.remove('hidden');
+    bootChat(false);
+  }
+
+  $('backBtn').addEventListener('click', () => {
+    $('chatView').classList.add('hidden');
+    $('convoList').classList.remove('hidden');
+    renderConvoList();
+  });
+
+  function showListView() {
+    $('onboarding').classList.add('hidden');
+    $('app').classList.remove('hidden');
+    $('chatView').classList.add('hidden');
+    $('convoList').classList.remove('hidden');
+    renderConvoList();
+  }
 
   let toastTimer = null;
   function showToast(text, ms = 2200) {
@@ -43,65 +96,12 @@
     return wrap;
   }
 
-  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  // Escape HTML, then make URLs tappable. Escape-first keeps this safe:
-  // &amp; inside href decodes back to & when the link is followed.
-  function linkify(s) {
-    return esc(s).replace(/(https?:\/\/[^\s<]+)/g, (m) => {
-      const url = m.replace(/[.,;:!?)\]]+$/, '');
-      const trail = m.slice(url.length);
-      return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url + '</a>' + trail;
-    });
-  }
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   function addText(who, text) {
-    addMsg(who, linkify(text), { caption: who === 'her' ? charDisplayName() + ' · ' + timeNow() : timeNow() });
+    addMsg(who, esc(text), { caption: who === 'her' ? currentGirl.name + ' · ' + timeNow() : timeNow() });
   }
 
-  // Restore a saved turn: server stores UTC ("YYYY-MM-DD HH:MM:SS"), so
-  // parse it as UTC and show the caption in the user's local time.
-  function histDate(iso) {
-    const d = new Date(String(iso || '').replace(' ', 'T') + 'Z');
-    return isNaN(d) ? null : d;
-  }
-  function addHistoryTurn(role, text, created_at) {
-    const who = role === 'user' ? 'him' : 'her';
-    const t = histDate(created_at);
-    const stamp = t ? t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
-    addMsg(who, linkify(text || ''), {
-      caption: who === 'her' ? charDisplayName() + (stamp ? ' · ' + stamp : '') : stamp,
-    });
-  }
-  function historyDayDivider(created_at) {
-    const d = histDate(created_at);
-    if (!d) return;
-    const el = document.createElement('div');
-    el.className = 'day-divider';
-    el.textContent = d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
-    chatLog.appendChild(el);
-    try { localStorage.setItem('chloe_last_day', d.toDateString()); } catch (e) {}
-  }
-  async function loadHistory() {
-    // Pull the saved conversation and render it oldest-first, with day
-    // dividers where the date changes. Returns true when anything was
-    // rendered — the chat then picks up exactly where you left off.
-    let turns = [];
-    try { turns = await ApiClient.history(currentChar.id, 50); } catch (e) { turns = []; }
-    if (!turns.length) return false;
-    let lastDay = '';
-    for (const t of turns) {
-      const d = histDate(t.created_at);
-      const day = d ? d.toDateString() : '';
-      if (day && day !== lastDay) { historyDayDivider(t.created_at); lastDay = day; }
-      addHistoryTurn(t.role, t.text, t.created_at);
-    }
-    scrollBottom();
-    return true;
-  }
-
-  // Voice-note bubble UI. In demo mode the URL is `demo:voice` and we play a
-  // soft locally-synthesized tone so the UI is previewable (clearly labeled).
   function addVoiceNote(url, caption) {
     const isDemo = url === 'demo:voice';
     const bars = Array.from({ length: 22 }, (_, i) => {
@@ -145,10 +145,8 @@
     } catch (e) { showToast('Audio not available here'); }
   }
 
-  // Photo-drop bubble UI. Demo renders a tasteful night-window scene
-  // placeholder (real photo curation happens later with the user).
   function addPhotoDrop(url, caption) {
-    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: charDisplayName() + ' · ' + timeNow() });
+    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' · ' + timeNow() });
     const b = wrap.firstChild;
     const isDemo = url === 'demo:photo';
     b.innerHTML = `
@@ -175,130 +173,6 @@
       </div>`;
   }
 
-  /* ---------- character picker ---------- */
-
-  const DEFAULT_CHAR = { id: 'chloe', name: 'Chloe', avatar_url: '' };
-  // Fallback so Chloe's tab never renders as a bare initial when the
-  // roster ships without her avatar_url (Keyhole backend may omit it).
-  const CHLOE_AVATAR_FALLBACK = 'https://keyhole-latest-production.up.railway.app/assets/chloe-1.jpg';
-  // Per-girl bedroom backgrounds, unique to each girl. Custom companions
-  // fall back to their own avatar photo.
-  const BEDROOMS = {
-    chloe: './img/bedrooms/chloe.jpg',
-    mara: './img/bedrooms/mara.jpg',
-  };
-  function roomFor(c) {
-    if (c && BEDROOMS[c.id]) return BEDROOMS[c.id];
-    return (c && c.avatar_url) || '';
-  }
-  function updateRoomBackground() {
-    const el = document.getElementById('roomBg');
-    if (!el) return;
-    const url = roomFor(currentChar);
-    if (url) { el.style.backgroundImage = 'url("' + url + '")'; el.classList.remove('hidden'); }
-    else { el.classList.add('hidden'); }
-  }
-  let currentChar = { ...DEFAULT_CHAR };
-  try {
-    const savedId = localStorage.getItem('chloe_char_id');
-    if (savedId) currentChar = { id: savedId, name: savedId === 'chloe' ? 'Chloe' : savedId, avatar_url: '' };
-  } catch (e) {}
-
-  function charDisplayName() { return currentChar.name || 'Chloe'; }
-
-  // FaceTime tile: girls with video footage get the live tile; the rest show
-  // their avatar (or an initial tile when no avatar is set).
-  function updateCharTile() {
-    const video = $('chloeVideo'), avatar = $('charAvatar'), initial = $('charInitial');
-    if (hasVideo()) {
-      video.classList.remove('hidden'); avatar.classList.add('hidden'); initial.classList.add('hidden');
-      vidIdle();
-    } else {
-      try { video.pause(); } catch (e) {}
-      video.classList.add('hidden');
-      clearTimeout(idleTimer);
-      if (currentChar.avatar_url) {
-        avatar.src = currentChar.avatar_url;
-        avatar.classList.remove('hidden'); initial.classList.add('hidden');
-      } else {
-        initial.textContent = (currentChar.name || '?').charAt(0).toUpperCase();
-        initial.classList.remove('hidden'); avatar.classList.add('hidden');
-      }
-    }
-    document.querySelector('.header-name').textContent = charDisplayName();
-  }
-
-  function charGreeting() {
-    const name = localStorage.getItem('chloe_name') || 'friend';
-    if (currentChar.id === 'chloe') {
-      return `hey ${name}. i'm chloe. this is my little corner of the night — come talk to me anytime.`;
-    }
-    return `hey ${name}. i'm ${charDisplayName().toLowerCase()} — come talk to me.`;
-  }
-
-  async function renderCharPicker() {
-    const bar = $('charPicker');
-    let roster = null;
-    try { roster = await ApiClient.characters(); } catch (e) { roster = null; }
-    if (!roster || !roster.length) roster = [DEFAULT_CHAR];
-    // Keep the saved selection if it's still on the roster.
-    if (!roster.some((c) => c.id === currentChar.id)) {
-      currentChar = { ...roster[0] };
-      try { localStorage.setItem('chloe_char_id', currentChar.id); } catch (e) {}
-    } else {
-      const full = roster.find((c) => c.id === currentChar.id);
-      currentChar = { ...full };
-    }
-    bar.innerHTML = '';
-    roster.forEach((c) => {
-      const chip = document.createElement('button');
-      chip.className = 'char-chip' + (c.id === currentChar.id ? ' selected' : '');
-      const _avatar = c.avatar_url || (c.id === 'chloe' ? CHLOE_AVATAR_FALLBACK : '');
-      const face = _avatar
-        ? `<img class="char-chip-face" src="${esc(_avatar)}" alt="">`
-        : `<span class="char-chip-face char-chip-initial">${esc((c.name || '?').charAt(0).toUpperCase())}</span>`;
-      chip.innerHTML = `${face}<span class="char-chip-name">${esc(c.name || c.id)}</span>`;
-      chip.addEventListener('click', () => switchCharacter(c.id, roster));
-      bar.appendChild(chip);
-    });
-    // "Create your own" chip (2026-10-01): opens the companion creator —
-    // any gender, 3 real photos, live immediately.
-    const plus = document.createElement('button');
-    plus.className = 'char-chip char-chip-create';
-    plus.title = 'Create your own companion';
-    plus.innerHTML = '<span class="char-chip-face char-chip-initial">+</span>' +
-      '<span class="char-chip-name">Create</span>';
-    plus.addEventListener('click', () => {
-      if (window.SubmitFlow) SubmitFlow.openSubmissionSheet();
-    });
-    bar.appendChild(plus);
-    bar.classList.toggle('hidden', roster.length < 2);
-    await loadCharFootage(currentChar.id);
-    updateCharTile();
-    updateRoomBackground();
-  }
-
-  async function switchCharacter(id, roster) {
-    if (id === currentChar.id) return;
-    const next = (roster || []).find((c) => c.id === id) || { ...DEFAULT_CHAR, id };
-    currentChar = { ...next };
-    try { localStorage.setItem('chloe_char_id', currentChar.id); } catch (e) {}
-    document.querySelectorAll('.char-chip').forEach((chip) => {
-      chip.classList.toggle('selected',
-        chip.querySelector('.char-chip-name').textContent === (next.name || next.id));
-    });
-    await loadCharFootage(currentChar.id);
-    updateCharTile();
-    updateRoomBackground();
-    chatLog.innerHTML = '';
-    // Each character keeps their own saved conversation — restore it rather
-    // than starting blank.
-    if (await loadHistory()) return;
-    dayDividerIfNeeded();
-    addText('her', charGreeting());
-    showToast('Now talking to ' + charDisplayName());
-  }
-
   /* ---------- chat flow ---------- */
 
   let sending = false;
@@ -309,9 +183,6 @@
     sending = true;
     addText('him', text);
     msgInput.value = '';
-    vidTyping();
-    lastUserMsgAt = Date.now();
-    stage1At = 0; videoNudgeSent = false;
     typingRow.classList.remove('hidden');
     scrollBottom();
 
@@ -319,35 +190,19 @@
     await new Promise((r) => setTimeout(r, 900 + Math.random() * 900));
 
     try {
-      const res = await ApiClient.chat(text, currentChar.id);
+      const res = await ApiClient.chat(text);
       typingRow.classList.add('hidden');
-      vidIdle();
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);
       } else {
         addText('her', res.reply_text || '…');
       }
       if (res.photo_url) addPhotoDrop(res.photo_url, res.reply_text);
-      if (window.Assist && res.email_draft) {
-        Assist.handleChatResponse(res).then((r) => {
-          if (!r) return;
-          if (r.ok) {
-            showToast('Draft saved to your Gmail');
-          } else {
-            showToast('Connect your email (profile) and she\'ll drop that draft in');
-          }
-        });
-      }
       if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
-      vidIdle();
-      // 401s bounce to the login screen via onAuthRequired — don't also
-      // drop a "lost you" bubble into the chat.
-      if (e && e.status !== 401) {
-        addText('her', 'hmm, lost you for a second. say that again?');
-      }
+      addText('her', 'hmm, lost you for a second. say that again?');
     }
     sending = false;
   }
@@ -357,303 +212,21 @@
     if (e.key === 'Enter') sendMessage(msgInput.value);
   });
 
-  // Mic: voice-note sending unlocks with her reply tiers.
-  $('picBtn').addEventListener('click', openReqSheet);
+  // Mic: voice-note sending unlocks with the real server; demo explains that.
   $('micBtn').addEventListener('click', () => {
-    showToast('Voice notes come with her Plus and VIP plans');
+    showToast(ApiClient.isConnected()
+      ? 'Hold to record (coming with the companion server)'
+      : 'Voice messages unlock when the companion server is connected');
   });
 
+  /* ---------- onboarding-lite ---------- */
 
-  /* ---------- FaceTime video tile ----------
-     Chloe's clips are hardcoded (2026-09-29). Other girls play the footage
-     labeled for them in the admin panel (typing-main / main / activity).
-     'give' is Keyhole-only: the server never sends it to the app. */
-  const MEDIA_BASE = 'https://keyhole-latest-production.up.railway.app/media/files/';
-  const CHLOE_IDLE = 'chloe_3bcbf88d987b7621.mp4';
-  const CHLOE_TYPING = 'chloe_6f26366653c891fc.mp4';
-  const CHLOE_ACTS = [
-    'chloe_8dc35b0d286f75c8.mp4', 'chloe_d7f526d8e173b8c1.mp4', 'chloe_b6e63f643b5d65b8.mp4',
-    'chloe_f0444b783021a49b.mp4', 'chloe_af1ad9f4bdd4e640.mp4', 'chloe_d7916e4c02a3623d.mp4',
-    'chloe_fb752057230ea48e.mp4', 'chloe_b7892a8396f0906b.mp4', 'chloe_2a699be08f3afa13.mp4',
-    'chloe_951d4f3caa7d7c8b.mp4', 'chloe_9d1a71eaa989e464.mp4', 'chloe_e29224a69d9b8483.mp4',
-    'chloe_cf36372b31ad8399.mp4', 'chloe_4e7fb93e53370b6a.mp4', 'chloe_526ff559f269109a.mp4',
-    'chloe_da384645830fac4e.mp4', 'chloe_1f071cf867c8a3f0.mp4', 'chloe_e21c51182afc8381.mp4',
-    'chloe_3cc3f88cc0051442.mp4', 'chloe_7fbf98e99a93841c.mp4', 'chloe_dbd46d293b36133e.mp4',
-    'chloe_8727c4518ffea2c3.mp4', 'chloe_6ede839a2eb89a8e.mp4', 'chloe_7b45d3e668715e56.mp4',
-    'chloe_1266ef81c5771819.mp4',
-  ];
-  const chloeVideo = $('chloeVideo'), videoTapHint = $('videoTapHint');
-  let vidMode = 'idle';   // idle | typing | activity
-  let actIdx = Math.floor(Math.random() * CHLOE_ACTS.length);
-  let idleTimer = null;
-  // Labeled footage for the current non-Chloe girl, from the server.
-  let charFootage = { typing: null, main: null, acts: [] };
+  function showOnboarding() { $('onboarding').classList.remove('hidden'); $('app').classList.add('hidden'); }
+  function showApp() { showListView(); }
 
-  async function loadCharFootage(id) {
-    charFootage = { typing: null, main: null, acts: [] };
-    actIdx = -1; // other girls' activities play sequentially from the first
-    if (!id || id === 'chloe') { actIdx = Math.floor(Math.random() * CHLOE_ACTS.length); return; }
-    try {
-      const r = await fetch(CONFIG.API_BASE_URL + '/api/v1/characters/' + encodeURIComponent(id) + '/footage');
-      const d = await r.json();
-      for (const f of (d && d.footage) || []) {
-        if (f.label === 'typing-main' && !charFootage.typing) charFootage.typing = f.url;
-        else if (f.label === 'main' && !charFootage.main) charFootage.main = f.url;
-        else if (f.label === 'activity' && f.url) charFootage.acts.push(f.url);
-      }
-    } catch (e) { /* tile falls back to her avatar */ }
-  }
-
-  function hasVideo() {
-    return currentChar.id === 'chloe' ||
-      !!(charFootage.main || charFootage.typing || charFootage.acts.length);
-  }
-  function vidIdleSrc() {
-    if (currentChar.id === 'chloe') return MEDIA_BASE + CHLOE_IDLE;
-    return charFootage.main || charFootage.typing || charFootage.acts[0] || null;
-  }
-  function vidTypingSrc() {
-    if (currentChar.id === 'chloe') return MEDIA_BASE + CHLOE_TYPING;
-    return charFootage.typing || charFootage.main || charFootage.acts[0] || null;
-  }
-  function vidActs() { return currentChar.id === 'chloe' ? CHLOE_ACTS : charFootage.acts; }
-
-  function vidShowTapHint() { videoTapHint.classList.remove('hidden'); }
-  function vidHideTapHint() { videoTapHint.classList.add('hidden'); }
-
-  function vidPlay(src, loop) {
-    if (!src) { vidShowTapHint(); return; }
-    const url = /^https?:\/\//.test(src) ? src : MEDIA_BASE + src;
-    chloeVideo.loop = !!loop;
-    if (chloeVideo.dataset.rawSrc !== src) {
-      chloeVideo.dataset.rawSrc = src;
-      chloeVideo.src = url;
-    }
-    const pr = chloeVideo.play();
-    if (pr && pr.then) pr.then(vidHideTapHint).catch(vidShowTapHint);
-  }
-  function vidIdle() {
-    if (!hasVideo()) return;
-    const src = vidIdleSrc();
-    if (!src) return;
-    vidMode = 'idle';
-    vidPlay(src, true);
-    clearTimeout(idleTimer);
-    const acts = vidActs();
-    if (!acts.length) return;
-    // One activity at a time during idle, then back to idle.
-    idleTimer = setTimeout(() => {
-      if (vidMode !== 'idle' || document.hidden) { vidIdle(); return; }
-      vidMode = 'activity';
-      actIdx = (actIdx + 1) % acts.length;
-      vidPlay(acts[actIdx], false);
-    }, 20000);
-  }
-  function vidTyping() {
-    if (!hasVideo()) return;
-    const src = vidTypingSrc();
-    if (!src) return;
-    vidMode = 'typing'; clearTimeout(idleTimer); vidPlay(src, true);
-  }
-  chloeVideo.addEventListener('ended', () => { if (vidMode === 'activity') vidIdle(); });
-  chloeVideo.addEventListener('error', vidShowTapHint, true);
-  videoTapHint.addEventListener('click', (e) => { e.stopPropagation(); vidPlay(chloeVideo.dataset.rawSrc || vidIdleSrc(), vidMode !== 'activity'); });
-  // iOS: retry autoplay on first touch and when the tab becomes visible.
-  document.addEventListener('touchend', function once() {
-    document.removeEventListener('touchend', once);
-    if (chloeVideo.paused) vidPlay(chloeVideo.dataset.rawSrc || vidIdleSrc(), vidMode !== 'activity');
-  });
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && chloeVideo.paused) vidIdle();
-  });
-
-  /* ---------- proactive: she takes the lead when he's quiet ----------
-     Stage 1: 90s of silence -> "hey. still with me?" (text, once).
-     Stage 2: an hour after that, still nothing -> her video nudge
-     (video + exactly what she says in it, as a text message, once).
-     Then she leaves him alone until he talks. */
-  const QUIET_MS = 90000;          // 90s of silence before she reaches out
-  const VIDEO_NUDGE_MS = 3600000;  // 1h after stage 1 before she sends the video
-  const VID_NUDGE = 'chloe_a5f216d755722372.mp4';  // quiet-nudge video (user pick 2026-09-30)
-  const STAGE1_LINE = 'hey. still with me?';
-  const STAGE2_LINE = "Hey, I was hoping you'd call. Yeah, I'm just in bed. Wish you were here. Sweet dreams.";  // her exact words in the quiet-nudge video (transcribed 2026-09-30)
-  let lastUserMsgAt = Date.now();
-  let stage1At = 0;          // timestamp of the stage-1 text nudge (0 = not sent)
-  let videoNudgeSent = false;
-  function armQuietNudge() {
-    setInterval(() => {
-      if (localStorage.getItem('chloe_proactive') === 'off') return;
-      if (document.hidden || sending) return;
-      // Stage 2: an hour after the text nudge and still quiet — the video,
-      // plus exactly what she says in it as a chat message.
-      if (stage1At && !videoNudgeSent && Date.now() - stage1At >= VIDEO_NUDGE_MS) {
-        videoNudgeSent = true;
-        if (currentChar.id === 'chloe') {
-          vidMode = 'activity';
-          vidPlay(VID_NUDGE, false);   // plays once, 'ended' drops back to idle
-        }
-        const myStage2 = stage1At;
-        typingRow.classList.remove('hidden'); scrollBottom();
-        setTimeout(() => {
-          if (stage1At !== myStage2) return;  // he talked while she was typing — stand down on the text
-          typingRow.classList.add('hidden');
-          addText('her', STAGE2_LINE);
-        }, 1600);
-        return;
-      }
-      // Stage 1: 90s of silence — one text line, once.
-      if (stage1At || Date.now() - lastUserMsgAt < QUIET_MS) return;
-      const myStage = (stage1At = Date.now());
-      typingRow.classList.remove('hidden'); scrollBottom(); vidTyping();
-      setTimeout(() => {
-        if (stage1At !== myStage) return;  // he talked while she was typing — stand down
-        typingRow.classList.add('hidden');
-        addText('her', STAGE1_LINE);
-        vidIdle();
-      }, 1600);
-    }, 15000);
-  }
-
-  /* ---------- auth gate: email login required, no free/demo use ---------- */
-
-  function showAuth() {
-    $('authScreen').classList.remove('hidden');
-    $('onboarding').classList.add('hidden');
-    $('app').classList.add('hidden');
-    refreshFreePromo();
-  }
-  async function refreshFreePromo() {
-    const el = $('freeSpots');
-    if (!el) return;
-    try {
-      const r = await fetch(CONFIG.API_BASE_URL + '/api/v1/free-spots');
-      const d = await r.json();
-      el.textContent = d.spots_left > 0
-        ? ` — ${d.spots_left} of ${d.cap} left`
-        : ' — all claimed';
-    } catch (e) { el.textContent = ''; }
-  }
-  function hideAuth() { $('authScreen').classList.add('hidden'); }
-
-  let authMode = 'login'; // 'login' | 'signup'
-  function setAuthMode(mode) {
-    authMode = mode;
-    $('tabLogin').classList.toggle('active', mode === 'login');
-    $('tabSignup').classList.toggle('active', mode === 'signup');
-    $('authName').classList.toggle('hidden', mode === 'login');
-    $('authPassword').setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
-    $('authGo').textContent = mode === 'signup' ? 'Sign up' : 'Log in';
-    $('authMsg').textContent = '';
-    $('authResend').classList.add('hidden');
-  }
-  $('tabLogin').addEventListener('click', () => setAuthMode('login'));
-  $('tabSignup').addEventListener('click', () => setAuthMode('signup'));
-
-  function authBusy(busy, label) {
-    $('authGo').disabled = busy;
-    $('authGo').textContent = busy ? (label || 'Working…') : (authMode === 'signup' ? 'Sign up' : 'Log in');
-  }
-
-  async function submitAuth() {
-    const email = $('authEmail').value.trim();
-    const password = $('authPassword').value;
-    const name = $('authName').value.trim().slice(0, 24);
-    $('authMsg').textContent = '';
-    $('authResend').classList.add('hidden');
-    if (!email || !password) { $('authMsg').textContent = 'Enter your email and password.'; return; }
-    authBusy(true);
-    try {
-      if (authMode === 'signup') {
-        await ApiClient.signup(email, password, name);
-        // Stay on the signup tab so this message (and the resend button)
-        // remain visible — switching modes would clear it.
-        $('authMsg').textContent = 'Check your inbox — tap the link to verify your email, then log in.';
-        $('authResend').classList.remove('hidden');
-        $('authResend').onclick = async () => {
-          try {
-            await ApiClient.resendVerification(email);
-            $('authMsg').textContent = 'Verification email re-sent. Check your inbox.';
-          } catch (e2) {
-            $('authMsg').textContent = ApiClient.friendlyDetail(e2.detail);
-          }
-        };
-      } else {
-        const data = await ApiClient.login(email, password);
-        hideAuth();
-        enterApp(data);
-      }
-    } catch (e) {
-      const d = e.detail || '';
-      $('authMsg').textContent = ApiClient.friendlyDetail(d);
-      if (d === 'email_unverified') {
-        $('authResend').classList.remove('hidden');
-        $('authResend').onclick = async () => {
-          try {
-            await ApiClient.resendVerification(email);
-            $('authMsg').textContent = 'Verification email re-sent. Check your inbox.';
-          } catch (e2) {
-            $('authMsg').textContent = ApiClient.friendlyDetail(e2.detail);
-          }
-        };
-      }
-    } finally {
-      authBusy(false);
-    }
-  }
-  $('authGo').addEventListener('click', submitAuth);
-  $('authPassword').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
-  $('authEmail').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
-
-  // Any 401 anywhere bounces back to the login screen.
-  ApiClient.onAuthRequired(() => showAuth());
-
-  const _emailBtn = $('emailConnectBtn');
-  if (_emailBtn && !_emailBtn.dataset.wired) {
-    _emailBtn.dataset.wired = '1';
-    _emailBtn.addEventListener('click', toggleEmailConnect);
-  }
-  $('logoutBtn').addEventListener('click', async () => {
-    await ApiClient.logout();
-    try { localStorage.removeItem('chloe_name'); } catch (e) {}
-    closeSheet('profileSheet');
-    chatLog.innerHTML = '';
-    showAuth();
-  });
-
-  /* ---------- entering the app (post-login) ---------- */
-
-  function enterApp(me) {
-    hideAuth();
-    const serverName = (me && me.name) || '';
-    if (serverName) {
-      try { localStorage.setItem('chloe_name', serverName); } catch (e) {}
-    }
-    if (!localStorage.getItem('chloe_name')) {
-      showOnboarding();
-    } else {
-      showApp();
-      bootChat(false);
-      initAssist();
-    }
-  }
-
-  /* ---------- onboarding-lite (name ask) ---------- */
-
-  function showOnboarding() {
-    hideAuth();
-    $('onboarding').classList.remove('hidden');
-    $('app').classList.add('hidden');
-  }
-  function showApp() {
-    hideAuth();
-    $('onboarding').classList.add('hidden');
-    $('app').classList.remove('hidden');
-  }
-
-  async function finishOnboarding() {
+  function finishOnboarding() {
     const name = $('nameInput').value.trim().slice(0, 24) || 'friend';
-    try { await ApiClient.setName(name); } catch (e) { /* offline-safe: keep local */ }
-    try { localStorage.setItem('chloe_name', name); } catch (e) {}
+    localStorage.setItem('chloe_name', name);
     showApp();
     bootChat(true);
   }
@@ -665,77 +238,6 @@
     $('nameInput').value = localStorage.getItem('chloe_name') || '';
     $('nameInput').focus();
   });
-  // "Change my name" reuses the onboarding ask; finishOnboarding already
-  // syncs the new name to the server via POST /api/v1/auth/name.
-
-  /* ---------- her powers (Assist) ---------- */
-  // Web lookups, reminders, email drafts, job hunting — tier-gated,
-  // owner-only until rollout. Email logins stay on this device only.
-
-  function initAssist() {
-    if (!window.Assist) return;
-    try {
-      Assist.onReminder((r) => {
-        // Due reminder -> her voice in the chat, like she remembered.
-        const who = (typeof currentChar !== 'undefined' && currentChar && currentChar.name)
-          ? currentChar.name : 'Chloe';
-        addText('her', 'hey — quick reminder: ' + (r.text || 'something') + ' ⏰');
-        scrollBottom();
-      });
-      Assist.startPolling();
-    } catch (e) { /* assist is best-effort; chat works without it */ }
-  }
-
-  async function renderPowers() {
-    const list = $('powersList');
-    if (!window.Assist || !list) return;
-    let caps = { enabled: false };
-    try { caps = await Assist.getCapabilities(); } catch (e) {}
-    if (!caps.enabled) {
-      $('powersBlurb').textContent = 'Her powers unlock with a paid plan.';
-      list.innerHTML = '';
-    } else {
-      const c = caps.capabilities || {};
-      $('powersBlurb').textContent =
-        'What she can do for you — ' + (caps.tier || 'paid') + ' tier.';
-      const rows = [
-        ['Web lookups', (c.web_search || 0) + ' per day — ask her anything current'],
-        ['Reminders', 'up to ' + (c.reminders || 0) + ' active — "remind me…"'],
-      ];
-      if (c.email_drafts) rows.push(['Email drafts', 'she writes it, you send it']);
-      if (c.job_lookup) rows.push(['Job hunting', '"find me … jobs" and she searches']);
-      list.innerHTML = rows.map((r) =>
-        '<div class="plan-row"><div><div class="plan-name">' + r[0] +
-        '</div><div class="sheet-sub">' + r[1] + '</div></div></div>'
-      ).join('');
-    }
-    try {
-      const st = await Assist.emailStatus();
-      $('emailStatus').textContent =
-        'Email: ' + (st.connected ? st.address : 'not connected');
-      $('emailConnectBtn').textContent = st.connected ? 'Disconnect' : 'Connect email';
-    } catch (e) {}
-  }
-
-  async function toggleEmailConnect() {
-    if (!window.Assist) return;
-    const btn = $('emailConnectBtn');
-    btn.disabled = true;
-    try {
-      const st = await Assist.emailStatus();
-      if (st.connected) {
-        await Assist.disconnectEmail();
-        showToast('Email disconnected');
-      } else {
-        await Assist.connectEmail();
-        showToast('Email connected — she can draft for you now');
-      }
-    } catch (e) {
-      showToast(e.message || "Couldn't connect email");
-    }
-    btn.disabled = false;
-    renderPowers();
-  }
 
   /* ---------- sheets ---------- */
 
@@ -750,100 +252,20 @@
 
   $('profileBtn').addEventListener('click', async () => {
     openSheet('profileSheet');
-    let me = null;
-    try { me = await ApiClient.me(); } catch (e) { me = null; }
-    $('profileName').textContent = (me && me.name) || localStorage.getItem('chloe_name') || 'You';
-    $('statMsgs').textContent = me ? me.messages_remaining : '—';
-    $('statVoice').textContent = me ? me.voice_notes_remaining : '—';
-    $('statReqs').textContent = (me && typeof me.requests_remaining === 'number')
-      ? me.requests_remaining : '—';
-    renderPowers();
-    if (window.SubmitFlow) SubmitFlow.refreshMySubmissions();
-    const tier = me && me.tier ? me.tier : 'basic';
-    $('tierName').textContent = 'Companion — ' + tier.charAt(0).toUpperCase() + tier.slice(1);
-    $('tierSub').textContent = me ? 'live on companion server' : 'couldn’t reach the server';
+    const me = await ApiClient.me();
+    $('profileName').textContent = me.name || localStorage.getItem('chloe_name') || 'You';
+    $('statMsgs').textContent = me.messages_remaining;
+    $('statVoice').textContent = me.voice_notes_remaining;
+    // Tier card + mode pill reflect the real connection state, not the demo fallback.
+    const live = ApiClient.isConnected();
+    $('tierName').textContent = live && me.tier
+      ? 'Companion — ' + me.tier.charAt(0).toUpperCase() + me.tier.slice(1)
+      : 'Companion — Demo';
+    $('tierSub').textContent = live ? 'live on companion server' : 'demo tier · not billed';
+    $('modePill').textContent = live ? 'Live' : 'Demo mode';
+    $('modeBlurb').textContent = live ? 'real memory on the companion server.' : 'connect the companion server for real memory.';
     updateConnLine();
-    renderPlans(tier);
   });
-
-  // Stripe fulfillment needs to know WHO paid: every checkout URL gets
-  // ?client_reference_id=<user_id> so the server webhook can credit the
-  // right account's banks (and the monthly Keyhole show).
-  function withClientRef(url) {
-    try {
-      const uid = ApiClient.userId();
-      if (!uid) return url;
-      return url + (url.includes('?') ? '&' : '?') + 'client_reference_id=' + encodeURIComponent(uid);
-    } catch (e) {
-      return url;
-    }
-  }
-
-  // Plans: subscribe/upgrade cards from the live server (names, prices,
-  // benefits, Stripe checkout links). Rendered once per profile-sheet open;
-  // buttons open the checkout link in a new tab.
-  async function renderPlans(currentTier) {
-    const list = $('planList');
-    let data = null;
-    try { data = await ApiClient.tiers(); } catch (e) { data = null; }
-    const plans = data && data.plans;
-    if (!plans || !plans.length) {
-      list.innerHTML = '<div class="sheet-sub">Plans appear here once you\'re connected to the companion server.</div>';
-      return;
-    }
-    list.innerHTML = '';
-    const promo = document.createElement('div');
-    promo.className = 'promo-banner';
-    promo.innerHTML = 'Launch special: buy one month, get the second free \u2014 enter code <b>BOGO2</b> at checkout.';
-    list.appendChild(promo);
-    plans.forEach((p) => {
-      const card = document.createElement('div');
-      card.className = 'plan-card' + (p.key === currentTier ? ' current' : '');
-      const once = p.interval === 'once';
-      const benefits = once
-        ? [p.messages_per_month.toLocaleString('en-US') + ' messages · one-time', 'No voice notes']
-        : [
-            p.messages_per_month.toLocaleString('en-US') + ' messages / month',
-            p.voice_notes_unconfirmed
-              ? 'Voice notes — count being finalized'
-              : (p.voice_notes_per_month > 0
-                  ? p.voice_notes_per_month + ' voice notes / month'
-                  : 'No voice notes'),
-          ];
-      if (p.photo_drops) benefits.push('Photo drops');
-      if (p.proactive) benefits.push('Proactive check-ins');
-      card.innerHTML = `
-        <div class="plan-head"><div class="plan-name">${esc(p.name)}</div><div class="plan-price">$${p.price_usd.toFixed(2)}<span>${once ? 'one-time' : '/mo'}</span></div></div>
-        <ul class="plan-benefits">${benefits.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>`;
-      const btn = document.createElement('button');
-      if (p.key === currentTier) {
-        btn.className = 'btn-ghost'; btn.textContent = 'Current plan'; btn.disabled = true;
-      } else {
-        btn.className = 'btn-primary';
-        btn.textContent = once ? 'Try · $' + p.price_usd.toFixed(2) + ' once' : 'Subscribe · $' + p.price_usd.toFixed(2) + '/mo';
-        btn.addEventListener('click', () => window.open(withClientRef(p.checkout_url), '_blank', 'noopener'));
-      }
-      card.appendChild(btn);
-      list.appendChild(card);
-    });
-
-    // Overage Pack: $5.99 Shopify top-up — 300 messages + 14 preset videos.
-    // Credit lands automatically when they check out with their
-    // companion-account email (a 5-minute poll fulfills new orders).
-    const topCard = document.createElement('div');
-    topCard.className = 'plan-card';
-    topCard.innerHTML = `
-      <div class="plan-head"><div class="plan-name">Overage Pack</div><div class="plan-price">$5.99<span>one-time</span></div></div>
-      <ul class="plan-benefits"><li>300 messages</li><li>14 preset videos</li></ul>
-      <div class="sheet-sub">Check out with your companion-account email so credit lands automatically.</div>`;
-    const topBtn = document.createElement('button');
-    topBtn.className = 'btn-primary';
-    topBtn.textContent = 'Top up · $5.99';
-    topBtn.addEventListener('click', () => window.open(
-      'https://lockeddoorai.myshopify.com/cart/67593656107098:1', '_blank', 'noopener'));
-    topCard.appendChild(topBtn);
-    list.appendChild(topCard);
-  }
 
   $('proactiveToggle').addEventListener('change', (e) => {
     localStorage.setItem('chloe_proactive', e.target.checked ? 'on' : 'off');
@@ -885,15 +307,15 @@
     if (ApiClient.isConnected()) {
       el.innerHTML = '<span class="ok">connected to companion server</span>';
     } else {
-      el.innerHTML = '<span class="bad">not connected</span>';
+      el.innerHTML = '<span class="bad">demo mode</span>';
     }
   }
   ApiClient.onStatus(updateConnLine);
   $('reconnectBtn').addEventListener('click', async () => {
     $('connStatus').textContent = 'checking…';
-    try { await ApiClient.me(); } catch (e) {}
+    await ApiClient.probe();
     updateConnLine();
-    showToast(ApiClient.isConnected() ? 'Connected to the companion server' : 'Still not connected — check your connection');
+    showToast(ApiClient.isConnected() ? 'Connected to the companion server' : 'Still in demo mode');
   });
 
   /* ---------- boot ---------- */
@@ -911,217 +333,35 @@
   }
 
   async function bootChat(isFirstHello) {
-    vidIdle();
-    armQuietNudge();
+    dayDividerIfNeeded();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';
 
-    // Character roster (admin-managed). Chloe-only until the server lists more.
-    renderCharPicker();
+    // Probe for the real server in the background; demo works regardless.
+    ApiClient.probe().then(updateConnLine);
     updateConnLine();
 
     const returning = !isFirstHello && !!localStorage.getItem('chloe_seen');
     localStorage.setItem('chloe_seen', '1');
 
-    // Restore the saved conversation FIRST: logging back in picks up right
-    // where you left off instead of resetting to a blank chat.
-    if (await loadHistory()) return;
-
-    dayDividerIfNeeded();
     await new Promise((r) => setTimeout(r, 600));
     typingRow.classList.remove('hidden'); scrollBottom();
     await new Promise((r) => setTimeout(r, 1400));
     typingRow.classList.add('hidden');
 
     if (isFirstHello) {
-      addText('her', charGreeting());
+      const name = localStorage.getItem('chloe_name') || 'friend';
+      addText('her', `hey ${name}. i'm ${currentGirl.name.toLowerCase()}. this is my little corner — come talk to me anytime.`);
     } else if (returning) {
-      addText('her', 'hey, welcome back. missed you.');
+      addText('her', MockEngine.returnOpener());
     }
   }
 
-  /* ---------- request-a-pic (2026-10-01) ----------
-     Custom media requests: regular (she generates it from your prompt,
-     ~1-2 min) and give (a clip from her pre-approved stash, instant). */
-  const reqState = { balance: null, kind: null, media: null, busy: false };
-
-  function reqTotal(b) {
-    return (b.included_remaining || 0) + (b.overage_regular || 0) + (b.overage_give || 0);
+  // Go.
+  if (localStorage.getItem('chloe_name')) {
+    showApp();
+    bootChat(false);
+  } else {
+    showOnboarding();
   }
-
-  function openReqSheet() {
-    if (!ApiClient.getToken()) { showAuth(); return; }
-    openSheet('reqSheet');
-    $('reqBody').innerHTML = '<p class="sheet-sub">checking your balance…</p>';
-    reqState.balance = null; reqState.kind = null; reqState.media = null;
-    ApiClient.mediaBalance(currentChar.id)
-      .then((b) => { reqState.balance = b; renderReqKind(); })
-      .catch(() => {
-        $('reqBody').innerHTML = '<p class="sheet-sub">couldn’t reach the server — try again in a bit.</p>';
-      });
-  }
-
-  function reqBalanceLine() {
-    const b = reqState.balance;
-    const left = reqTotal(b);
-    const dailyLeft = Math.max(0, (b.daily_cap || 0) - (b.daily_used || 0));
-    return '<div class="req-balance">📸 <b>' + left + '</b> request' + (left === 1 ? '' : 's') +
-      ' left this month · <b>' + dailyLeft + '</b> today</div>';
-  }
-
-  function renderReqKind() {
-    reqState.media = null;
-    const b = reqState.balance;
-    const giveOk = !!b.give_available;
-    $('reqBody').innerHTML =
-      reqBalanceLine() +
-      '<button class="req-opt" id="reqKindRegular">' +
-        '<span class="req-opt-title">✨ Make one for me</span>' +
-        '<span class="req-opt-sub">tell her what to wear, where she is… she’ll make it in a minute or two</span>' +
-      '</button>' +
-      '<button class="req-opt" id="reqKindGive"' + (giveOk ? '' : ' disabled') + '>' +
-        '<span class="req-opt-title">🎁 From her collection</span>' +
-        '<span class="req-opt-sub">' + (giveOk ? 'a clip from her private stash, instantly' : 'she hasn’t shared any yet') + '</span>' +
-      '</button>';
-    $('reqKindRegular').addEventListener('click', () => { reqState.kind = 'regular'; renderReqMedia(); });
-    if (giveOk) $('reqKindGive').addEventListener('click', () => { reqState.kind = 'give'; renderReqMedia(); });
-  }
-
-  function renderReqMedia() {
-    const isGive = reqState.kind === 'give';
-    const media = reqState.media;
-    $('reqBody').innerHTML =
-      reqBalanceLine() +
-      '<div class="req-back-row"><button class="btn-ghost" id="reqBack">← back</button></div>' +
-      '<div class="req-label">' + (isGive ? 'Pick from her collection' : 'What should she make?') + '</div>' +
-      '<div class="req-media-row">' +
-        '<button class="req-opt req-half' + (media === 'pic' ? ' selected' : '') + '" data-media="pic"><span class="req-opt-title">🖼️ Pic</span></button>' +
-        '<button class="req-opt req-half' + (media === 'video' ? ' selected' : '') + '" data-media="video"><span class="req-opt-title">🎬 Video</span><span class="req-opt-sub">~6 seconds</span></button>' +
-      '</div>' +
-      (isGive ? '' :
-        '<textarea id="reqPrompt" class="req-prompt" maxlength="500" placeholder="describe it for her… e.g. red dress on the balcony at sunset"></textarea>' +
-        '<button class="btn-primary" id="reqSend">Send request 💌</button>' +
-        '<p class="sheet-sub">uses 1 request · she’ll make it in a minute or two</p>');
-    $('reqBack').addEventListener('click', () => { reqState.media = null; renderReqKind(); });
-    document.querySelectorAll('#reqBody [data-media]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (isGive) { reqState.media = btn.dataset.media; sendMediaRequest(''); }
-        else {
-          const cur = ($('reqPrompt') || {}).value || '';
-          reqState.media = btn.dataset.media;
-          renderReqMedia();
-          const ta = $('reqPrompt');
-          if (ta) ta.value = cur;
-        }
-      });
-    });
-    const sendBtn = $('reqSend');
-    if (sendBtn) sendBtn.addEventListener('click', () => {
-      if (!reqState.media) { showToast('pick a pic or a video first 📸'); return; }
-      sendMediaRequest(($('reqPrompt') || {}).value || '');
-    });
-  }
-
-  function reqErrorText(e) {
-    const d = (e && e.detail) || '';
-    if (d === 'no_requests_left') return 'You’re out of requests, babe — they refill on the 1st, or grab the Overage Pack in Plans anytime 💕';
-    if (d === 'daily_request_cap') return 'That’s your daily limit — more tomorrow 😘';
-    if (d === 'generation_unavailable') return 'She can’t make those right now — try again later';
-    if (d === 'give_unavailable') return 'She hasn’t shared any of those yet';
-    return ApiClient.friendlyDetail(d);
-  }
-
-  async function sendMediaRequest(prompt) {
-    if (reqState.busy) return;
-    reqState.busy = true;
-    $('reqBody').innerHTML = '<p class="sheet-sub">sending… 💌</p>';
-    try {
-      const res = await ApiClient.createMediaRequest({
-        girl_id: currentChar.id, kind: reqState.kind,
-        media: reqState.media, prompt,
-      });
-      closeSheet('reqSheet');
-      if (res.status === 'rejected') {
-        addText('her', res.deflection || 'hmm, not that one, babe 😘');
-      } else if (res.status === 'ready') {
-        addText('her', reqState.kind === 'give'
-          ? 'just for you, babe 😘' : 'here you go 😘');
-        addMediaDrop(res.result_url, res.media);
-      } else {
-        // Regular, still generating: she acknowledged in character already.
-        addText('her', res.ack || 'give me a minute 😘');
-        const pending = addPendingDrop();
-        pollMediaRequest(res.id, pending, 0);
-      }
-    } catch (e) {
-      closeSheet('reqSheet');
-      showToast(reqErrorText(e), 3200);
-    } finally {
-      reqState.busy = false;
-    }
-  }
-
-  async function pollMediaRequest(id, pendingWrap, tries) {
-    if (tries >= 24) { // ~2 minutes: stop polling, it'll land when it lands
-      const b = pendingWrap.querySelector('.bubble');
-      if (b) b.innerHTML = '<div class="media-drop media-pending">still working on it — it’ll pop in when it’s ready 💕</div>';
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 5000));
-    let res = null;
-    try { res = await ApiClient.pollMediaRequest(id); } catch (e) { /* retry */ }
-    if (!res) return pollMediaRequest(id, pendingWrap, tries + 1);
-    if (res.status === 'ready') {
-      const b = pendingWrap.querySelector('.bubble');
-      if (b) b.innerHTML = mediaDropHtml(res.result_url, res.media);
-      scrollBottom();
-      return;
-    }
-    if (res.status === 'failed') {
-      pendingWrap.remove();
-      addText('her', res.failed_line || 'that one didn’t come out right — I put your request back 💕');
-      return;
-    }
-    return pollMediaRequest(id, pendingWrap, tries + 1);
-  }
-
-  function mediaDropHtml(url, media) {
-    const u = esc(url || '');
-    const inner = media === 'video'
-      ? '<video class="media-drop-vid" src="' + u + '" autoplay muted loop playsinline controls></video>'
-      : '<img class="media-drop-img" src="' + u + '" alt="for you">';
-    return '<div class="media-drop">' + inner + '</div>';
-  }
-
-  function addMediaDrop(url, media) {
-    addMsg('her', mediaDropHtml(url, media),
-      { caption: charDisplayName() + ' · ' + timeNow() });
-  }
-
-  function addPendingDrop() {
-    return addMsg('her',
-      '<div class="media-drop media-pending"><div class="req-spinner"></div><div>making it for you…</div></div>',
-      { caption: charDisplayName() + ' · ' + timeNow() });
-  }
-
-  // Go: pick up the session from an email verify link, else require login.
-  (function () {
-    const m = (location.hash || '').match(/#session=([A-Za-z0-9\-_]+)/);
-    if (m) {
-      ApiClient.setToken(m[1]);
-      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
-    }
-  })();
-  (async function boot() {
-    if (ApiClient.getToken()) {
-      try {
-        const me = await ApiClient.me();
-        enterApp(me);
-        return;
-      } catch (e) {
-        ApiClient.clearToken(); // bad/expired token -> login screen
-      }
-    }
-    showAuth();
-  })();
 })();
