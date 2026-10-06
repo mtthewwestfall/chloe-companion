@@ -34,9 +34,10 @@
       el.innerHTML = `
         <img class="girl-photo" src="${c.avatar}" alt="${c.name}" loading="lazy">
         <div class="girl-info">
-          <div class="girl-name">${c.name} <span class="online-dot">● Online Now</span></div>
+          <div class="girl-name">${c.name}</div>
+          <span class="online-dot">● Online Now</span>
           <div class="girl-desc">${c.desc}<br><b>Best for:</b> ${c.bestFor}</div>
-          <button class="start-chat-btn">[ Start Chatting ]</button>
+          <button class="start-chat-btn">[ Chat on Whispr ]</button>
         </div>`;
       el.addEventListener('click', () => openChat(c.id));
       wrap.appendChild(el);
