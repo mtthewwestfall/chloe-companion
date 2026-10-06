@@ -106,6 +106,7 @@
     $('chatView').classList.add('hidden');
     $('landingView').classList.remove('hidden');
     renderGirlCards();
+    loadPricing();
   }
 
   let toastTimer = null;
@@ -348,6 +349,31 @@
     b.innerHTML = `
       <div class="photo-scene">${mediaHtml}</div>
       <div class="photo-caption">💕 ${presetName}</div>`;
+  }
+
+  /* ---------- pricing ---------- */
+
+  async function loadPricing() {
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/tiers');
+      const data = await res.json();
+      const wrap = $('pricingCards');
+      wrap.innerHTML = '';
+      (data.plans || []).forEach((p) => {
+        if (p.key === 'trial') return; // trial shown separately
+        const el = document.createElement('div');
+        el.className = 'price-card';
+        el.innerHTML = `
+          <div><div class="plan-name">${p.name}</div>
+          <div class="plan-msgs">${p.messages_per_month.toLocaleString()} messages/mo</div></div>
+          <div class="plan-price">$${p.price_usd}<span>/mo</span></div>`;
+        el.style.cursor = 'pointer';
+        el.addEventListener('click', () => {
+          if (p.checkout_url) window.open(p.checkout_url, '_blank');
+        });
+        wrap.appendChild(el);
+      });
+    } catch (e) { /* pricing unavailable offline */ }
   }
 
   /* ---------- sheets ---------- */
