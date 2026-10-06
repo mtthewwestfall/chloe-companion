@@ -31,6 +31,14 @@
   .add-girl button { padding: 10px 20px; border-radius: 8px; border: none; background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; cursor: pointer; font-weight: 600; }
   .hidden { display: none; }
   .preset-tag { background: #2a2a35; padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #ff4d8d; }
+  .stage-tag { background: #1a3a5c; padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #6ab0ff; }
+  .stage-btns { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .stage-btn { padding: 4px 10px; border-radius: 6px; border: 1px solid #444; background: #222; color: #aaa; cursor: pointer; font-size: 11px; }
+  .stage-btn.active { background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; border-color: transparent; }
+  .media-preview { width: 100%; max-height: 200px; border-radius: 8px; margin-bottom: 6px; background: #000; }
+  .filter-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+  .filter-btn { padding: 8px 16px; border-radius: 8px; border: 1px solid #444; background: #222; color: #aaa; cursor: pointer; font-size: 13px; }
+  .filter-btn.active { background: #ff4d8d; color: #fff; border-color: transparent; }
   .acct-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .acct-table th { text-align: left; padding: 8px; color: #888; font-size: 11px; text-transform: uppercase; border-bottom: 1px solid #333; }
   .acct-table td { padding: 10px 8px; border-bottom: 1px solid #222; }
@@ -62,6 +70,11 @@
   </div>
 
   <div id="tab-media">
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="setMediaFilter('untagged')">Untagged</button>
+      <button class="filter-btn" onclick="setMediaFilter('all')">All</button>
+    </div>
+    <div style="color:#888;font-size:12px;margin-bottom:12px;">Stages: 1=lift tease · 2=shirt off · 3=boob grabs · 4=nipple pinches · 5=pants off · 6=oral · 7=sex</div>
     <div id="mediaList"></div>
   </div>
 
@@ -124,19 +137,51 @@ async function api(method, path, body) {
   return res.json();
 }
 
+let mediaFilter = 'untagged';
+let allMedia = [];
+
+function setMediaFilter(f) {
+  mediaFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  renderMedia();
+}
+
+const STAGE_NAMES = {1:'lift tease',2:'shirt off',3:'boob grabs',4:'nipple pinch',5:'pants off',6:'oral',7:'sex'};
+
 async function loadMedia() {
   const data = await api('GET', '/api/v1/admin/girl-media');
+  allMedia = data.media || [];
+  renderMedia();
+}
+
+function renderMedia() {
   const byGirl = {};
-  (data.media || []).forEach(m => {
+  allMedia.forEach(m => {
+    if (mediaFilter === 'untagged' && m.kind === 'give' && (m.stage || 0) > 0) return;
     if (!byGirl[m.girl_id]) byGirl[m.girl_id] = { give: [], main: [], typing: [], activity: [] };
     byGirl[m.girl_id][m.kind].push(m);
   });
   const html = Object.keys(byGirl).sort().map(girl => {
     const sections = ['give', 'main', 'typing', 'activity'].map(kind => {
-      const items = byGirl[girl][kind].map(m =>
-        `<div class="media-item"><span class="url">${m.url}</span>${m.preset ? `<span class="preset-tag">${m.preset}</span>` : ''}<button onclick="delMedia(${m.id})">Delete</button></div>`
-      ).join('');
-      return `<div class="media-section"><div class="media-title">${kind === 'typing' ? 'Typing Main' : kind + 's'}</div>${items || '<div style="color:#555;font-size:12px;">none</div>'}
+      const items = byGirl[girl][kind].map(m => {
+        const isVideo = m.url.match(/\.(mp4|mov|webm)/i);
+        const preview = isVideo
+          ? `<video class="media-preview" src="${m.url}" muted playsinline preload="metadata" onclick="this.paused?this.play():this.pause()"></video>`
+          : `<img class="media-preview" src="${m.url}">`;
+        const stageBtns = kind === 'give' ? `<div class="stage-btns">${[1,2,3,4,5,6,7].map(s =>
+          `<button class="stage-btn ${(m.stage||0)===s?'active':''}" onclick="setStage(${m.id},${s})">${s}</button>`
+        ).join('')}</div>` : '';
+        return `<div class="media-item" style="flex-direction:column;align-items:stretch;">
+          ${preview}
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="url">${m.url.split('/').pop()}</span>
+            ${(m.stage||0)>0?`<span class="stage-tag">${STAGE_NAMES[m.stage]}</span>`:''}
+            ${m.preset ? `<span class="preset-tag">${m.preset}</span>` : ''}
+            <button onclick="delMedia(${m.id})">Delete</button>
+          </div>${stageBtns}</div>`;
+      }).join('');
+      return `<div class="media-section"><div class="media-title">${kind === 'typing' ? 'Typing Main' : kind + 's'} (${byGirl[girl][kind].length})</div>${items || '<div style="color:#555;font-size:12px;">none</div>'}
         <div class="add-form">
           <input type="text" id="url-${girl}-${kind}" placeholder="Video/image URL">
           ${kind === 'give' ? `<input type="text" id="preset-${girl}-${kind}" placeholder="preset (e.g. love)" style="max-width:120px;">` : ''}
@@ -145,7 +190,14 @@ async function loadMedia() {
     }).join('');
     return `<div class="girl-card"><div class="girl-name">${girl}</div>${sections}</div>`;
   }).join('');
-  document.getElementById('mediaList').innerHTML = html || '<p style="color:#888;">No media yet. Add a character first.</p>';
+  document.getElementById('mediaList').innerHTML = html || '<p style="color:#888;">All tagged! 🎉</p>';
+}
+
+async function setStage(id, stage) {
+  await api('PATCH', `/api/v1/admin/girl-media/${id}`, { stage });
+  const m = allMedia.find(x => x.id === id);
+  if (m) m.stage = stage;
+  renderMedia();
 }
 
 async function addMedia(girl, kind) {
