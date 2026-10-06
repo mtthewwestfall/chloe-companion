@@ -363,3 +363,12 @@ body {
 .referral-section { margin: 24px 16px; padding: 20px 16px; background: var(--card); border: 1px solid var(--border); border-radius: 16px; }
 .ref-landing-title { font-size: 18px; font-weight: 800; text-align: center; margin-bottom: 6px; }
 .ref-landing-sub { font-size: 13px; color: var(--sub); text-align: center; margin-bottom: 12px; }
+
+/* gods greek cross-promo */
+.gods-link { display: flex; align-items: center; gap: 14px; margin: 0 16px 24px; padding: 18px 16px; background: linear-gradient(135deg, #1a1525, #2a1f3d); border: 1px solid #4a3a6a; border-radius: 16px; text-decoration: none; color: #fff; }
+.gods-link:active { border-color: #a855f7; }
+.gods-emoji { font-size: 32px; flex: none; }
+.gods-text { flex: 1; }
+.gods-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.gods-sub { font-size: 12px; color: #a99bc5; }
+.gods-arrow { font-size: 20px; color: #a855f7; flex: none; }
