@@ -501,6 +501,7 @@
       closeSheet('authSheet');
       showToast('Welcome back!');
       updateBalance();
+      loadLandingReferral();
     } catch (e) {
       authError('Network error — try again');
     }
@@ -513,6 +514,44 @@
       if (typeof me.voice_notes_remaining === 'number') $('statVoice').textContent = me.voice_notes_remaining;
     } catch (e) {}
   }
+
+  /* ---------- referral on landing ---------- */
+
+  async function loadLandingReferral() {
+    if (!isLoggedIn()) return;
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/referral/me', {
+        headers: { 'Authorization': 'Bearer ' + getToken() }
+      });
+      const data = await res.json();
+      if (data.referral_link) $('refLinkInputLanding').value = data.referral_link;
+    } catch (e) {}
+  }
+
+  function shareReferral(network) {
+    const link = $('refLinkInputLanding').value || $('refLinkInput').value;
+    if (!link) { showToast('Log in to get your link'); return; }
+    const msg = "I've been testing this new AI companion app called Whispr. Use my link for free VIP access:";
+    if (network === 'telegram') {
+      window.open('https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent(msg), '_blank');
+    } else if (network === 'x') {
+      window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent("Check out Whispr on Lockeddoor.ai: " + link), '_blank');
+    } else if (network === 'reddit') {
+      window.open('https://www.reddit.com/submit?url=' + encodeURIComponent(link) + '&title=' + encodeURIComponent("Whispr AI Girlfriend - free VIP with referral"), '_blank');
+    }
+  }
+
+  $('refCopyBtnLanding').addEventListener('click', () => {
+    $('refLinkInputLanding').select();
+    document.execCommand('copy');
+    showToast('Link copied!');
+  });
+  $('refShareTelegramLanding').addEventListener('click', () => shareReferral('telegram'));
+  $('refShareXLanding').addEventListener('click', () => shareReferral('x'));
+  $('refShareRedditLanding').addEventListener('click', () => shareReferral('reddit'));
+
+  // Load landing referral link on boot
+  loadLandingReferral();
 
   // Show auth on boot if not logged in
   if (!isLoggedIn()) {
