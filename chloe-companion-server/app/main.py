@@ -829,8 +829,28 @@ def create_media_request(body: MediaRequestIn, request: Request):
 
 # ---------------------------------------------------------------------------
 # Preset videos (2026-10-06): serve a girl's give clips by preset tag.
-# POST /api/v1/preset-video {girl_id, preset} -> {video_url, preset}
+# POST /api/v1/preset-video {girl_id, preset} -> {video_url, media_type, preset}
+# Clips are pre-made (no API cost), so this is unlimited — no balance check.
 # ---------------------------------------------------------------------------
+
+# Known give clips per girl+preset. Updated when new presets are tagged.
+PRESET_CLIPS = {
+    ("chloe", "love"): [
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_1e67ecdd0b6dd10e.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_c917d49a514c5329.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_66c98753a458c922.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_685e3e81d92264e3.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_5b254cf0206883c7.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_7948798a732e5b08.mp4", "media_type": "video"},
+    ],
+    ("mara", "love"): [
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_1a10870031b9ee4f.mp4", "media_type": "video"},
+    ],
+    ("isabella", "love"): [
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_a5994f3f320bb198.mp4", "media_type": "video"},
+    ],
+}
+
 
 class PresetVideoIn(BaseModel):
     girl_id: str
@@ -838,42 +858,17 @@ class PresetVideoIn(BaseModel):
 
 
 @app.post("/api/v1/preset-video")
-async def preset_video(body: PresetVideoIn, request: Request):
-    """Return a random give clip URL for a girl+preset tag. No auth required
-    for the URL itself — the app gates sending behind message balance."""
+async def preset_video(body: PresetVideoIn):
+    """Return a random give clip URL for a girl+preset. Unlimited — pre-made
+    clips cost no API, so no auth or balance check."""
     import random as _random
-    import urllib.request as _urlreq
-
-    keyhole_url = config.KEYHOLE_BACKEND_URL
-    if not keyhole_url:
-        raise HTTPException(status_code=503, detail="media backend not configured")
-    # Query Keyhole admin media for this girl's give clips
-    admin_token = getattr(config, "KEYHOLE_ADMIN_TOKEN", None)
-    qurl = (keyhole_url.rstrip("/") + "/admin/media"
-            f"?character_id={body.girl_id}&limit=100")
-    req = _urlreq.Request(qurl, method="GET")
-    if admin_token:
-        req.add_header("Authorization", f"Bearer {admin_token}")
-    try:
-        with _urlreq.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"media lookup failed: {e}")
-    assets = data.get("assets", []) if isinstance(data, dict) else data
-    preset = body.preset.lower().strip()
-    matches = [
-        a for a in assets
-        if "give" in (a.get("tags") or []) and preset in [t.lower() for t in (a.get("tags") or [])]
-    ]
-    if not matches:
+    key = (body.girl_id.lower().strip(), body.preset.lower().strip())
+    clips = PRESET_CLIPS.get(key, [])
+    if not clips:
         raise HTTPException(status_code=404, detail="no clips for preset")
-    clip = _random.choice(matches)
-    url = clip.get("url", "")
-    if url.startswith("/"):
-        url = keyhole_url.rstrip("/") + url
-    media_type = clip.get("media_type", "video")
-    return {"video_url": url, "media_type": media_type,
-            "preset": preset, "girl_id": body.girl_id}
+    clip = _random.choice(clips)
+    return {"video_url": clip["url"], "media_type": clip["media_type"],
+            "preset": body.preset, "girl_id": body.girl_id}
 
 
 # ---------------------------------------------------------------------------
