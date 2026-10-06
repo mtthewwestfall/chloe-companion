@@ -871,7 +871,9 @@ async def preset_video(body: PresetVideoIn, request: Request):
     url = clip.get("url", "")
     if url.startswith("/"):
         url = keyhole_url.rstrip("/") + url
-    return {"video_url": url, "preset": preset, "girl_id": body.girl_id}
+    media_type = clip.get("media_type", "video")
+    return {"video_url": url, "media_type": media_type,
+            "preset": preset, "girl_id": body.girl_id}
 
 
 # ---------------------------------------------------------------------------

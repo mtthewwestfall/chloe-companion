@@ -327,7 +327,7 @@
     try {
       const res = await ApiClient.requestPreset(currentGirl.id, presetName);
       if (res.video_url) {
-        addPresetVideoBubble(res.video_url, presetName);
+        addPresetMediaBubble(res.video_url, res.media_type || 'video', presetName);
       } else {
         addText('her', 'let me find that for you… one sec');
       }
@@ -336,16 +336,17 @@
     }
   }
 
-  function addPresetVideoBubble(url, presetName) {
+  function addPresetMediaBubble(url, mediaType, presetName) {
     const wrap = addMsg('her', '', {
       bubbleClass: 'photo-bubble',
       caption: currentGirl.name + ' · ' + timeNow(),
     });
     const b = wrap.firstChild;
+    const mediaHtml = mediaType === 'image'
+      ? `<img src="${url}" style="width:100%;height:100%;object-fit:cover;" alt="${presetName}">`
+      : `<video src="${url}" controls playsinline preload="metadata" style="width:100%;height:100%;object-fit:cover;"></video>`;
     b.innerHTML = `
-      <div class="photo-scene">
-        <video src="${url}" controls playsinline preload="metadata" style="width:100%;height:100%;object-fit:cover;"></video>
-      </div>
+      <div class="photo-scene">${mediaHtml}</div>
       <div class="photo-caption">💕 ${presetName}</div>`;
   }
 
