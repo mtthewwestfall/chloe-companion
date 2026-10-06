@@ -261,12 +261,7 @@
     if (e.key === 'Enter') sendMessage(msgInput.value);
   });
 
-  // Mic: voice-note sending unlocks with the real server; demo explains that.
-  $('micBtn').addEventListener('click', () => {
-    showToast(ApiClient.isConnected()
-      ? 'Hold to record (coming with the companion server)'
-      : 'Voice messages unlock when the companion server is connected');
-  });
+  // Mic button removed in AiMessage redesign — voice notes via preset picker.
 
   /* ---------- onboarding-lite ---------- */
 
@@ -410,7 +405,7 @@
   });
 
   // Shows: list from contract, ticket buttons deep-link to WEBSITE_URL.
-  $('showsBtn').addEventListener('click', async () => {
+  $('videoCallBtn').addEventListener('click', async () => {
     openSheet('showsSheet');
     const list = $('showsList');
     list.innerHTML = '<div class="sheet-sub">Loading…</div>';
