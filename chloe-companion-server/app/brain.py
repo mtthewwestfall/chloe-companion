@@ -690,6 +690,14 @@ def gemini_generate(user_text: str, context: dict[str, Any],
             "parts": [{"text": _gemini_system_text(context, character_id)}]},
         "contents": _gemini_contents(user_text, context),
         "generationConfig": {"temperature": 0.9, "maxOutputTokens": 220},
+        # Companion app: she's a willing adult girlfriend. Don't let the
+        # model's default safety filters deflect explicit requests.
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+        ],
     }
     req = urllib.request.Request(
         _GEMINI_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
