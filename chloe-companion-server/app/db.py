@@ -152,6 +152,17 @@ CREATE TABLE IF NOT EXISTS user_give_progress (
     PRIMARY KEY (user_id, girl_id)
 );
 
+-- Tracks which specific clips a user has seen per girl, so rotations
+-- serve fresh clips at each stage before repeating.
+CREATE TABLE IF NOT EXISTS user_give_seen (
+    user_id   TEXT NOT NULL,
+    girl_id   TEXT NOT NULL,
+    media_id  INTEGER NOT NULL,
+    stage     INTEGER NOT NULL,
+    served_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, girl_id, media_id)
+);
+
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS local_characters (

@@ -887,39 +887,57 @@ async def preset_video(body: PresetVideoIn, request: Request):
             pass
 
         stage = 0
+        seen_ids = set()
         if user_id:
             prog = conn.execute(
                 "SELECT gives_received FROM user_give_progress WHERE user_id = ? AND girl_id = ?",
                 (user_id, key[0])).fetchone()
             gives = prog["gives_received"] if prog else 0
-            stage = min(gives + 1, 8)  # stage 1 on first give, cap at 8
+            # Rotation: stages cycle 1-8, each rotation serves fresh clips
+            stage = (gives % 8) + 1
+            seen_rows = conn.execute(
+                "SELECT media_id FROM user_give_seen WHERE user_id = ? AND girl_id = ?",
+                (user_id, key[0])).fetchall()
+            seen_ids = {r["media_id"] for r in seen_rows}
 
-        # Get clips at the target stage; fall back to any stage if none
+        # Get clips at the target stage
         if stage > 0:
             db_rows = conn.execute(
-                """SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
                    AND (preset = ? OR preset IS NULL) AND stage = ?""",
                 (key[0], key[1], stage)).fetchall()
         else:
             db_rows = []
         if not db_rows:
             db_rows = conn.execute(
-                """SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
                    AND (preset = ? OR preset IS NULL)""",
                 (key[0], key[1])).fetchall()
-        clips = [{"url": r["url"], "media_type": "video"} for r in db_rows]
+        clips = [{"id": r["id"], "url": r["url"], "media_type": "video"} for r in db_rows]
+        # Prefer unseen clips at this stage; if all seen, start a fresh rotation
+        fresh = [c for c in clips if c["id"] not in seen_ids] if user_id else clips
+        if user_id and clips and not fresh:
+            # All clips at this stage seen — clear seen for a new rotation
+            conn.execute(
+                "DELETE FROM user_give_seen WHERE user_id = ? AND girl_id = ?",
+                (user_id, key[0]))
+            fresh = clips
+            seen_ids = set()
     finally:
         conn.close()
     if not clips:
         clips = PRESET_CLIPS.get(key, [])
     if not clips:
         raise HTTPException(status_code=404, detail="no clips for preset")
-    # Avoid immediate repeats
-    last_url = _LAST_PRESET_SENT.get(key)
-    pool = [c for c in clips if c["url"] != last_url] if len(clips) > 1 else clips
-    clip = _random.choice(pool or clips)
-    _LAST_PRESET_SENT[key] = clip["url"]
-    # Record progress
+    pool = fresh or clips
+    # Avoid immediate repeats (anonymous)
+    if not user_id:
+        last_url = _LAST_PRESET_SENT.get(key)
+        pool = [c for c in pool if c["url"] != last_url] if len(pool) > 1 else pool
+    clip = _random.choice(pool)
+    if not user_id:
+        _LAST_PRESET_SENT[key] = clip["url"]
+    # Record progress + mark seen
     if user_id:
         conn = _conn()
         try:
@@ -930,6 +948,11 @@ async def preset_video(body: PresetVideoIn, request: Request):
                    DO UPDATE SET gives_received = gives_received + 1,
                                  updated_at = datetime('now')""",
                 (user_id, key[0]))
+            if clip.get("id"):
+                conn.execute(
+                    """INSERT OR IGNORE INTO user_give_seen (user_id, girl_id, media_id, stage)
+                       VALUES (?, ?, ?, ?)""",
+                    (user_id, key[0], clip["id"], stage))
             conn.commit()
         except Exception:
             pass
