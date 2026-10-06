@@ -74,7 +74,7 @@
       <button class="filter-btn active" onclick="setMediaFilter('untagged')">Untagged</button>
       <button class="filter-btn" onclick="setMediaFilter('all')">All</button>
     </div>
-    <div style="color:#888;font-size:12px;margin-bottom:12px;">Stages: 1=lift tease · 2=shirt off · 3=boob grabs · 4=nipple pinch · 5=pants off · 6=plays with herself · 7=oral · 8=sex</div>
+    <div style="color:#888;font-size:12px;margin-bottom:12px;">Stages: 1=lift tease · 2=shirt off · 3=boob grabs · 4=nipple pinch · 5=pants off · 6=plays w/ herself · 7=titty fuck · 8=oral · 9=sex</div>
     <div id="mediaList"></div>
   </div>
 
@@ -147,7 +147,7 @@ function setMediaFilter(f) {
   renderMedia();
 }
 
-const STAGE_NAMES = {1:'lift tease',2:'shirt off',3:'boob grabs',4:'nipple pinch',5:'pants off',6:'plays with herself',7:'oral',8:'sex'};
+const STAGE_NAMES = {1:'lift tease',2:'shirt off',3:'boob grabs',4:'nipple pinch',5:'pants off',6:'plays w/ herself',7:'titty fuck',8:'oral',9:'sex'};
 
 async function loadMedia() {
   const data = await api('GET', '/api/v1/admin/girl-media');
@@ -169,7 +169,7 @@ function renderMedia() {
         const preview = isVideo
           ? `<video class="media-preview" src="${m.url}" muted playsinline preload="metadata" onclick="this.paused?this.play():this.pause()"></video>`
           : `<img class="media-preview" src="${m.url}">`;
-        const stageBtns = kind === 'give' ? `<div class="stage-btns">${[1,2,3,4,5,6,7,8].map(s =>
+        const stageBtns = kind === 'give' ? `<div class="stage-btns">${[1,2,3,4,5,6,7,8,9].map(s =>
           `<button class="stage-btn ${(m.stage||0)===s?'active':''}" onclick="setStage(${m.id},${s})">${s}</button>`
         ).join('')}</div>` : '';
         return `<div class="media-item" style="flex-direction:column;align-items:stretch;">
