@@ -868,19 +868,45 @@ class PresetVideoIn(BaseModel):
 _LAST_PRESET_SENT: dict[tuple[str, str], str] = {}
 
 @app.post("/api/v1/preset-video")
-async def preset_video(body: PresetVideoIn):
-    """Return a random give clip URL for a girl+preset. Unlimited — pre-made
-    clips cost no API, so no auth or balance check. Avoids sending the same
-    clip twice in a row when multiple clips exist."""
+async def preset_video(body: PresetVideoIn, request: Request):
+    """Return a give clip following the escalation sequence.
+    Stages: 1=lift tease, 2=shirt off, 3=boob grabs, 4=nipple pinches,
+    5=pants off, 6=oral, 7=sex.
+    Logged-in users progress through stages per girl; anonymous users
+    get random clips. Unlimited — pre-made clips cost no API."""
     import random as _random
     key = (body.girl_id.lower().strip(), body.preset.lower().strip())
-    # Check DB first (admin-managed), fall back to hardcoded
     conn = _conn()
     try:
         _seed_girl_media(conn)
-        db_rows = conn.execute(
-            "SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give' AND (preset = ? OR preset IS NULL)",
-            (key[0], key[1])).fetchall()
+        # Try to identify the user for stage progression
+        user_id = None
+        try:
+            user_id = _current_user_id(request)
+        except Exception:
+            pass
+
+        stage = 0
+        if user_id:
+            prog = conn.execute(
+                "SELECT gives_received FROM user_give_progress WHERE user_id = ? AND girl_id = ?",
+                (user_id, key[0])).fetchone()
+            gives = prog["gives_received"] if prog else 0
+            stage = min(gives + 1, 7)  # stage 1 on first give, cap at 7
+
+        # Get clips at the target stage; fall back to any stage if none
+        if stage > 0:
+            db_rows = conn.execute(
+                """SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                   AND (preset = ? OR preset IS NULL) AND stage = ?""",
+                (key[0], key[1], stage)).fetchall()
+        else:
+            db_rows = []
+        if not db_rows:
+            db_rows = conn.execute(
+                """SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                   AND (preset = ? OR preset IS NULL)""",
+                (key[0], key[1])).fetchall()
         clips = [{"url": r["url"], "media_type": "video"} for r in db_rows]
     finally:
         conn.close()
@@ -888,12 +914,29 @@ async def preset_video(body: PresetVideoIn):
         clips = PRESET_CLIPS.get(key, [])
     if not clips:
         raise HTTPException(status_code=404, detail="no clips for preset")
+    # Avoid immediate repeats
     last_url = _LAST_PRESET_SENT.get(key)
     pool = [c for c in clips if c["url"] != last_url] if len(clips) > 1 else clips
     clip = _random.choice(pool or clips)
     _LAST_PRESET_SENT[key] = clip["url"]
+    # Record progress
+    if user_id:
+        conn = _conn()
+        try:
+            conn.execute(
+                """INSERT INTO user_give_progress (user_id, girl_id, gives_received)
+                   VALUES (?, ?, 1)
+                   ON CONFLICT (user_id, girl_id)
+                   DO UPDATE SET gives_received = gives_received + 1,
+                                 updated_at = datetime('now')""",
+                (user_id, key[0]))
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
     return {"video_url": clip["url"], "media_type": clip["media_type"],
-            "preset": body.preset, "girl_id": body.girl_id}
+            "preset": body.preset, "girl_id": body.girl_id, "stage": stage}
 
 
 

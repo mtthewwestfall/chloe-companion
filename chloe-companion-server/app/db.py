@@ -140,6 +140,17 @@ CREATE TABLE IF NOT EXISTS girl_media (
 );
 CREATE INDEX IF NOT EXISTS idx_girl_media_girl ON girl_media(girl_id, kind);
 
+-- Give escalation stages (2026-10-06): 1=lift tease, 2=shirt off,
+-- 3=boob grabs, 4=nipple pinches, 5=pants off, 6=oral, 7=sex
+-- Per-user per-girl progress through the sequence.
+CREATE TABLE IF NOT EXISTS user_give_progress (
+    user_id       TEXT NOT NULL,
+    girl_id       TEXT NOT NULL,
+    gives_received INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, girl_id)
+);
+
 -- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS local_characters (
@@ -440,6 +451,14 @@ def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_girl_media_stage(conn: sqlite3.Connection) -> None:
+    """Give stages (2026-10-06): add stage column to girl_media."""
+    try:
+        conn.execute("ALTER TABLE girl_media ADD COLUMN stage INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # already exists
+
+
 def _migrate_referral_columns(conn: sqlite3.Connection) -> None:
     """Referral program (2026-10-06): add referral columns to users."""
     for col, ddl in [
@@ -466,6 +485,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_submission_columns(conn)
         _migrate_creator_columns(conn)
         _migrate_referral_columns(conn)
+        _migrate_girl_media_stage(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)
         conn.commit()
