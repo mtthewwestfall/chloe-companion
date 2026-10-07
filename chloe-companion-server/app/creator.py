@@ -116,6 +116,7 @@ def _gemini_image_text(image_bytes: bytes, mime: str, prompt: str,
             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 50},
         },
         timeout=timeout,
+        source="creator-bot",
     )
     if not data:
         return None
