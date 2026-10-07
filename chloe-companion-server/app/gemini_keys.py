@@ -1,5 +1,11 @@
 """Gemini API key manager: rotation, health tracking, automatic failover.
 
+Two-pool system: keys are split into an active pool (rotated normally)
+and a reserve pool (~30% of keys, configurable via GEMINI_RESERVE_COUNT).
+Reserve keys are held back and only used when every active key is cooling
+down, failing, or disabled — so heavy load can never burn through all
+keys at once. Reserve usage is logged.
+
 Free keys are tried first (round-robin by health); paid keys are fallback
 only, used when every free key is exhausted, failing, or disabled.
 
@@ -30,6 +36,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -38,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 from . import config, db
 
 _lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 # Backoff ladder for quota/429 failures, indexed by consecutive_failures.
 _BACKOFF_MINUTES = (5, 15, 60, 240)
@@ -134,32 +143,99 @@ def _seed_legacy_key(conn) -> None:
     conn.commit()
 
 
-def _eligible_rows(conn):
+def _reserve_count(total_keys: int) -> int:
+    """Number of keys to hold in the reserve pool.
+
+    Defaults to ~30% of total keys (at least 1 when there are 2+ keys).
+    Override with the GEMINI_RESERVE_COUNT env var. Always keeps at
+    least one key in the active pool.
+    """
+    if total_keys <= 1:
+        return 0
+    env_val = (os.environ.get("GEMINI_RESERVE_COUNT") or "").strip()
+    if env_val:
+        try:
+            n = int(env_val)
+            return max(0, min(n, total_keys - 1))
+        except ValueError:
+            pass
+    return max(1, min(round(total_keys * 0.3), total_keys - 1))
+
+
+def _pool_ids(conn) -> tuple[set[int], set[int]]:
+    """Split all keys into (active_ids, reserve_ids).
+
+    The reserve pool is the N highest key IDs (N from _reserve_count);
+    everything else is active. Deterministic and stable across calls —
+    no DB migration needed.
+    """
+    rows = conn.execute("SELECT id FROM gemini_keys ORDER BY id ASC").fetchall()
+    ids = [r["id"] for r in rows]
+    n_reserve = _reserve_count(len(ids))
+    if n_reserve <= 0:
+        return set(ids), set()
+    reserve_ids = set(ids[-n_reserve:])
+    active_ids = set(ids[:-n_reserve])
+    return active_ids, reserve_ids
+
+
+def _eligible_rows(conn, only_ids: set[int] | None = None):
     """Active keys whose backoff window has passed and which don't need
-    attention, free keys first, healthiest first."""
+    attention, free keys first, healthiest first.
+
+    When only_ids is given, restricts selection to those key IDs — used
+    to implement the active/reserve pool split.
+    """
     _ensure_table(conn)
     _seed_legacy_key(conn)
-    return conn.execute(
-        """SELECT id, key_value, is_paid, consecutive_failures
+    if only_ids is not None and not only_ids:
+        return []
+    query = """SELECT id, key_value, is_paid, consecutive_failures
            FROM gemini_keys
            WHERE is_active = 1
              AND needs_attention = 0
              AND (quota_exhausted_until IS NULL
-                  OR quota_exhausted_until <= datetime('now'))
-           ORDER BY is_paid ASC,
+                  OR quota_exhausted_until <= datetime('now'))"""
+    params: list = []
+    if only_ids is not None:
+        placeholders = ",".join("?" * len(only_ids))
+        query += f" AND id IN ({placeholders})"
+        params.extend(sorted(only_ids))
+    query += """ ORDER BY is_paid ASC,
                     last_used_at ASC,
                     consecutive_failures ASC,
                     id ASC"""
-    ).fetchall()
+    return conn.execute(query, params).fetchall()
 
 
 def get_candidate_keys() -> list[tuple[int, str]]:
-    """Ordered (key_id, key_value) candidates. Empty when nothing usable."""
+    """Ordered (key_id, key_value) candidates. Empty when nothing usable.
+
+    Two-pool system: the active pool rotates normally. The reserve pool
+    (~30% of keys, see _reserve_count) is held back and only tapped when
+    every active key is cooling down, failed, or disabled. Reserve usage
+    is logged so exhaustion of the active pool is visible.
+    """
     with _lock:
         conn = db.connect()
         try:
-            rows = _eligible_rows(conn)
-            return [(r["id"], r["key_value"]) for r in rows]
+            _ensure_table(conn)
+            active_ids, reserve_ids = _pool_ids(conn)
+            # Tier 1: active pool
+            rows = _eligible_rows(conn, active_ids)
+            if rows:
+                return [(r["id"], r["key_value"]) for r in rows]
+            # Tier 2: reserve pool — active pool fully exhausted
+            if reserve_ids:
+                rows = _eligible_rows(conn, reserve_ids)
+                if rows:
+                    logger.warning(
+                        "gemini_keys: active pool exhausted, tapping "
+                        "reserve pool (%d reserve keys eligible)",
+                        len(rows),
+                    )
+                    return [(r["id"], r["key_value"]) for r in rows]
+            return []
         finally:
             conn.close()
 
@@ -170,6 +246,11 @@ def get_key(source: str = "unknown") -> tuple[int, str] | None:
     Returns the least-recently-used eligible key (free tier first) and
     marks it used so the next call rotates to a different key. This
     distributes load across all keys instead of hammering the first one.
+
+    Two-pool behavior: draws from the active pool first; only when the
+    active pool is fully exhausted does it tap the reserve pool (logged).
+    A used reserve key stays in the reserve pool — its last_used_at
+    update rotates it to the back of the reserve queue.
 
     `source` names the calling app (e.g. "whispr-web"); it is recorded
     when the key is actually used via post_json().
