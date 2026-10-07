@@ -1207,18 +1207,6 @@ def _seed_girl_media(conn):
                 conn.execute(
                     "INSERT INTO girl_media (girl_id, kind, url, preset) VALUES (?, 'give', ?, ?)",
                     (girl, clip["url"], preset))
-    # Always ensure give clips exist (seeded from Keyhole)
-    # Clear old incorrectly-seeded give clips first
-    conn.execute("DELETE FROM girl_media WHERE preset = 'give' AND (kind != 'give' OR stage IS NULL)")
-    give_count = conn.execute("SELECT COUNT(*) AS c FROM girl_media WHERE preset = 'give' AND kind = 'give'").fetchone()
-    if not give_count or give_count["c"] == 0:
-        for (girl, preset), clips in GIVE_CLIPS.items():
-            for i, clip in enumerate(clips):
-                # Distribute across stages 1-9
-                stage = (i % 9) + 1
-                conn.execute(
-                    "INSERT INTO girl_media (girl_id, kind, url, preset, stage) VALUES (?, 'give', ?, ?, ?)",
-                    (girl, clip["url"], preset, stage))
     conn.commit()
 
 
