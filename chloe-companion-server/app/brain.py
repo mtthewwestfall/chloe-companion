@@ -707,7 +707,7 @@ def gemini_generate(user_text: str, context: dict[str, Any],
     # Key rotation (app/gemini_keys.py): free keys first, paid fallback,
     # transparent failover on 429/402/errors. None when pool is exhausted.
     data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=30,
-                                     source="whispr-web")
+                                     source="whispr-chat")
     if not data:
         return None
     try:

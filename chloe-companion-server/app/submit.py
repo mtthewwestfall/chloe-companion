@@ -113,7 +113,7 @@ def _gemini_vision_post(parts: list[dict], timeout: int = 60) -> dict | None:
             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 800},
         },
         timeout=timeout,
-        source="whispr-web",
+        source="whispr-vision",
     )
 
 
