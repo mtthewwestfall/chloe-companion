@@ -1,4 +1,4 @@
-"""Her Day feed generator — Instagram-stories-style daily posts.
+"""Whispr Feed feed generator — Instagram-stories-style daily posts.
 
 SFW-ONLY pipeline (the Give library is never used here — a day-in-the-life
 feed cannot show explicit clips).
@@ -84,7 +84,7 @@ TEXT_MOMENTS = {
     "craving": ("text", "something she's craving right now"),
 }
 
-# Hard SFW tail appended to every Her Day image prompt.
+# Hard SFW tail appended to every Whispr Feed image prompt.
 SFW_TAIL = ("photorealistic, fully clothed, everyday normal activity, "
             "non-sexual, wholesome, like a normal Instagram story, "
             "clean high-quality photo, natural light, coherent background")
@@ -342,7 +342,7 @@ def _fallback_caption(girl_name: str, moment_key: str,
 
 
 def _get_all_girls() -> list[dict[str, Any]]:
-    """All characters for Her Day: [{id, name, avatar_url}]."""
+    """All characters for Whispr Feed: [{id, name, avatar_url}]."""
     try:
         from . import characters
         chars = characters.get_characters()
@@ -367,7 +367,7 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                            plan: list[tuple] | None = None,
                            girl_map: dict[str, dict] | None = None,
                            date_str: str | None = None) -> list[dict[str, Any]]:
-    """Generate today's Her Day posts for one user+girl pair.
+    """Generate today's Whispr Feed posts for one user+girl pair.
 
     plan: [(moment_key, is_group, partner_ids, partner_names)] from
     _build_all_plans. If None, builds a solo-only plan for this girl.
@@ -432,7 +432,7 @@ def generate_for_user_girl(user_id: str, girl_id: str,
 
 
 def generate_for_all_girls(user_id: str) -> int:
-    """Generate today's Her Day for EVERY girl for one user.
+    """Generate today's Whispr Feed for EVERY girl for one user.
 
     Returns the total number of posts created.
     """
@@ -453,7 +453,7 @@ def generate_for_all_girls(user_id: str) -> int:
 
 
 def generate_daily() -> dict[str, Any]:
-    """Generate Her Day posts for all users x all girls.
+    """Generate Whispr Feed posts for all users x all girls.
 
     Called by the 6 AM cron.
     """

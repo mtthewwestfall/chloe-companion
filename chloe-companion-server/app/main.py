@@ -1146,7 +1146,7 @@ def admin_custom_videos(request: Request, status: str = ""):
         conn.close()
 
 # ---------------------------------------------------------------------------
-# Her Day feed (2026-10-07): Instagram-stories-style daily posts per girl.
+# Whispr Feed feed (2026-10-07): Instagram-stories-style daily posts per girl.
 # Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
 # GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
 # POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
@@ -1186,7 +1186,7 @@ class HerDayGenerateIn(BaseModel):
 
 @app.post("/api/v1/her-day/generate")
 def generate_her_day(body: HerDayGenerateIn, request: Request):
-    """On-demand Her Day generation for ALL girls (also used by the 6 AM cron).
+    """On-demand Whispr Feed generation for ALL girls (also used by the 6 AM cron).
 
     Every character gets her own daily feed (solo + group moments). The
     stories bar shows all girls; tap an avatar to see her day.

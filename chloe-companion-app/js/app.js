@@ -837,7 +837,7 @@
   }
 
     /* ============================================================
-     Her Day — Instagram-stories-style daily feed.
+     Whispr Feed — Instagram-stories-style daily feed.
      Stories bar shows ALL girls (tap an avatar to see her day).
      ============================================================ */
   const HerDay = (() => {
