@@ -1210,6 +1210,65 @@ def generate_her_day(body: HerDayGenerateIn, request: Request):
         return {"generated": 0, "error": str(e)[:200]}
 
 
+class HerDayInjectIn(BaseModel):
+    girl_id: str
+    caption: str = ""
+    video_b64: str = ""
+    filename: str = ""
+    user_id: str = ""  # empty = all users
+
+
+@app.post("/api/v1/admin/her-day/inject")
+def admin_her_day_inject(body: HerDayInjectIn, request: Request):
+    """Admin: inject a pre-made video as a Whispr Feed post for today.
+
+    Body: girl_id, caption, video_b64 (base64 mp4), filename, user_id
+    (empty = all users). Saves the video under GENERATED_DIR and creates
+    one video post per target user. Used to load hand-made Whispr Feed
+    clips without going through Sogni generation.
+    """
+    _require_admin(request)
+    import base64 as _b64
+    from datetime import datetime as _dt
+    gid = (body.girl_id or "").strip().lower()
+    if not gid:
+        raise HTTPException(status_code=400, detail="girl_id required")
+    if not body.video_b64:
+        raise HTTPException(status_code=400, detail="video_b64 required")
+    date_str = _dt.now().strftime("%Y-%m-%d")
+    safe = "".join(c for c in (body.filename or "clip.mp4")
+                   if c.isalnum() or c in "._-") or "clip.mp4"
+    if not safe.lower().endswith(".mp4"):
+        safe += ".mp4"
+    fname = f"herday_inject_{gid}_{date_str}_{safe}"
+    os.makedirs(config.GENERATED_DIR, exist_ok=True)
+    dest = os.path.join(config.GENERATED_DIR, fname)
+    try:
+        with open(dest, "wb") as f:
+            f.write(_b64.b64decode(body.video_b64))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400,
+                            detail=f"bad video_b64: {e}") from e
+    media_url = "/generated/" + fname
+    conn = _conn()
+    try:
+        if body.user_id:
+            user_ids = [body.user_id]
+        else:
+            user_ids = [r[0] for r in conn.execute(
+                "SELECT user_id FROM users").fetchall()]
+        created = 0
+        for uid in user_ids:
+            store.save_her_day_post(
+                conn, uid, gid, post_type="video",
+                media_url=media_url, caption=body.caption or "")
+            created += 1
+        return {"ok": True, "created": created, "media_url": media_url,
+                "users": len(user_ids)}
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Admin: girl media library (2026-10-06)
 # Manage gives, mains, typing mains, activities per character.
