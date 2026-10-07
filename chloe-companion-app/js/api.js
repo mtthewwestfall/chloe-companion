@@ -139,5 +139,11 @@ const ApiClient = (() => {
     return data;
   }
 
-  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, onStatus, isConnected: () => connected };
+  async function feed() {
+    const data = await request('GET', '/api/v1/feed');
+    setConnected(true);
+    return data.posts || [];
+  }
+
+  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, feed, onStatus, isConnected: () => connected };
 })();

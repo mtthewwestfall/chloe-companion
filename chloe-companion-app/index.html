@@ -118,9 +118,20 @@
           </div>
         </header>
 
+        <!-- Whispr Feed: Stories | Feed tab switcher -->
+        <div id="feedTabs" class="feed-tabs hidden">
+          <button id="feedTabStories" class="feed-tab active" aria-label="Stories">Stories</button>
+          <button id="feedTabTimeline" class="feed-tab" aria-label="Feed">Feed</button>
+        </div>
+
         <!-- Whispr Feed stories bar: one avatar per girl with stories -->
         <div id="herDayBar" class="herday-bar hidden">
           <div id="herDayAvatars" class="herday-avatars"></div>
+        </div>
+
+        <!-- Whispr Feed unified timeline: all girls' posts, newest first -->
+        <div id="feedTimeline" class="feed-timeline hidden">
+          <div id="feedPosts" class="feed-posts"></div>
         </div>
 
         <!-- Whispr Feed story viewer overlay -->

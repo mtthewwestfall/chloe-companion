@@ -92,6 +92,7 @@
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
     HerDay.load();
+    Feed.load();
     // Load last 8 turns so the conversation picks up where it left off
     let hasHistory = false;
     if (isLoggedIn()) {
@@ -1023,6 +1024,121 @@
   })();
 
 
+  /* ============================================================
+     Unified Feed — all girls' posts in one chronological timeline.
+     ============================================================ */
+  const Feed = (() => {
+    let posts = [];
+    let mode = 'stories'; // 'stories' | 'timeline'
+
+    function timeAgo(createdAt) {
+      const created = new Date(createdAt + 'Z');
+      const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.round(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      return Math.round(hrs / 24) + 'd ago';
+    }
+
+    async function load() {
+      try {
+        posts = await ApiClient.feed();
+      } catch (e) {
+        posts = [];
+      }
+      // Show tabs only if there are posts
+      const tabs = $('feedTabs');
+      if (posts.length) tabs.classList.remove('hidden');
+      else tabs.classList.add('hidden');
+      if (mode === 'timeline') renderTimeline();
+    }
+
+    function renderTimeline() {
+      const wrap = $('feedPosts');
+      wrap.innerHTML = '';
+      if (!posts.length) {
+        const empty = document.createElement('div');
+        empty.className = 'feed-empty';
+        empty.textContent = "No posts yet today — check back soon.";
+        wrap.appendChild(empty);
+        return;
+      }
+      posts.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'feed-post';
+
+        const header = document.createElement('div');
+        header.className = 'feed-post-header';
+        const avatar = document.createElement('img');
+        avatar.className = 'feed-post-avatar';
+        avatar.src = p.girl_avatar_url || '';
+        avatar.alt = p.girl_name || '';
+        const name = document.createElement('span');
+        name.className = 'feed-post-girl';
+        name.textContent = p.girl_name || p.girl_id || '';
+        const time = document.createElement('span');
+        time.className = 'feed-post-time';
+        time.textContent = timeAgo(p.created_at);
+        header.appendChild(avatar);
+        header.appendChild(name);
+        header.appendChild(time);
+        card.appendChild(header);
+
+        if (p.post_type === 'video' && p.media_url) {
+          const vid = document.createElement('video');
+          vid.className = 'feed-post-media';
+          vid.src = p.media_url;
+          vid.playsInline = true;
+          vid.preload = 'metadata';
+          card.appendChild(vid);
+        } else if (p.media_url) {
+          const img = document.createElement('img');
+          img.className = 'feed-post-media';
+          img.src = p.media_url;
+          img.alt = '';
+          img.loading = 'lazy';
+          card.appendChild(img);
+        } else {
+          const txt = document.createElement('div');
+          txt.className = 'feed-post-textcard';
+          txt.textContent = p.caption || '';
+          card.appendChild(txt);
+        }
+
+        if (p.caption && p.media_url) {
+          const cap = document.createElement('div');
+          cap.className = 'feed-post-caption';
+          cap.textContent = p.caption;
+          card.appendChild(cap);
+        }
+
+        // Tap a post to open that girl's story viewer
+        card.addEventListener('click', () => {
+          if (p.girl_id) HerDay.openViewer(p.girl_id);
+        });
+        wrap.appendChild(card);
+      });
+    }
+
+    function setMode(m) {
+      mode = m;
+      $('feedTabStories').classList.toggle('active', m === 'stories');
+      $('feedTabTimeline').classList.toggle('active', m === 'timeline');
+      $('herDayBar').classList.toggle('hidden', m !== 'stories');
+      $('feedTimeline').classList.toggle('hidden', m !== 'timeline');
+      if (m === 'timeline') renderTimeline();
+    }
+
+    function init() {
+      $('feedTabStories').addEventListener('click', () => setMode('stories'));
+      $('feedTabTimeline').addEventListener('click', () => setMode('timeline'));
+    }
+
+    return { load, init, setMode };
+  })();
+
+
   HerDay.init();
+  Feed.init();
 
 })();

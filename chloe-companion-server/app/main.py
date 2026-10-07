@@ -47,6 +47,7 @@ POST /api/v1/custom-videos [auth] {girl_id, description} -> {id, status}
 GET  /api/v1/custom-videos [auth] -> {requests:[...]}
 GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
 GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
+# GET  /api/v1/feed [auth] -> {posts:[...]} (unified timeline, all girls)
 POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
 POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls)
 """
@@ -1160,6 +1161,7 @@ def admin_custom_videos(request: Request, status: str = ""):
 # Whispr Feed feed (2026-10-07): Instagram-stories-style daily posts per girl.
 # Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
 # GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
+# GET  /api/v1/feed [auth] -> {posts:[...]} (unified timeline, all girls)
 # POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
 # POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls) (on-demand)
 # ---------------------------------------------------------------------------
@@ -1171,6 +1173,27 @@ def get_her_day(request: Request, girl_id: str = ""):
         store.cleanup_expired_her_day(conn)
         gid = (girl_id or "").strip().lower() or None
         posts = store.get_her_day_posts(conn, user_id, girl_id=gid)
+        return {"posts": posts}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/feed")
+def get_unified_feed(request: Request):
+    """Unified Whispr Feed: all active posts across ALL girls, newest first,
+    with girl info (name, avatar_url) attached to each post. Powers the
+    common feed timeline view alongside the per-girl stories bar."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        store.cleanup_expired_her_day(conn)
+        posts = store.get_her_day_posts(conn, user_id, girl_id=None)
+        # Attach girl info
+        girl_map = {g["id"]: g for g in characters.public_list()}
+        for p in posts:
+            g = girl_map.get(p.get("girl_id"), {})
+            p["girl_name"] = g.get("name", p.get("girl_id", ""))
+            p["girl_avatar_url"] = g.get("avatar_url", "")
         return {"posts": posts}
     finally:
         conn.close()
