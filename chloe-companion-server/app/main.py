@@ -605,7 +605,13 @@ def auth_telegram(body: dict):
     conn = _conn()
     try:
         user_id = f"tg_{tid}"
+        # Check if this is a new user
+        existing = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
         user = store.get_or_create_user(conn, user_id)
+        # New Telegram users get 50 free messages (same as site), not 1000
+        if not existing:
+            conn.execute("UPDATE users SET messages_remaining = 50 WHERE user_id = ?", (user_id,))
+            conn.commit()
         # Create a session token for API calls
         import secrets
         token = secrets.token_urlsafe(32)
