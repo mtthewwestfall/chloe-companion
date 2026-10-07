@@ -26,7 +26,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from . import config, store, submit
+from . import config, gemini_keys, store, submit
 
 
 def _is_owner(user_id: str) -> bool:
@@ -82,22 +82,18 @@ _MODERATION_CRITERIA = (
 
 
 def _gemini_text(prompt: str, timeout: int = 30) -> str | None:
-    """One Gemini text call. Returns the reply text, or None on any failure."""
-    api_key = config.GEMINI_API_KEY
-    if not api_key:
-        return None
-    req = urllib.request.Request(
+    """One Gemini text call via the key-manager pool. Returns reply text, or None."""
+    data = gemini_keys.post_json(
         _GEMINI_URL,
-        data=json.dumps({
+        {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 300},
-        }).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        },
+        timeout=timeout,
     )
+    if not data:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts if p.get("text"))
         return text.strip() or None
@@ -107,26 +103,22 @@ def _gemini_text(prompt: str, timeout: int = 30) -> str | None:
 
 def _gemini_image_text(image_bytes: bytes, mime: str, prompt: str,
                        timeout: int = 30) -> str | None:
-    """One Gemini call with an inline image + text prompt. None on failure."""
-    api_key = config.GEMINI_API_KEY
-    if not api_key:
-        return None
-    req = urllib.request.Request(
+    """One Gemini call with inline image + text via the key-manager pool. None on failure."""
+    data = gemini_keys.post_json(
         _GEMINI_URL,
-        data=json.dumps({
+        {
             "contents": [{"role": "user", "parts": [
                 {"inline_data": {"mime_type": mime,
                                  "data": base64.b64encode(image_bytes).decode()}},
                 {"text": prompt},
             ]}],
             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 50},
-        }).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        },
+        timeout=timeout,
     )
+    if not data:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts if p.get("text"))
         return text.strip() or None

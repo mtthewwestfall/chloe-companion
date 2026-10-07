@@ -32,7 +32,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
-from . import config, store
+from . import config, gemini_keys, store
 
 SUBMISSION_POLICY = (
     "Custom companions are created by submission only — nothing goes live "
@@ -105,22 +105,15 @@ def _slugify(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _gemini_vision_post(parts: list[dict], timeout: int = 60) -> dict | None:
-    api_key = config.GEMINI_API_KEY
-    if not api_key:
-        return None
-    req = urllib.request.Request(
-        _GEMINI_URL, data=json.dumps({
+    """Gemini vision call via the key-manager pool. None on failure."""
+    return gemini_keys.post_json(
+        _GEMINI_URL,
+        {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 800},
-        }).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": api_key},
+        },
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
 
 
 def _review_images_sync(images: list[str]) -> dict:
