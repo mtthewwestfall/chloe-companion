@@ -608,6 +608,17 @@ def admin_test_gemini_key(key_id: int, request: Request):
     return result
 
 
+@app.get("/api/v1/admin/gemini-usage")
+def admin_gemini_usage(request: Request, limit: int = 100):
+    """Recent Gemini key usage by source app. Shows which app (whispr-web,
+    creator-bot, proxy, etc.) is using which keys, and success/failure."""
+    _require_admin(request)
+    return {
+        "by_source": gemini_keys.usage_by_source(limit),
+        "recent": gemini_keys.get_usage(limit),
+    }
+
+
 @app.post("/api/v1/admin/girls/{girl_id}/footage")
 def admin_add_girl_footage(girl_id: str, body: FootageIn, request: Request):
     _require_admin(request)
@@ -2626,7 +2637,10 @@ def proxy_gemini_generate_content(model: str, body: dict, request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body_must_be_json_object")
     url = "%s/%s:generateContent" % (_GEMINI_PROXY_BASE, model)
-    data = gemini_keys.post_json(url, body, timeout=60)
+    # Calling app identifies itself via X-Source header (e.g. "gods-greek",
+    # "roof-rover", "whispr-telegram"); defaults to "proxy".
+    source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
+    data = gemini_keys.post_json(url, body, timeout=60, source=source)
     if data is None:
         raise HTTPException(status_code=502, detail="all_keys_failed")
     return data
@@ -2682,7 +2696,8 @@ def proxy_openai_chat_completions(body: dict, request: Request):
         model = _GEMINI_PROXY_DEFAULT_MODEL
     payload = _openai_messages_to_gemini(body)
     url = "%s/%s:generateContent" % (_GEMINI_PROXY_BASE, model)
-    data = gemini_keys.post_json(url, payload, timeout=60)
+    source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
+    data = gemini_keys.post_json(url, payload, timeout=60, source=source)
     if data is None:
         raise HTTPException(status_code=502, detail="all_keys_failed")
     text, finish = "", "STOP"

@@ -62,6 +62,16 @@ CREATE TABLE IF NOT EXISTS gemini_keys (
 )
 """
 
+_CREATE_USAGE_TABLE = """
+CREATE TABLE IF NOT EXISTS gemini_key_usage (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    key_id     INTEGER,
+    source     TEXT NOT NULL DEFAULT 'unknown',
+    success    INTEGER NOT NULL DEFAULT 0
+)
+"""
+
 
 def _now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -69,11 +79,31 @@ def _now_str() -> str:
 
 def _ensure_table(conn) -> None:
     conn.execute(_CREATE_TABLE)
+    conn.execute(_CREATE_USAGE_TABLE)
     # Migration: add last_used_at to pre-existing tables
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(gemini_keys)").fetchall()]
     if "last_used_at" not in cols:
         conn.execute("ALTER TABLE gemini_keys ADD COLUMN last_used_at TEXT")
         conn.commit()
+
+
+def _log_usage(conn, key_id: int | None, source: str, success: bool) -> None:
+    """Lightweight per-request log: which app used which key, and whether
+    it worked. Powers the admin usage endpoint."""
+    try:
+        conn.execute(
+            "INSERT INTO gemini_key_usage (key_id, source, success)"
+            " VALUES (?, ?, ?)",
+            (key_id, (source or "unknown")[:64], 1 if success else 0),
+        )
+        # Keep the table small: retain the most recent 5000 rows.
+        conn.execute(
+            "DELETE FROM gemini_key_usage WHERE id NOT IN"
+            " (SELECT id FROM gemini_key_usage ORDER BY id DESC LIMIT 5000)"
+        )
+        conn.commit()
+    except Exception:
+        pass  # usage logging must never break the request path
 
 
 def _key_hash(key_value: str) -> str:
@@ -132,12 +162,15 @@ def get_candidate_keys() -> list[tuple[int, str]]:
             conn.close()
 
 
-def get_key() -> tuple[int, str] | None:
+def get_key(source: str = "unknown") -> tuple[int, str] | None:
     """Next key in round-robin rotation, or None when pool is exhausted.
 
     Returns the least-recently-used eligible key (free tier first) and
     marks it used so the next call rotates to a different key. This
     distributes load across all keys instead of hammering the first one.
+
+    `source` names the calling app (e.g. "whispr-web"); it is recorded
+    when the key is actually used via post_json().
     """
     cands = get_candidate_keys()
     if not cands:
@@ -284,7 +317,8 @@ def _all_active_keys() -> list[tuple[int, str]]:
             conn.close()
 
 
-def post_json(url: str, payload: dict, timeout: int = 30) -> dict | None:
+def post_json(url: str, payload: dict, timeout: int = 30,
+              source: str = "unknown") -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Tries each eligible key in order (free first, healthiest first). On a
@@ -293,6 +327,9 @@ def post_json(url: str, payload: dict, timeout: int = 30) -> dict | None:
     is cooling down, falls back to trying all active keys ignoring backoff
     as a last resort. Returns the parsed JSON response, or None when every
     key failed / no keys exist.
+
+    `source` names the calling app (e.g. "whispr-web", "creator-bot");
+    each attempt is logged to gemini_key_usage for the admin endpoint.
     """
     candidates = get_candidate_keys()
     if not candidates:
@@ -310,13 +347,87 @@ def post_json(url: str, payload: dict, timeout: int = 30) -> dict | None:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             report_failure(key_id, _classify_http_error(e.code))
+            _log_usage_conn(key_id, source, False)
             continue
         except Exception:
             report_failure(key_id, "other")
+            _log_usage_conn(key_id, source, False)
             continue
         report_success(key_id)
+        _log_usage_conn(key_id, source, True)
         return data
     return None
+
+
+def _log_usage_conn(key_id: int | None, source: str, success: bool) -> None:
+    """Open a short-lived connection just for usage logging."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            _log_usage(conn, key_id, source, success)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def get_usage(limit: int = 100) -> list[dict]:
+    """Recent key usage for the admin endpoint: last N requests with
+    source, key label, timestamp, and success/failure."""
+    limit = max(1, min(int(limit or 100), 500))
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            rows = conn.execute(
+                """SELECT u.id, u.created_at, u.key_id, u.source, u.success,
+                          k.label AS key_label, k.is_paid AS is_paid
+                   FROM gemini_key_usage u
+                   LEFT JOIN gemini_keys k ON k.id = u.key_id
+                   ORDER BY u.id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [{
+                "id": r["id"],
+                "created_at": r["created_at"],
+                "key_id": r["key_id"],
+                "key_label": r["key_label"],
+                "is_paid": bool(r["is_paid"]) if r["is_paid"] is not None else None,
+                "source": r["source"],
+                "success": bool(r["success"]),
+            } for r in rows]
+        finally:
+            conn.close()
+
+
+def usage_by_source(limit: int = 100) -> list[dict]:
+    """Aggregate counts per source over the recent usage window."""
+    limit = max(1, min(int(limit or 100), 500))
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            rows = conn.execute(
+                """SELECT source,
+                          COUNT(*) AS requests,
+                          SUM(success) AS successes,
+                          SUM(1 - success) AS failures
+                   FROM (SELECT source, success FROM gemini_key_usage
+                         ORDER BY id DESC LIMIT ?)
+                   GROUP BY source
+                   ORDER BY requests DESC""",
+                (limit,),
+            ).fetchall()
+            return [{
+                "source": r["source"],
+                "requests": r["requests"],
+                "successes": r["successes"] or 0,
+                "failures": r["failures"] or 0,
+            } for r in rows]
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
