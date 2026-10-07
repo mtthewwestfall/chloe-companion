@@ -1119,7 +1119,8 @@ async def admin_girl_media_delete(media_id: int, request: Request):
 
 # Seed hardcoded clips into DB on first admin list (one-time migration).
 
-# Give clips seeded from Keyhole (2026-10-06)
+# Give clips - curated Whispr library (2026-10-06)
+# Only the clips kept in the Whispr app, not deleted ones
 GIVE_CLIPS = {
     ("chloe", "give"): [
         {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_1e67ecdd0b6dd10e.mp4", "media_type": "video"},
