@@ -31,6 +31,21 @@ Secret storage: key values live in the server-side sqlite DB — the same
 trust boundary as Railway env vars (the repo has no encryption infra, and
 every other secret here is an env var). The admin list endpoint only ever
 returns masked values ("...abcd"). Never log full key values.
+
+Hardening (bulletproofing) notes:
+- Circuit breaker: 3 consecutive failures of any kind pulls a key from
+  rotation for at least 5 minutes (transient-error backoff ladder is
+  (2, 2, 5, 15, 60) minutes; quota errors keep their own ladder).
+- Per-key rate limiting: dispatches per key are tracked in-memory (per
+  process) over a rolling 60s window. Keys at/over GEMINI_PER_KEY_RPM
+  (default 12) are skipped so rotation moves on before a 429 hits.
+- Healthiest-first ordering: among eligible keys, free keys come first,
+  then lowest health score (consecutive failures x10 + failures in the
+  last 5 min x5 + latency penalty), then least-recently-used.
+- Degraded mode: when the reserve pool is tapped, is_degraded() is true
+  for 10 minutes; the per-key RPM limit is automatically halved and
+  /api/v1/admin/gemini-health exposes the signal so callers can slow
+  down too.
 """
 from __future__ import annotations
 
@@ -39,8 +54,10 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from . import config, db
@@ -50,6 +67,144 @@ logger = logging.getLogger(__name__)
 
 # Backoff ladder for quota/429 failures, indexed by consecutive_failures.
 _BACKOFF_MINUTES = (5, 15, 60, 240)
+
+# Circuit-breaker ladder for transient ("other") errors, indexed by
+# consecutive_failures. After 3 consecutive failures of any kind a key is
+# pulled from rotation for at least 5 minutes.
+_OTHER_BACKOFF_MINUTES = (2, 2, 5, 15, 60)
+
+# Per-key rate-limiting windows (in-memory, per process).
+_DISPATCH_WINDOW_S = 60.0
+_FAILURE_WINDOW_S = 300.0
+# How long after a reserve-pool tap the pool reports degraded.
+_DEGRADED_WINDOW_S = 600.0
+# Avg latency above this (seconds) adds a health-score penalty.
+_LATENCY_PENALTY_S = 10.0
+_MAX_LATENCY_SAMPLES = 20
+
+# In-memory per-process state, guarded by _lock. The DB columns remain
+# the source of truth for consecutive failures and backoff windows;
+# these structures only carry soft signals (rate, recent failures,
+# latency) that don't need to survive restarts.
+_dispatch_times: dict[int, deque] = {}  # key_id -> dispatch timestamps (60s)
+_recent_fail_ts: dict[int, deque] = {}  # key_id -> failure timestamps (5min)
+_latencies: dict[int, deque] = {}       # key_id -> recent request latencies (s)
+_last_reserve_tap: float | None = None  # monotonic time of last reserve use
+
+
+def _per_key_rpm() -> int:
+    """Max dispatches per key per rolling 60s window. Free Gemini keys
+    allow ~15 req/min; stay conservative so we rotate before a 429."""
+    try:
+        return max(1, int(os.environ.get("GEMINI_PER_KEY_RPM", "12")))
+    except ValueError:
+        return 12
+
+
+def _prune(dq: deque, cutoff: float) -> None:
+    while dq and dq[0] <= cutoff:
+        dq.popleft()
+
+
+def _record_dispatch_locked(key_id: int) -> None:
+    """Note that key_id was handed out. Caller must hold _lock."""
+    now = time.monotonic()
+    dq = _dispatch_times.setdefault(key_id, deque())
+    _prune(dq, now - _DISPATCH_WINDOW_S)
+    dq.append(now)
+
+
+def _key_over_limit(key_id: int) -> bool:
+    """True when key_id hit the per-key RPM cap in the rolling window.
+    Caller must hold _lock."""
+    dq = _dispatch_times.get(key_id)
+    if not dq:
+        return False
+    _prune(dq, time.monotonic() - _DISPATCH_WINDOW_S)
+    return len(dq) >= _effective_per_key_rpm()
+
+
+def _under_limit(rows):
+    """Filter eligible rows to keys under their per-key rate cap."""
+    return [r for r in rows if not _key_over_limit(r["id"])]
+
+
+def _note_failure_locked(key_id: int) -> None:
+    """Record a failure timestamp for health scoring. Hold _lock."""
+    now = time.monotonic()
+    dq = _recent_fail_ts.setdefault(key_id, deque())
+    _prune(dq, now - _FAILURE_WINDOW_S)
+    dq.append(now)
+
+
+def _recent_failure_count(key_id: int) -> int:
+    dq = _recent_fail_ts.get(key_id)
+    if not dq:
+        return 0
+    _prune(dq, time.monotonic() - _FAILURE_WINDOW_S)
+    return len(dq)
+
+
+def _record_latency_locked(key_id: int, seconds: float) -> None:
+    """Record a request latency sample. Caller must hold _lock."""
+    dq = _latencies.setdefault(key_id, deque(maxlen=_MAX_LATENCY_SAMPLES))
+    dq.append(max(0.0, seconds))
+
+
+def _avg_latency(key_id: int) -> float | None:
+    dq = _latencies.get(key_id)
+    if not dq:
+        return None
+    return sum(dq) / len(dq)
+
+
+def _health_score(key_id: int, consecutive_failures: int) -> float:
+    """Lower is healthier. Weighs DB failure streak, recent failure
+    bursts, and elevated latency."""
+    score = float(consecutive_failures or 0) * 10.0
+    score += _recent_failure_count(key_id) * 5.0
+    avg = _avg_latency(key_id)
+    if avg is not None and avg > _LATENCY_PENALTY_S:
+        score += 5.0
+    return score
+
+
+def is_degraded() -> bool:
+    """True while the pool is serving from reserve keys (10 min after
+    the last reserve tap). Callers should slow down when degraded."""
+    if _last_reserve_tap is None:
+        return False
+    return (time.monotonic() - _last_reserve_tap) < _DEGRADED_WINDOW_S
+
+
+def _effective_per_key_rpm() -> int:
+    """Per-key RPM cap, automatically halved while degraded so reserve
+    keys are protected."""
+    rpm = _per_key_rpm()
+    if is_degraded():
+        rpm = max(1, rpm // 2)
+    return rpm
+
+
+def degradation_info() -> dict:
+    """Machine-readable pool health for adaptive throttling by callers."""
+    rpm = _per_key_rpm()
+    degraded = is_degraded()
+    tapped_at = None
+    if _last_reserve_tap is not None:
+        tapped_at = datetime.fromtimestamp(
+            time.time() - (time.monotonic() - _last_reserve_tap),
+            tz=timezone.utc,
+        ).isoformat()
+    return {
+        "degraded": degraded,
+        "reserve_tapped": _last_reserve_tap is not None,
+        "reserve_tapped_at": tapped_at,
+        "per_key_rpm": rpm,
+        "effective_per_key_rpm": _effective_per_key_rpm(),
+        "advice": ("pool serving from reserves - halve your request rate"
+                   if degraded else "pool healthy"),
+    }
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS gemini_keys (
@@ -190,7 +345,7 @@ def _eligible_rows(conn, only_ids: set[int] | None = None):
     _seed_legacy_key(conn)
     if only_ids is not None and not only_ids:
         return []
-    query = """SELECT id, key_value, is_paid, consecutive_failures
+    query = """SELECT id, key_value, is_paid, consecutive_failures, last_used_at
            FROM gemini_keys
            WHERE is_active = 1
              AND needs_attention = 0
@@ -208,33 +363,54 @@ def _eligible_rows(conn, only_ids: set[int] | None = None):
     return conn.execute(query, params).fetchall()
 
 
+def _order_by_health(rows) -> list[tuple[int, str]]:
+    """Order eligible keys: free keys first, then healthiest first,
+    rotating least-recently-used among equally healthy keys."""
+    def keyfn(r):
+        return (_health_score(r["id"], r["consecutive_failures"]),
+                r["last_used_at"] or "")
+
+    free = sorted((r for r in rows if not r["is_paid"]), key=keyfn)
+    paid = sorted((r for r in rows if r["is_paid"]), key=keyfn)
+    return [(r["id"], r["key_value"]) for r in free + paid]
+
+
 def get_candidate_keys() -> list[tuple[int, str]]:
     """Ordered (key_id, key_value) candidates. Empty when nothing usable.
 
     Two-pool system: the active pool rotates normally. The reserve pool
     (~30% of keys, see _reserve_count) is held back and only tapped when
-    every active key is cooling down, failed, or disabled. Reserve usage
-    is logged so exhaustion of the active pool is visible.
+    every active key is cooling down, failed, disabled, or rate-limited.
+    Reserve usage is logged so exhaustion of the active pool is visible.
+
+    Hardening: keys at/over their per-key RPM cap are skipped so rotation
+    moves on before a 429; candidates are ordered healthiest-first
+    (free tier first, then lowest health score, then least-recently-used).
     """
+    global _last_reserve_tap
     with _lock:
         conn = db.connect()
         try:
             _ensure_table(conn)
             active_ids, reserve_ids = _pool_ids(conn)
-            # Tier 1: active pool
-            rows = _eligible_rows(conn, active_ids)
+            # Tier 1: active pool (over-limit keys filtered out)
+            active_rows = _eligible_rows(conn, active_ids)
+            rows = _under_limit(active_rows)
             if rows:
-                return [(r["id"], r["key_value"]) for r in rows]
-            # Tier 2: reserve pool — active pool fully exhausted
+                return _order_by_health(rows)
+            # Tier 2: reserve pool — active pool exhausted or rate-limited
             if reserve_ids:
-                rows = _eligible_rows(conn, reserve_ids)
+                rows = _under_limit(_eligible_rows(conn, reserve_ids))
                 if rows:
+                    _last_reserve_tap = time.monotonic()
+                    reason = "rate-limited" if active_rows else "exhausted"
                     logger.warning(
-                        "gemini_keys: active pool exhausted, tapping "
-                        "reserve pool (%d reserve keys eligible)",
+                        "gemini_keys: active pool %s, tapping reserve "
+                        "pool (%d reserve keys eligible)",
+                        reason,
                         len(rows),
                     )
-                    return [(r["id"], r["key_value"]) for r in rows]
+                    return _order_by_health(rows)
             return []
         finally:
             conn.close()
@@ -269,6 +445,7 @@ def get_key(source: str = "unknown") -> tuple[int, str] | None:
                 (_now_str(), key_id),
             )
             conn.commit()
+            _record_dispatch_locked(key_id)
         finally:
             conn.close()
     return (key_id, key_value)
@@ -333,12 +510,16 @@ def report_failure(key_id: int, error_type: str) -> None:
                     (failures, _now_str(), key_id),
                 )
             else:
-                # "Other" errors (5xx, timeout, network): apply a short 2-minute
-                # backoff so the next request immediately tries a different key
-                # instead of retrying this same failing key. The key becomes
-                # eligible again quickly if the issue was transient.
+                # Circuit breaker for transient errors (5xx, timeout,
+                # network): 2-minute backoff for the first couple of
+                # failures so the next request immediately tries a
+                # different key, then 5+ minutes once a key shows a real
+                # failure streak — pull it from rotation fast instead of
+                # letting it burn requests.
+                wait = _OTHER_BACKOFF_MINUTES[
+                    min(failures - 1, len(_OTHER_BACKOFF_MINUTES) - 1)]
                 until = (datetime.now(timezone.utc)
-                         + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+                         + timedelta(minutes=wait)).strftime("%Y-%m-%d %H:%M:%S")
                 conn.execute(
                     """UPDATE gemini_keys
                        SET consecutive_failures = ?,
@@ -349,6 +530,7 @@ def report_failure(key_id: int, error_type: str) -> None:
                        WHERE id = ?""",
                     (failures, _now_str(), until, key_id),
                 )
+            _note_failure_locked(key_id)
             conn.commit()
         finally:
             conn.close()
@@ -420,22 +602,31 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         # ignoring backoff rather than failing the request outright.
         candidates = _all_active_keys()
     for key_id, key_value in candidates:
+        with _lock:
+            _record_dispatch_locked(key_id)
         req = urllib.request.Request(
             url, data=json.dumps(payload).encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json",
                      "x-goog-api-key": key_value},
         )
+        start = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            with _lock:
+                _record_latency_locked(key_id, time.monotonic() - start)
             report_failure(key_id, _classify_http_error(e.code))
             _log_usage_conn(key_id, source, False)
             continue
         except Exception:
+            with _lock:
+                _record_latency_locked(key_id, time.monotonic() - start)
             report_failure(key_id, "other")
             _log_usage_conn(key_id, source, False)
             continue
+        with _lock:
+            _record_latency_locked(key_id, time.monotonic() - start)
         report_success(key_id)
         _log_usage_conn(key_id, source, True)
         return data

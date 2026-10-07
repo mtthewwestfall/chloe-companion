@@ -620,6 +620,15 @@ def admin_gemini_usage(request: Request, limit: int = 100):
     }
 
 
+@app.get("/api/v1/admin/gemini-health")
+def admin_gemini_health(request: Request):
+    """Key-pool health for adaptive throttling. `degraded` is true while
+    the pool is serving from reserve keys — callers should halve their
+    request rate until it clears."""
+    _require_admin(request)
+    return gemini_keys.degradation_info()
+
+
 @app.post("/api/v1/admin/girls/{girl_id}/footage")
 def admin_add_girl_footage(girl_id: str, body: FootageIn, request: Request):
     _require_admin(request)
