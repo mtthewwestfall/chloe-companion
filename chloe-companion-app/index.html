@@ -123,6 +123,13 @@
           <div id="feedPosts" class="feed-posts"></div>
         </div>
 
+        <!-- Whispr Feed video viewer overlay -->
+        <div id="feedVideoViewer" class="feed-video-viewer hidden">
+          <div id="feedVideoBackdrop" class="feed-video-backdrop"></div>
+          <button id="feedVideoClose" class="feed-video-close" aria-label="Close video">&times;</button>
+          <video id="feedVideoPlayer" class="feed-video-player" controls playsinline preload="metadata"></video>
+        </div>
+
         <main id="chatLog" class="chat-log" aria-live="polite"></main>
 
         <div id="typingRow" class="typing-row hidden">

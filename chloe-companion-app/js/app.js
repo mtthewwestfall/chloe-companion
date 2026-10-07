@@ -893,12 +893,31 @@
         card.appendChild(header);
 
         if (p.post_type === 'video' && p.media_url) {
+          // Tap layer over the video: taps open our viewer overlay, never the
+          // native fullscreen player (which has no reliable exit in webviews).
+          const mediaWrap = document.createElement('div');
+          mediaWrap.className = 'feed-post-mediawrap';
           const vid = document.createElement('video');
           vid.className = 'feed-post-media';
           vid.src = p.media_url;
           vid.playsInline = true;
           vid.preload = 'metadata';
-          card.appendChild(vid);
+          vid.setAttribute('disablepictureinpicture', '');
+          const tap = document.createElement('button');
+          tap.className = 'feed-post-videotap';
+          tap.setAttribute('aria-label', 'Play video');
+          const playIcon = document.createElement('span');
+          playIcon.className = 'feed-post-playicon';
+          playIcon.textContent = '\u25B6';
+          tap.appendChild(playIcon);
+          tap.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openViewer(p.media_url);
+          });
+          mediaWrap.appendChild(vid);
+          mediaWrap.appendChild(tap);
+          card.appendChild(mediaWrap);
         } else if (p.media_url) {
           const img = document.createElement('img');
           img.className = 'feed-post-media';
@@ -924,8 +943,37 @@
       });
     }
 
+    function openViewer(src) {
+      const viewer = $('feedVideoViewer');
+      const player = $('feedVideoPlayer');
+      player.src = src;
+      viewer.classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+      player.play().catch(() => {});
+    }
+
+    function closeViewer() {
+      const viewer = $('feedVideoViewer');
+      const player = $('feedVideoPlayer');
+      player.pause();
+      player.removeAttribute('src');
+      player.load();
+      viewer.classList.add('hidden');
+      document.body.style.overflow = '';
+    }
+
     function init() {
-      // Feed is the only view; nothing to wire up.
+      // Video viewer: X button, tap-outside, and Escape all close it.
+      $('feedVideoClose').addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeViewer();
+      });
+      $('feedVideoBackdrop').addEventListener('click', closeViewer);
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !$('feedVideoViewer').classList.contains('hidden')) {
+          closeViewer();
+        }
+      });
     }
 
     return { load, init };
