@@ -392,6 +392,13 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   overflow-x: auto;
 }
+.herday-avatars {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding: 2px;
+}
 .herday-avatar-btn {
   display: flex;
   flex-direction: column;
@@ -401,6 +408,7 @@ body {
   border: none;
   cursor: pointer;
   padding: 0;
+  flex-shrink: 0;
 }
 .herday-ring {
   width: 62px;

@@ -91,7 +91,7 @@
     chatLog.appendChild(enc);
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
-    HerDay.load(girl.id, girl.avatar, girl.name);
+    HerDay.load();
     // Load last 8 turns so the conversation picks up where it left off
     let hasHistory = false;
     if (isLoggedIn()) {
@@ -836,54 +836,98 @@
     showOnboarding();
   }
 
-  /* ============================================================
+    /* ============================================================
      Her Day — Instagram-stories-style daily feed.
-     Stories bar at top of chat, tap for full-screen viewer.
+     Stories bar shows ALL girls (tap an avatar to see her day).
      ============================================================ */
   const HerDay = (() => {
+    let girls = [];
+    let postsByGirl = {};
+    let currentGirl = null;
     let posts = [];
     let currentIdx = 0;
     let timer = null;
-    let girlAvatar = '';
-    let girlName = '';
 
     const STORY_MS = 5000;
 
-    async function load(girlId, avatar, name) {
-      girlAvatar = avatar;
-      girlName = name;
-      $('herDayThumb').src = avatar;
-      $('herDayViewerAvatar').src = avatar;
+    async function load() {
+      // All characters + all of today's posts (every girl gets her own feed)
       try {
-        posts = await ApiClient.herDay(girlId);
+        girls = await ApiClient.characters();
       } catch (e) {
-        posts = [];
+        girls = [];
       }
-      // Try on-demand generation if nothing today
-      if (!posts.length && ApiClient.isConnected()) {
-        try {
-          const res = await ApiClient.herDayGenerate(girlId);
-          posts = res.posts || [];
-        } catch (e) {}
+      try {
+        let all = await ApiClient.herDay();
+        // On-demand generation if nothing today
+        if (!all.length && ApiClient.isConnected()) {
+          try {
+            await ApiClient.herDayGenerate();
+            all = await ApiClient.herDay();
+          } catch (e) {}
+        }
+        postsByGirl = {};
+        all.forEach(p => {
+          (postsByGirl[p.girl_id] = postsByGirl[p.girl_id] || []).push(p);
+        });
+      } catch (e) {
+        postsByGirl = {};
       }
       renderBar();
     }
 
+    function girlFor(gid) {
+      return girls.find(g => g.id === gid) || { id: gid, name: gid, avatar_url: '' };
+    }
+
     function renderBar() {
+      const wrap = $('herDayAvatars');
       const bar = $('herDayBar');
-      if (!posts.length) {
+      const gids = Object.keys(postsByGirl).filter(gid => postsByGirl[gid].length);
+      gids.sort((a, b) => {
+        const ia = girls.findIndex(g => g.id === a);
+        const ib = girls.findIndex(g => g.id === b);
+        return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+      });
+      if (!gids.length) {
         bar.classList.add('hidden');
         return;
       }
       bar.classList.remove('hidden');
-      const hasUnviewed = posts.some(p => !p.viewed);
-      $('herDayRing').classList.toggle('unviewed', hasUnviewed);
+      wrap.innerHTML = '';
+      gids.forEach(gid => {
+        const g = girlFor(gid);
+        const hasUnviewed = postsByGirl[gid].some(p => !p.viewed);
+        const btn = document.createElement('button');
+        btn.className = 'herday-avatar-btn';
+        btn.setAttribute('aria-label', g.name + "'s Day");
+        const ring = document.createElement('span');
+        ring.className = 'herday-ring' + (hasUnviewed ? ' unviewed' : '');
+        const img = document.createElement('img');
+        img.className = 'herday-thumb';
+        img.src = g.avatar_url || '';
+        img.alt = g.name;
+        ring.appendChild(img);
+        const label = document.createElement('span');
+        label.className = 'herday-label';
+        label.textContent = g.name;
+        btn.appendChild(ring);
+        btn.appendChild(label);
+        btn.addEventListener('click', () => openViewer(gid));
+        wrap.appendChild(btn);
+      });
     }
 
-    function openViewer(startIdx) {
-      currentIdx = startIdx || 0;
+    function openViewer(girlId) {
+      const g = girlFor(girlId);
+      currentGirl = g;
+      posts = postsByGirl[girlId] || [];
+      if (!posts.length) return;
+      $('herDayViewerAvatar').src = g.avatar_url || '';
+      $('herDayViewerName').textContent = g.name;
+      currentIdx = 0;
       $('herDayViewer').classList.remove('hidden');
-      showStory(currentIdx);
+      showStory(0);
     }
 
     function closeViewer() {
@@ -909,7 +953,6 @@
       });
 
       // Header
-      $('herDayViewerName').textContent = girlName;
       const created = new Date(post.created_at + 'Z');
       const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
       $('herDayViewerTime').textContent = mins < 60 ? mins + 'm ago' : Math.round(mins / 60) + 'h ago';
@@ -954,7 +997,6 @@
     }
 
     function init() {
-      $('herDayAvatar').addEventListener('click', () => openViewer(0));
       $('herDayClose').addEventListener('click', closeViewer);
       $('herDayPrev').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -979,6 +1021,7 @@
 
     return { load, init, openViewer };
   })();
+
 
   HerDay.init();
 

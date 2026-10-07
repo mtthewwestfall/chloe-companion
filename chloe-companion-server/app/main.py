@@ -48,7 +48,7 @@ GET  /api/v1/custom-videos [auth] -> {requests:[...]}
 GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
 GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
 POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
-POST /api/v1/her-day/generate [auth] {girl_id} -> {generated:N}
+POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls)
 """
 from __future__ import annotations
 
@@ -1150,7 +1150,7 @@ def admin_custom_videos(request: Request, status: str = ""):
 # Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
 # GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
 # POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
-# POST /api/v1/her-day/generate [auth] {girl_id} -> {generated:N} (on-demand)
+# POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls) (on-demand)
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/her-day")
 def get_her_day(request: Request, girl_id: str = ""):
@@ -1186,20 +1186,17 @@ class HerDayGenerateIn(BaseModel):
 
 @app.post("/api/v1/her-day/generate")
 def generate_her_day(body: HerDayGenerateIn, request: Request):
-    """On-demand Her Day generation (also used by the 6 AM cron via admin)."""
+    """On-demand Her Day generation for ALL girls (also used by the 6 AM cron).
+
+    Every character gets her own daily feed (solo + group moments). The
+    stories bar shows all girls; tap an avatar to see her day.
+    """
     user_id = _current_user_id(request)
-    conn = _conn()
     try:
-        gid = (body.girl_id or "chloe").strip().lower()
-        try:
-            character = characters.get_character(gid)
-            girl_name = character.get("name", "Chloe")
-        except Exception:
-            girl_name = "Chloe"
-        posts = her_day.generate_for_user_girl(user_id, gid, girl_name)
-        return {"generated": len(posts), "posts": posts}
-    finally:
-        conn.close()
+        n = her_day.generate_for_all_girls(user_id)
+        return {"generated": n}
+    except Exception as e:  # noqa: BLE001
+        return {"generated": 0, "error": str(e)[:200]}
 
 
 # ---------------------------------------------------------------------------

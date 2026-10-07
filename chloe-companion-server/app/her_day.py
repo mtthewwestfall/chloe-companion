@@ -1,31 +1,36 @@
 """Her Day feed generator — Instagram-stories-style daily posts.
 
 SFW-ONLY pipeline (the Give library is never used here — a day-in-the-life
-feed cannot show explicit clips):
+feed cannot show explicit clips).
 
-Each girl posts 3-5 "moments" per day per user: morning coffee, gym,
-cooking, out with friends, getting ready, bedtime, voice rants, etc.
+Every character gets her OWN daily feed, and the app shows ALL characters'
+stories in one stories bar (tap a girl's avatar to see her day).
 
-Generation runs once daily (6 AM cron or on-demand). For each active
-user+girl pair:
-  1. Pick 3-5 moments from the template pool (varied by day of week).
+Stories can be SOLO or GROUP moments (2-3 girls together — gym buddies,
+coffee dates, nights out). Group moments appear in every participating
+girl's feed (shared image, each girl's own caption).
+
+Content plan: deterministic per girl+date (seeded), so each girl gets
+different moments each day, each day differs from the last, and plans are
+pre-determined/reproducible for the next several days.
+
+Generation (6 AM cron or on-demand), per user x per girl:
+  1. Build the day's content plan for every girl (solo + group moments).
   2. Sogni generates an SFW scene image per visual moment (fully clothed,
-     everyday normal activity, non-sexual, Instagram-story style), with the
-     girl's avatar as a face-lock reference. Images are cached per
-     girl+day+moment so all users share one generation. Any failure
-     (missing key, content block, timeout) falls back to a styled text
-     card — explicit content can never appear here.
+     everyday activity, non-sexual). Images cached per participants+day+
+     moment on disk — all users share one generation. Any failure falls
+     back to a styled text card.
   3. Caption via the centralized Gemini key manager PROXY
      (POST {PUBLIC_APP_URL}/v1/chat/completions, Bearer GEMINI_PROXY_TOKEN)
      — free keys first, never the paid key directly.
-  4. One TTS voice note per day (via existing voice pipeline; skipped when
-     voice is disabled).
+  4. One TTS voice note per girl per day.
 
 Posts expire after 24h (expires_at). Old posts are cleaned up on read.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import random
 from datetime import datetime
@@ -33,10 +38,8 @@ from typing import Any
 
 from . import config, db, store
 
-# Moment templates: (post_type, sfw_scene, caption_desc)
-# sfw_scene: scene description fed to the Sogni prompt (None for
-# non-visual moments). Every visual moment is an SFW everyday scene.
-MOMENTS = {
+# Solo visual moments: (post_type, sfw_scene, caption_desc)
+SOLO_MOMENTS = {
     "morning_coffee": ("image",
         "cozy selfie holding a coffee mug in a sunlit bedroom, wearing a modest sweatshirt",
         "morning coffee selfie, just woke up, cozy bedroom"),
@@ -55,47 +58,125 @@ MOMENTS = {
     "bedtime": ("image",
         "cozy selfie in pajamas in a warm bedroom, sleepy goodnight vibe",
         "getting ready for bed, cozy pajamas, sleepy"),
-    "voice_rant": ("voice", None,
-        "voice note rant about her day"),
-    "shower_thought": ("text", None,
-        "random thought she had in the shower"),
-    "craving": ("text", None,
-        "something she's craving right now"),
 }
 
-# Day-of-week moment pools (0=Monday). Vary the vibe by day.
-DAY_MOMENTS = {
-    0: ["morning_coffee", "gym", "cooking", "bedtime"],
-    1: ["morning_coffee", "out_and_about", "voice_rant", "bedtime"],
-    2: ["morning_coffee", "gym", "shower_thought", "bedtime"],
-    3: ["morning_coffee", "cooking", "craving", "bedtime"],
-    4: ["morning_coffee", "gym", "getting_ready", "out_and_about"],
-    5: ["morning_coffee", "out_and_about", "getting_ready", "voice_rant"],
-    6: ["morning_coffee", "cooking", "shower_thought", "bedtime"],
+# Group visual moments: (post_type, sfw_scene, caption_desc_template).
+# {partners} is filled with the other girls' names.
+GROUP_MOMENTS = {
+    "gym_buddies": ("image",
+        "working out together at the gym, spotting each other on weights, all in modest athletic wear",
+        "gym with {partners}, workout buddies"),
+    "coffee_date": ("image",
+        "having coffee together at a cozy cafe, chatting and laughing",
+        "coffee date with {partners}"),
+    "night_out": ("image",
+        "out together in the city at night, having fun, stylish evening outfits",
+        "night out with {partners}"),
+    "cooking_together": ("image",
+        "cooking together in a bright home kitchen, laughing and having fun",
+        "cooking with {partners}"),
 }
 
-# Hard SFW tail appended to every Her Day image prompt. The Give library
-# is never a source here — explicit content cannot reach this feed.
+# Non-visual moments (solo only): (post_type, caption_desc)
+TEXT_MOMENTS = {
+    "voice_rant": ("voice", "voice note rant about her day"),
+    "shower_thought": ("text", "random thought she had in the shower"),
+    "craving": ("text", "something she's craving right now"),
+}
+
+# Hard SFW tail appended to every Her Day image prompt.
 SFW_TAIL = ("photorealistic, fully clothed, everyday normal activity, "
             "non-sexual, wholesome, like a normal Instagram story, "
             "clean high-quality photo, natural light, coherent background")
 
-
-def _sfw_prompt(girl_name: str, scene: str) -> str:
-    """Build an explicitly SFW image prompt for a Her Day moment."""
-    return f"Photorealistic {girl_name}, {scene}, {SFW_TAIL}"
+# In-memory caption cache for batch runs: (girl_id, date, moment, partners)
+_caption_cache: dict[tuple, str] = {}
 
 
-def _herday_image_path(girl_id: str, moment_key: str) -> str:
-    """Daily cache path so all users share one generation per girl/moment."""
-    day = datetime.now().strftime("%Y-%m-%d")
-    gid = (girl_id or "chloe").strip().lower() or "chloe"
-    fname = f"herday_{gid}_{day}_{moment_key}.jpg"
+def _sfw_prompt(names: list[str], scene: str) -> str:
+    """Build an explicitly SFW image prompt. names[0] is the primary girl."""
+    name_str = " and ".join(names)
+    return f"Photorealistic {name_str}, {scene}, {SFW_TAIL}"
+
+
+def _herday_image_path(participant_ids: list[str], moment_key: str,
+                       date_str: str) -> str:
+    """Daily cache path — all users share one generation per participants."""
+    pids = "_".join(sorted(p.strip().lower() for p in participant_ids))
+    fname = f"herday_{pids}_{date_str}_{moment_key}.jpg"
     return os.path.join(config.GENERATED_DIR, fname)
 
 
-async def _generate_sfw_image_async(girl_name: str, avatar_url: str,
-                                    girl_id: str, moment_key: str,
+def _plan_day(girl_id: str, date_str: str,
+              all_girls: list[dict[str, Any]]) -> list[tuple]:
+    """Deterministic daily content plan for one girl.
+
+    Returns [(moment_key, is_group, partner_ids, partner_names)].
+    Seeded by girl_id + date: reproducible, different per girl, different
+    per day. Mixes solo and group moments.
+    """
+    seed = int(hashlib.md5(
+        f"{girl_id}|{date_str}|herday-v2".encode()).hexdigest()[:8], 16)
+    rng = random.Random(seed)
+    others = [g for g in all_girls if g["id"] != girl_id]
+
+    plan: list[tuple] = []
+    # Bookend: morning coffee (solo)
+    plan.append(("morning_coffee", False, [], []))
+
+    # Middle: 1-3 moments, mix solo + group
+    solo_pool = ["gym", "cooking", "out_and_about", "getting_ready"]
+    group_pool = list(GROUP_MOMENTS.keys())
+    for _ in range(rng.randint(1, 3)):
+        if others and rng.random() < 0.45:
+            mkey = rng.choice(group_pool)
+            n_partners = 1 if rng.random() < 0.7 else min(2, len(others))
+            partners = rng.sample(others, n_partners)
+            plan.append((mkey, True,
+                         [p["id"] for p in partners],
+                         [p["name"] for p in partners]))
+        else:
+            plan.append((rng.choice(solo_pool), False, [], []))
+
+    # Bookend: bedtime (solo)
+    plan.append(("bedtime", False, [], []))
+
+    # Voice note most days
+    if rng.random() < 0.7:
+        plan.insert(-1, ("voice_rant", False, [], []))
+    # Sometimes a text moment
+    if rng.random() < 0.4:
+        plan.insert(-1, (rng.choice(["shower_thought", "craving"]),
+                         False, [], []))
+    return plan
+
+
+def _build_all_plans(all_girls: list[dict[str, Any]],
+                     date_str: str) -> dict[str, list[tuple]]:
+    """Build plans for all girls, making group moments symmetric.
+
+    If A's plan has a group moment with B, it also appears in B's feed
+    (same image, B's own caption).
+    """
+    plans = {g["id"]: _plan_day(g["id"], date_str, all_girls)
+             for g in all_girls}
+    girl_map = {g["id"]: g for g in all_girls}
+    for gid, plan in list(plans.items()):
+        for (mkey, is_group, pids, _pnames) in plan:
+            if not is_group:
+                continue
+            for pid in pids:
+                if pid not in plans:
+                    continue
+                already = any(pm == mkey and gid in ppids
+                              for (pm, pig, ppids, _) in plans[pid])
+                if not already:
+                    plans[pid].insert(
+                        -1, (mkey, True, [gid], [girl_map[gid]["name"]]))
+    return plans
+
+
+async def _generate_sfw_image_async(names: list[str], avatar_url: str,
                                     scene: str, dest: str) -> str:
     """Run one SFW Sogni image job. Returns the /generated/... url."""
     from sogni_client import SogniClient
@@ -109,7 +190,7 @@ async def _generate_sfw_image_async(girl_name: str, avatar_url: str,
     _patch_websocket_quirk()
     ref_path = _fetch_reference(avatar_url or "")
     params: dict[str, Any] = {
-        "positivePrompt": _sfw_prompt(girl_name, scene),
+        "positivePrompt": _sfw_prompt(names, scene),
         "numberOfMedia": 1,
         "type": "image",
         "modelId": config.SOGNI_IMAGE_MODEL,
@@ -129,7 +210,6 @@ async def _generate_sfw_image_async(girl_name: str, avatar_url: str,
             project = await client.projects.create(params)
             urls = await project.wait_for_completion(timeout=600)
             if not urls:
-                # Mint fresh S3 URLs from the finished worker jobs.
                 info = await client.projects.get(project.id)
                 for wj in (info.get("completedWorkerJobs") or []):
                     img_id = wj.get("imgID") or wj.get("id")
@@ -158,14 +238,15 @@ async def _generate_sfw_image_async(girl_name: str, avatar_url: str,
                 pass
 
 
-def _generate_sfw_image(girl_name: str, avatar_url: str, girl_id: str,
-                        moment_key: str, scene: str) -> str:
-    """Generate (or reuse today's cached) SFW image for a Her Day moment.
+def _generate_sfw_image(names: list[str], avatar_url: str,
+                        participant_ids: list[str], moment_key: str,
+                        scene: str, date_str: str) -> str:
+    """Generate (or reuse today's cached) SFW image.
 
     Returns the /generated/... url, or "" on any failure — the caller
-    renders a styled text card instead. Explicit content can never appear.
+    renders a styled text card instead.
     """
-    dest = _herday_image_path(girl_id, moment_key)
+    dest = _herday_image_path(participant_ids, moment_key, date_str)
     if os.path.exists(dest):
         return "/generated/" + os.path.basename(dest)
     if not config.SOGNI_API_KEY:
@@ -174,58 +255,74 @@ def _generate_sfw_image(girl_name: str, avatar_url: str, girl_id: str,
         return ""
     try:
         return asyncio.run(_generate_sfw_image_async(
-            girl_name, avatar_url, girl_id, moment_key, scene, dest))
+            names, avatar_url, scene, dest))
     except Exception as e:  # noqa: BLE001
-        # Content blocks ("Sensitive content detected"), timeouts, etc.
         print(f"[her_day] sfw image failed ({moment_key}): {e}", flush=True)
         return ""
 
 
-def _generate_caption(girl_name: str, moment_key: str,
-                      desc: str) -> str:
-    """Caption via the centralized Gemini key manager PROXY.
+def _generate_caption(girl_name: str, moment_key: str, desc: str,
+                      partner_names: list[str],
+                      cache_key: tuple | None = None) -> str:
+    """Caption via the centralized Gemini key manager PROXY (free keys first).
 
     POST {PUBLIC_APP_URL}/v1/chat/completions with Bearer GEMINI_PROXY_TOKEN.
-    The proxy routes free keys first with failover — the paid key is never
-    used directly here.
     """
+    if cache_key and cache_key in _caption_cache:
+        return _caption_cache[cache_key]
+
     import json as _json
     import urllib.request
 
     token = os.environ.get("GEMINI_PROXY_TOKEN", "")
-    if not token:
-        return ""
-    prompt = (
-        f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
-        f"Write a short Instagram-story caption (1-2 sentences, casual, "
-        f"flirty, no hashtags) for this moment: {desc}. "
-        f"Sound like a real girl, not a bot. No emojis spam (max 1)."
-    )
-    payload = _json.dumps({
-        "model": "gemini-3.1-flash-lite",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.9,
-        "max_tokens": 100,
-    }).encode()
-    url = config.PUBLIC_APP_URL.rstrip("/") + "/v1/chat/completions"
-    try:
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {token}"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = _json.loads(resp.read())
-        text = (data.get("choices", [{}])[0]
-                .get("message", {}).get("content", "").strip())
-        return text[:500]
-    except Exception as e:  # noqa: BLE001
-        print(f"[her_day] proxy caption failed: {e}", flush=True)
-        return ""
+    text = ""
+    if token:
+        if partner_names:
+            prompt = (
+                f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
+                f"Write a short Instagram-story caption (1-2 sentences, casual, "
+                f"flirty, no hashtags) for this moment: {desc}. "
+                f"You're hanging out with {', '.join(partner_names)} — mention them "
+                f"naturally. Sound like a real girl, not a bot. No emoji spam (max 1)."
+            )
+        else:
+            prompt = (
+                f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
+                f"Write a short Instagram-story caption (1-2 sentences, casual, "
+                f"flirty, no hashtags) for this moment: {desc}. "
+                f"Sound like a real girl, not a bot. No emoji spam (max 1)."
+            )
+        payload = _json.dumps({
+            "model": "gemini-3.1-flash-lite",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.9,
+            "max_tokens": 100,
+        }).encode()
+        url = config.PUBLIC_APP_URL.rstrip("/") + "/v1/chat/completions"
+        try:
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {token}"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read())
+            text = (data.get("choices", [{}])[0]
+                    .get("message", {}).get("content", "").strip())[:500]
+        except Exception as e:  # noqa: BLE001
+            print(f"[her_day] proxy caption failed: {e}", flush=True)
+    if not text:
+        text = _fallback_caption(girl_name, moment_key, partner_names)
+    if cache_key:
+        _caption_cache[cache_key] = text
+    return text
 
 
-def _fallback_caption(girl_name: str, moment_key: str) -> str:
+def _fallback_caption(girl_name: str, moment_key: str,
+                      partner_names: list[str]) -> str:
     """Local fallback captions when the proxy is unavailable."""
+    partner_bit = (f" with {', '.join(partner_names)}"
+                   if partner_names else "")
     fallbacks = {
         "morning_coffee": f"morning... coffee first, then I'll be human",
         "gym": f"just crushed my workout, feeling amazing",
@@ -233,6 +330,10 @@ def _fallback_caption(girl_name: str, moment_key: str) -> str:
         "out_and_about": f"out with the girls, miss you though",
         "getting_ready": f"getting ready... which outfit do you like?",
         "bedtime": f"about to crawl into bed, thinking of you",
+        "gym_buddies": f"gym with{partner_bit}, she pushed me so hard",
+        "coffee_date": f"coffee date{partner_bit}, she stole my fries lol",
+        "night_out": f"out tonight{partner_bit}, living our best lives",
+        "cooking_together": f"cooking{partner_bit}, taste tester needed",
         "voice_rant": f"okay I need to vent about my day",
         "shower_thought": f"had the weirdest thought in the shower today",
         "craving": f"I'm craving something so bad right now",
@@ -240,13 +341,36 @@ def _fallback_caption(girl_name: str, moment_key: str) -> str:
     return fallbacks.get(moment_key, f"thinking of you today")
 
 
+def _get_all_girls() -> list[dict[str, Any]]:
+    """All characters for Her Day: [{id, name, avatar_url}]."""
+    try:
+        from . import characters
+        chars = characters.get_characters()
+        return [{"id": c["id"], "name": c.get("name") or "Chloe",
+                 "avatar_url": c.get("avatar_url") or ""} for c in chars]
+    except Exception:
+        return [{"id": "chloe", "name": "Chloe", "avatar_url": ""}]
+
+
+def _moment_def(moment_key: str):
+    """Return (post_type, sfw_scene, caption_desc_template) for a moment."""
+    if moment_key in SOLO_MOMENTS:
+        return SOLO_MOMENTS[moment_key]
+    if moment_key in GROUP_MOMENTS:
+        return GROUP_MOMENTS[moment_key]
+    post_type, desc = TEXT_MOMENTS[moment_key]
+    return (post_type, None, desc)
+
+
 def generate_for_user_girl(user_id: str, girl_id: str,
-                           girl_name: str = "Chloe") -> list[dict[str, Any]]:
+                           girl_name: str = "Chloe",
+                           plan: list[tuple] | None = None,
+                           girl_map: dict[str, dict] | None = None,
+                           date_str: str | None = None) -> list[dict[str, Any]]:
     """Generate today's Her Day posts for one user+girl pair.
 
-    Returns the list of created post rows. Skips if already generated today.
-    Visuals are SFW Sogni generations (cached per girl+day+moment); any
-    failure falls back to a text card. The Give library is never used.
+    plan: [(moment_key, is_group, partner_ids, partner_names)] from
+    _build_all_plans. If None, builds a solo-only plan for this girl.
     """
     conn = db.connect()
     try:
@@ -254,37 +378,42 @@ def generate_for_user_girl(user_id: str, girl_id: str,
         if store.her_day_exists_today(conn, user_id, girl_id):
             return []
         gid = (girl_id or "chloe").strip().lower() or "chloe"
-        avatar_url = ""
-        try:
-            from . import characters
-            character = characters.get_character(gid)
-            avatar_url = character.get("avatar_url") or ""
-            girl_name = character.get("name") or girl_name
-        except Exception:
-            pass
-        weekday = datetime.now().weekday()
-        pool = DAY_MOMENTS.get(weekday, DAY_MOMENTS[0])
-        # Pick 3-5 moments, always include morning + bedtime bookends
-        picks = ["morning_coffee"]
-        middle = [m for m in pool if m not in ("morning_coffee", "bedtime")]
-        picks += random.sample(middle, min(len(middle), random.randint(1, 3)))
-        picks.append("bedtime")
-        # Ensure one voice note per day
-        if "voice_rant" not in picks and random.random() < 0.7:
-            picks.insert(-1, "voice_rant")
+        date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        girl_map = girl_map or {}
+
+        # Resolve this girl's info
+        ginfo = girl_map.get(gid) or {"id": gid, "name": girl_name,
+                                      "avatar_url": ""}
+        girl_name = ginfo.get("name") or girl_name
+        avatar_url = ginfo.get("avatar_url") or ""
+
+        if plan is None:
+            all_girls = _get_all_girls()
+            plan = _plan_day(gid, date_str, all_girls)
 
         posts = []
-        for moment_key in picks:
-            post_type, sfw_scene, desc = MOMENTS[moment_key]
+        for (moment_key, is_group, pids, pnames) in plan:
+            post_type, sfw_scene, desc_tpl = _moment_def(moment_key)
+            desc = (desc_tpl.format(partners=", ".join(pnames))
+                    if is_group and "{partners}" in desc_tpl else desc_tpl)
             media_url = ""
             voice_url = ""
+
             if post_type == "image" and sfw_scene:
+                if is_group:
+                    names = [girl_name] + pnames
+                    participants = [gid] + pids
+                else:
+                    names = [girl_name]
+                    participants = [gid]
                 media_url = _generate_sfw_image(
-                    girl_name, avatar_url, gid, moment_key, sfw_scene)
+                    names, avatar_url, participants,
+                    moment_key, sfw_scene, date_str)
                 # Empty media_url -> frontend renders a styled text card.
-            caption = _generate_caption(girl_name, moment_key, desc)
-            if not caption:
-                caption = _fallback_caption(girl_name, moment_key)
+
+            cache_key = (gid, date_str, moment_key, tuple(sorted(pids)))
+            caption = _generate_caption(girl_name, moment_key, desc,
+                                        pnames, cache_key)
             if post_type == "voice":
                 try:
                     from . import voice as _voice
@@ -302,36 +431,46 @@ def generate_for_user_girl(user_id: str, girl_id: str,
         conn.close()
 
 
-def generate_daily() -> dict[str, Any]:
-    """Generate Her Day posts for all active user+girl pairs.
+def generate_for_all_girls(user_id: str) -> int:
+    """Generate today's Her Day for EVERY girl for one user.
 
-    Called by the 6 AM cron. Iterates users and their selected girls.
+    Returns the total number of posts created.
+    """
+    all_girls = _get_all_girls()
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    plans = _build_all_plans(all_girls, date_str)
+    girl_map = {g["id"]: g for g in all_girls}
+    total = 0
+    for g in all_girls:
+        posts = generate_for_user_girl(
+            user_id, g["id"], g["name"],
+            plan=plans.get(g["id"], []),
+            girl_map=girl_map,
+            date_str=date_str,
+        )
+        total += len(posts)
+    return total
+
+
+def generate_daily() -> dict[str, Any]:
+    """Generate Her Day posts for all users x all girls.
+
+    Called by the 6 AM cron.
     """
     conn = db.connect()
-    report: dict[str, Any] = {"generated": 0, "skipped": 0, "errors": []}
     try:
-        users = [dict(r) for r in conn.execute(
+        users = [r["user_id"] for r in conn.execute(
             "SELECT user_id FROM users").fetchall()]
-        for user in users:
-            uid = user["user_id"]
-            # Get the user's girls (from girl_selection or default to chloe)
-            try:
-                girls = [dict(r) for r in conn.execute(
-                    "SELECT DISTINCT girl_id FROM her_day_posts"
-                    " WHERE user_id = ?", (uid,)).fetchall()]
-                girl_ids = [g["girl_id"] for g in girls] or ["chloe"]
-            except Exception:
-                girl_ids = ["chloe"]
-            for gid in girl_ids:
-                try:
-                    posts = generate_for_user_girl(uid, gid)
-                    if posts:
-                        report["generated"] += len(posts)
-                    else:
-                        report["skipped"] += 1
-                except Exception as e:  # noqa: BLE001
-                    report["errors"].append(f"{uid}/{gid}: {e}")
-        conn.commit()
     finally:
         conn.close()
+    report: dict[str, Any] = {"generated": 0, "skipped": 0, "errors": []}
+    for uid in users:
+        try:
+            n = generate_for_all_girls(uid)
+            if n:
+                report["generated"] += n
+            else:
+                report["skipped"] += 1
+        except Exception as e:  # noqa: BLE001
+            report["errors"].append(f"{uid}: {e}")
     return report

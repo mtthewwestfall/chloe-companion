@@ -114,6 +114,12 @@ const ApiClient = (() => {
     return data.requests || [];
   }
 
+  async function characters() {
+    const data = await request('GET', '/api/v1/characters');
+    setConnected(true);
+    return data.characters || [];
+  }
+
   async function herDay(girlId) {
     const q = girlId ? '?girl_id=' + encodeURIComponent(girlId) : '';
     const data = await request('GET', '/api/v1/her-day' + q);
@@ -127,11 +133,11 @@ const ApiClient = (() => {
     } catch (e) { /* non-critical */ }
   }
 
-  async function herDayGenerate(girlId) {
-    const data = await request('POST', '/api/v1/her-day/generate', { girl_id: girlId });
+  async function herDayGenerate() {
+    const data = await request('POST', '/api/v1/her-day/generate', {});
     setConnected(true);
     return data;
   }
 
-  return { probe, chat, me, shows, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, onStatus, isConnected: () => connected };
+  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, onStatus, isConnected: () => connected };
 })();
