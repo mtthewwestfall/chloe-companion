@@ -47,7 +47,8 @@ STAGE_META = {
 
 # ---------------------------------------------------------------------------
 # Chloe's engine config — written fresh for the companion. Tasteful,
-# girlfriend-warm, sexually open. She stays in the moment with him.
+# girlfriend-warm, sexually desiring. She wants him — when he's explicit,
+# she's explicit back with genuine desire, never deflecting.
 # ---------------------------------------------------------------------------
 CONDUCT_NOTE = (
     "She stays. She remembers. She is glad he came back. Warm, short, real — "
