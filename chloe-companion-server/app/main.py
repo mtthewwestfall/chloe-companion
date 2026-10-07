@@ -2474,3 +2474,118 @@ def _handle_jvzoo_ipn(form: dict[str, str]) -> dict[str, Any]:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Gemini key-manager proxy — shared pool for the other apps (creator bot,
+# God Town, Roof Rover). Uses the admin-managed key pool in app/gemini_keys.py
+# (free keys first, paid fallback, transparent failover on 429/402/errors).
+#
+# Service-to-service auth: callers must send
+#     Authorization: Bearer <GEMINI_PROXY_TOKEN>
+# Set GEMINI_PROXY_TOKEN as a Railway env var on the companion service.
+# Without it the proxy returns 503; a wrong token returns 401. This keeps
+# random internet users from burning the key pool.
+# ---------------------------------------------------------------------------
+_GEMINI_PROXY_TOKEN = os.environ.get("GEMINI_PROXY_TOKEN", "")
+_GEMINI_PROXY_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+_GEMINI_PROXY_DEFAULT_MODEL = "gemini-3.1-flash-lite"
+
+
+def _require_proxy_token(request: Request):
+    if not _GEMINI_PROXY_TOKEN:
+        raise HTTPException(status_code=503, detail="proxy_not_configured")
+    auth = (request.headers.get("authorization") or "").strip()
+    if not auth.startswith("Bearer ") or auth[7:].strip() != _GEMINI_PROXY_TOKEN:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.post("/v1beta/models/{model}:generateContent")
+def proxy_gemini_generate_content(model: str, body: dict, request: Request):
+    """Gemini native passthrough through the shared key pool."""
+    _require_proxy_token(request)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body_must_be_json_object")
+    url = "%s/%s:generateContent" % (_GEMINI_PROXY_BASE, model)
+    data = gemini_keys.post_json(url, body, timeout=60)
+    if data is None:
+        raise HTTPException(status_code=502, detail="all_keys_failed")
+    return data
+
+
+def _openai_messages_to_gemini(body):
+    messages = body.get("messages") or []
+    system_parts = []
+    contents = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(b.get("text", "")) for b in content if isinstance(b, dict))
+        text = str(content or "")
+        if role == "system":
+            system_parts.append(text)
+        elif role == "assistant":
+            contents.append({"role": "model", "parts": [{"text": text}]})
+        else:
+            contents.append({"role": "user", "parts": [{"text": text}]})
+    payload = {"contents": contents}
+    if system_parts:
+        payload["system_instruction"] = {
+            "parts": [{"text": "\n".join(system_parts)}]}
+    gen = {}
+    if body.get("temperature") is not None:
+        try:
+            gen["temperature"] = float(body["temperature"])
+        except (TypeError, ValueError):
+            pass
+    if body.get("max_tokens") is not None:
+        try:
+            gen["maxOutputTokens"] = int(body["max_tokens"])
+        except (TypeError, ValueError):
+            pass
+    if gen:
+        payload["generationConfig"] = gen
+    return payload
+
+
+@app.post("/v1/chat/completions")
+def proxy_openai_chat_completions(body: dict, request: Request):
+    """OpenAI-compatible chat completions via the shared Gemini key pool."""
+    _require_proxy_token(request)
+    if not isinstance(body, dict) or not body.get("messages"):
+        raise HTTPException(status_code=400, detail="messages_required")
+    model = body.get("model") or _GEMINI_PROXY_DEFAULT_MODEL
+    if model == "default":
+        model = _GEMINI_PROXY_DEFAULT_MODEL
+    payload = _openai_messages_to_gemini(body)
+    url = "%s/%s:generateContent" % (_GEMINI_PROXY_BASE, model)
+    data = gemini_keys.post_json(url, payload, timeout=60)
+    if data is None:
+        raise HTTPException(status_code=502, detail="all_keys_failed")
+    text, finish = "", "STOP"
+    try:
+        cand = data["candidates"][0]
+        parts = cand["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts if p.get("text"))
+        finish = cand.get("finishReason", "STOP")
+    except (KeyError, IndexError, TypeError):
+        pass
+    usage = data.get("usageMetadata") or {}
+    return {
+        "id": "chatcmpl-" + os.urandom(8).hex(),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop" if finish == "STOP" else str(finish).lower(),
+        }],
+        "usage": {
+            "prompt_tokens": usage.get("promptTokenCount", 0),
+            "completion_tokens": usage.get("candidatesTokenCount", 0),
+            "total_tokens": usage.get("totalTokenCount", 0),
+        },
+    }
