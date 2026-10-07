@@ -1119,8 +1119,7 @@ async def admin_girl_media_delete(media_id: int, request: Request):
 
 # Seed hardcoded clips into DB on first admin list (one-time migration).
 
-# Give clips - curated Whispr library (2026-10-06)
-# Only the clips kept in the Whispr app, not deleted ones
+# Give clips - curated Whispr library (videos only)
 GIVE_CLIPS = {
     ("chloe", "give"): [
         {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_1e67ecdd0b6dd10e.mp4", "media_type": "video"},
@@ -1135,14 +1134,6 @@ GIVE_CLIPS = {
         {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_047cbcdc1f355d69.mp4", "media_type": "video"},
         {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_203ac67b50de4957.mp4", "media_type": "video"},
         {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_fc09897b4cc6bbcc.mp4", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_a3c57f622a456890.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_ab925aac92e46294.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_99e3a4b513e9904e.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_9aac3297b371409b.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_cd7ec1022daa8ed9.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_1a2f3653b08f44a2.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_9c11fd3c3077844d.jpg", "media_type": "video"},
-        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_a12cdb3bc8a0e7b4.jpg", "media_type": "video"},
     ],
     ("mara", "give"): [
         {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_6376c4a666c4d00a.mp4", "media_type": "video"},
