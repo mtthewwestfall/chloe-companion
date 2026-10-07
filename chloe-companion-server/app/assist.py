@@ -166,7 +166,8 @@ def detect_intent(text: str) -> tuple[str | None, dict]:
 def _gemini_post(payload: dict, timeout: int = 30) -> dict | None:
     # Key rotation (app/gemini_keys.py): free keys first, paid fallback,
     # transparent failover. None when the pool is exhausted.
-    return gemini_keys.post_json(_GEMINI_URL, payload, timeout=timeout)
+    return gemini_keys.post_json(_GEMINI_URL, payload, timeout=timeout,
+                                     source="whispr-web")
 
 
 _REDIRECT_HOST = "vertexaisearch.cloud.google.com/grounding-api-redirect/"

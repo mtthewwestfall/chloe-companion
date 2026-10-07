@@ -90,6 +90,7 @@ def _gemini_text(prompt: str, timeout: int = 30) -> str | None:
             "generationConfig": {"temperature": 0.7, "maxOutputTokens": 300},
         },
         timeout=timeout,
+        source="creator-bot",
     )
     if not data:
         return None
