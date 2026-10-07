@@ -74,7 +74,9 @@ CREATE TABLE IF NOT EXISTS gemini_key_usage (
 
 
 def _now_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    # Microsecond precision so back-to-back calls within the same
+    # second still rotate correctly (ORDER BY last_used_at ASC).
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _ensure_table(conn) -> None:
