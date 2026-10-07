@@ -5,6 +5,8 @@ only, used when every free key is exhausted, failing, or disabled.
 
 Health model per key:
 - consecutive_failures: reset on any success.
+- last_used_at: round-robin rotation — least-recently-used eligible key
+  is picked first (within free tier, then paid tier).
 - 429 / quota errors: exponential backoff via quota_exhausted_until
   (5 min, 15 min, 1 h, 4 h). The key is skipped until the window passes,
   then retried automatically.
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS gemini_keys (
     total_failures       INTEGER NOT NULL DEFAULT 0,
     quota_exhausted_until TEXT,
     needs_attention      INTEGER NOT NULL DEFAULT 0,
+    last_used_at         TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 )
 """
@@ -66,6 +69,11 @@ def _now_str() -> str:
 
 def _ensure_table(conn) -> None:
     conn.execute(_CREATE_TABLE)
+    # Migration: add last_used_at to pre-existing tables
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(gemini_keys)").fetchall()]
+    if "last_used_at" not in cols:
+        conn.execute("ALTER TABLE gemini_keys ADD COLUMN last_used_at TEXT")
+        conn.commit()
 
 
 def _key_hash(key_value: str) -> str:
@@ -107,8 +115,9 @@ def _eligible_rows(conn):
              AND (quota_exhausted_until IS NULL
                   OR quota_exhausted_until <= datetime('now'))
            ORDER BY is_paid ASC,
+                    last_used_at ASC,
                     consecutive_failures ASC,
-                    last_failure_at ASC"""
+                    id ASC"""
     ).fetchall()
 
 
@@ -124,9 +133,29 @@ def get_candidate_keys() -> list[tuple[int, str]]:
 
 
 def get_key() -> tuple[int, str] | None:
-    """Best available key, or None when the pool is empty/exhausted."""
+    """Next key in round-robin rotation, or None when pool is exhausted.
+
+    Returns the least-recently-used eligible key (free tier first) and
+    marks it used so the next call rotates to a different key. This
+    distributes load across all keys instead of hammering the first one.
+    """
     cands = get_candidate_keys()
-    return cands[0] if cands else None
+    if not cands:
+        return None
+    key_id, key_value = cands[0]
+    # Mark as used so rotation advances even if caller doesn't use post_json
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            conn.execute(
+                "UPDATE gemini_keys SET last_used_at = ? WHERE id = ?",
+                (_now_str(), key_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return (key_id, key_value)
 
 
 def report_success(key_id: int) -> None:
@@ -138,10 +167,11 @@ def report_success(key_id: int) -> None:
                 """UPDATE gemini_keys
                    SET consecutive_failures = 0,
                        last_success_at = ?,
+                       last_used_at = ?,
                        total_requests = total_requests + 1,
                        quota_exhausted_until = NULL
                    WHERE id = ?""",
-                (_now_str(), key_id),
+                (_now_str(), _now_str(), key_id),
             )
             conn.commit()
         finally:
