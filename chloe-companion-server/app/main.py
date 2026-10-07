@@ -1123,15 +1123,92 @@ async def admin_girl_media_delete(media_id: int, request: Request):
 
 
 # Seed hardcoded clips into DB on first admin list (one-time migration).
+
+# Give clips seeded from Keyhole (2026-10-06)
+GIVE_CLIPS = {
+    ("chloe", "give"): [
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_1e67ecdd0b6dd10e.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_c917d49a514c5329.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_66c98753a458c922.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_685e3e81d92264e3.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_5b254cf0206883c7.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_7948798a732e5b08.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_b73f6785d7836c9f.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_c2f202118151d0f3.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_f3d2cbd7bfe0cb17.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_047cbcdc1f355d69.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_203ac67b50de4957.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_fc09897b4cc6bbcc.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_a3c57f622a456890.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_ab925aac92e46294.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_99e3a4b513e9904e.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_9aac3297b371409b.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_cd7ec1022daa8ed9.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_1a2f3653b08f44a2.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_9c11fd3c3077844d.jpg", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/chloe_a12cdb3bc8a0e7b4.jpg", "media_type": "video"},
+    ],
+    ("mara", "give"): [
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_6376c4a666c4d00a.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_758a668ad2735c7e.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_6bc4d10daeb3c44e.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_f9bb24d45d2f0c9a.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_7a5f013092b3b1aa.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_c7d7dc387952af4b.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_70cfa89478fa8c07.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_ff149c86e581d45f.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_b5761852a13238e4.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_8929d9f7ebb323db.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_91b49687da47b47b.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_84f5543c4fb314ed.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_9ef2c129967e2543.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_0269893f79f3f04c.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_1cc18f36e3404d19.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_135b22ec9435330f.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_bf2d4e6a22542650.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_1a10870031b9ee4f.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_729db445657050ba.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/mara_b3c2818d54075336.mp4", "media_type": "video"},
+    ],
+    ("isabella", "give"): [
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_0f7bb9353e2afac6.mov", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_ad39918b1ccd986c.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_0d66e50cf0a582a2.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_04a933a64d71897b.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_1b08decc86290589.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_7251e13f78b044e2.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_7f3e2759a54a6903.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_1058ffec56f7d37a.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_ba0cc70c4e4f32de.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_982aaaabc5b710d2.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_a5994f3f320bb198.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_6cbb2806075dddab.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_f166d83c367aa6ba.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_fe164382e465c9fc.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_a7489e13f772766b.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_c2779ed79b936f93.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_28c528a111ede543.mp4", "media_type": "video"},
+        {"url": "https://keyhole-latest-production.up.railway.app/media/files/isabella_4aded84b5d08ba1c.mp4", "media_type": "video"},
+    ],
+}
+
 def _seed_girl_media(conn):
+    # Seed love clips from PRESET_CLIPS (original behavior)
     existing = conn.execute("SELECT COUNT(*) AS c FROM girl_media").fetchone()
-    if existing and existing["c"] > 0:
-        return
-    for (girl, preset), clips in PRESET_CLIPS.items():
-        for clip in clips:
-            conn.execute(
-                "INSERT INTO girl_media (girl_id, kind, url, preset) VALUES (?, 'give', ?, ?)",
-                (girl, clip["url"], preset))
+    if not existing or existing["c"] == 0:
+        for (girl, preset), clips in PRESET_CLIPS.items():
+            for clip in clips:
+                conn.execute(
+                    "INSERT INTO girl_media (girl_id, kind, url, preset) VALUES (?, 'give', ?, ?)",
+                    (girl, clip["url"], preset))
+    # Always ensure give clips exist (seeded from Keyhole)
+    give_count = conn.execute("SELECT COUNT(*) AS c FROM girl_media WHERE preset = 'give'").fetchone()
+    if not give_count or give_count["c"] == 0:
+        for (girl, preset), clips in GIVE_CLIPS.items():
+            for clip in clips:
+                conn.execute(
+                    "INSERT INTO girl_media (girl_id, kind, url, preset) VALUES (?, 'video', ?, ?)",
+                    (girl, clip["url"], preset))
     conn.commit()
 
 
