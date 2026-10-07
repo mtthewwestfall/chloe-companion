@@ -10,7 +10,10 @@ Health model per key:
   then retried automatically.
 - 402 / payment errors: needs_attention = 1 (surfaced in admin); the key
   is skipped until an admin re-enables or fixes it.
-- Other errors (5xx, network): counted, deprioritized, but retried soon.
+- Other errors (5xx, network, timeout): counted, 2-minute backoff applied
+  so the next request immediately tries a different key instead of
+  retrying the same failing key. The key becomes eligible again quickly
+  if the issue was transient.
 
 Thread-safe: a module-level lock guards key selection and counter
 updates. Network I/O happens outside the lock. Each call opens and closes
@@ -184,14 +187,21 @@ def report_failure(key_id: int, error_type: str) -> None:
                     (failures, _now_str(), key_id),
                 )
             else:
+                # "Other" errors (5xx, timeout, network): apply a short 2-minute
+                # backoff so the next request immediately tries a different key
+                # instead of retrying this same failing key. The key becomes
+                # eligible again quickly if the issue was transient.
+                until = (datetime.now(timezone.utc)
+                         + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
                 conn.execute(
                     """UPDATE gemini_keys
                        SET consecutive_failures = ?,
                            last_failure_at = ?,
                            total_requests = total_requests + 1,
-                           total_failures = total_failures + 1
+                           total_failures = total_failures + 1,
+                           quota_exhausted_until = ?
                        WHERE id = ?""",
-                    (failures, _now_str(), key_id),
+                    (failures, _now_str(), until, key_id),
                 )
             conn.commit()
         finally:
@@ -226,15 +236,40 @@ def _classify_http_error(code: int | None) -> str:
     return "other"
 
 
+def _all_active_keys() -> list[tuple[int, str]]:
+    """All active keys ignoring backoff windows, free first.
+    Last-resort pool when every key is cooling down."""
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            rows = conn.execute(
+                """SELECT id, key_value
+                   FROM gemini_keys
+                   WHERE is_active = 1 AND needs_attention = 0
+                   ORDER BY is_paid ASC, consecutive_failures ASC, id ASC"""
+            ).fetchall()
+            return [(r["id"], r["key_value"]) for r in rows]
+        finally:
+            conn.close()
+
+
 def post_json(url: str, payload: dict, timeout: int = 30) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Tries each eligible key in order (free first, healthiest first). On a
-    failure the key's health is recorded and the next key is tried
-    immediately. Returns the parsed JSON response, or None when every key
-    failed / no keys exist.
+    failure the key's health is recorded (with backoff so the next request
+    skips it) and the next key is tried immediately. If every eligible key
+    is cooling down, falls back to trying all active keys ignoring backoff
+    as a last resort. Returns the parsed JSON response, or None when every
+    key failed / no keys exist.
     """
-    for key_id, key_value in get_candidate_keys():
+    candidates = get_candidate_keys()
+    if not candidates:
+        # Last resort: all keys are cooling down — try them anyway
+        # ignoring backoff rather than failing the request outright.
+        candidates = _all_active_keys()
+    for key_id, key_value in candidates:
         req = urllib.request.Request(
             url, data=json.dumps(payload).encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json",
