@@ -956,6 +956,12 @@ async def preset_video(body: PresetVideoIn, request: Request):
     if not clips:
         clips = PRESET_CLIPS.get(key, [])
     if not clips:
+        # Fallback to GIVE_CLIPS (seeded from Keyhole)
+        try:
+            clips = GIVE_CLIPS.get(key, [])
+        except NameError:
+            clips = []
+    if not clips:
         raise HTTPException(status_code=404, detail="no clips for preset")
     pool = fresh or clips
     # Avoid immediate repeats (anonymous)
