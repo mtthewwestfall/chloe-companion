@@ -30,6 +30,26 @@
   .add-girl input { padding: 10px; border-radius: 8px; border: 1px solid #333; background: #0a0a0f; color: #fff; font-size: 14px; margin-right: 8px; }
   .add-girl button { padding: 10px 20px; border-radius: 8px; border: none; background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; cursor: pointer; font-weight: 600; }
   .hidden { display: none; }
+  .key-card { background: #0a0a0f; border: 1px solid #333; border-radius: 10px; padding: 12px; margin-bottom: 10px; font-size: 13px; }
+  .key-card .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .key-label { font-weight: 700; font-size: 14px; }
+  .key-masked { color: #888; font-family: monospace; font-size: 12px; }
+  .badge { padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+  .badge-free { background: #1a3a5c; color: #6ab0ff; }
+  .badge-paid { background: linear-gradient(135deg,#ff4d8d,#a855f7); color: #fff; }
+  .st-healthy { background: #0f2f1a; color: #51cf66; border: 1px solid #51cf66; }
+  .st-degraded { background: #3a2f0f; color: #ffd43b; border: 1px solid #ffd43b; }
+  .st-cooling_down { background: #3a200f; color: #ff922b; border: 1px solid #ff922b; }
+  .st-disabled { background: #222; color: #888; border: 1px solid #555; }
+  .st-needs_attention { background: #3a0f0f; color: #ff6b6b; border: 1px solid #ff6b6b; }
+  .key-stats { color: #888; font-size: 12px; margin-top: 6px; line-height: 1.6; }
+  .key-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .key-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid #444; background: #222; color: #ddd; cursor: pointer; font-size: 12px; }
+  .key-btn:hover { border-color: #888; }
+  .key-btn.danger { border-color: #ff6b6b; color: #ff6b6b; background: transparent; }
+  .key-btn.danger:hover { background: #ff6b6b; color: #000; }
+  .key-card.key-active { border-color: #51cf66; box-shadow: 0 0 0 1px #51cf66 inset; }
+  .active-dot { color: #51cf66; font-weight: 700; font-size: 11px; text-transform: uppercase; }
   .preset-tag { background: #2a2a35; padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #ff4d8d; }
   .stage-tag { background: #1a3a5c; padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #6ab0ff; }
   .stage-btns { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
@@ -67,6 +87,7 @@
     <button class="tab active" onclick="showTab('media')">Media Library</button>
     <button class="tab" onclick="showTab('girls')">Characters</button>
     <button class="tab" onclick="showTab('accounts')">Accounts</button>
+    <button class="tab" onclick="showTab('keys')">Gemini Keys</button>
   </div>
 
   <div id="tab-media">
@@ -106,6 +127,24 @@
       </table>
     </div>
   </div>
+
+  <div id="tab-keys" class="hidden">
+    <div class="girl-card">
+      <div class="girl-name">Gemini API Keys</div>
+      <div class="sub" style="margin-bottom:12px;">Free keys are tried first &mdash; paid keys are fallback only. Failover is automatic, no delay. <span id="keyActiveNote" style="color:#51cf66;"></span></div>
+      <div id="keyList"></div>
+      <div class="add-girl" style="margin-top:16px;">
+        <div style="font-weight:700;margin-bottom:8px;">Add Key</div>
+        <input type="password" id="newKeyValue" placeholder="Gemini API key" style="width:100%;margin-bottom:8px;">
+        <input id="newKeyLabel" placeholder="Label (e.g. free-1)" style="margin-bottom:8px;">
+        <select id="newKeyPaid" style="padding:10px;border-radius:8px;border:1px solid #333;background:#0a0a0f;color:#fff;font-size:14px;">
+          <option value="free">Free</option>
+          <option value="paid">Paid (fallback)</option>
+        </select>
+        <button onclick="addGeminiKey()" style="margin-top:8px;">+ Add Key</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -134,7 +173,9 @@ function showTab(t) {
   document.getElementById('tab-media').classList.toggle('hidden', t !== 'media');
   document.getElementById('tab-girls').classList.toggle('hidden', t !== 'girls');
   document.getElementById('tab-accounts').classList.toggle('hidden', t !== 'accounts');
+  document.getElementById('tab-keys').classList.toggle('hidden', t !== 'keys');
   if (t === 'accounts') loadAccounts();
+  if (t === 'keys') loadGeminiKeys();
 }
 
 async function api(method, path, body) {
@@ -268,6 +309,98 @@ async function grantMonth(userId, tier) {
   const res = await api('POST', '/api/v1/admin/grant-month', { user_id: userId, tier });
   if (res.ok) { alert(`Granted! Expires ${res.vip_expires_at}`); loadAccounts(); }
 }
+
+let geminiKeys = [];
+let keyRefreshTimer = null;
+
+async function loadGeminiKeys() {
+  try {
+    const data = await api('GET', '/api/v1/admin/gemini-keys');
+    geminiKeys = data.keys || [];
+  } catch (e) {
+    geminiKeys = [];
+  }
+  renderGeminiKeys();
+}
+
+function keyStatusLabel(s) {
+  return {healthy:'Healthy',degraded:'Degraded',cooling_down:'Cooling down',disabled:'Disabled',needs_attention:'Needs attention'}[s] || s;
+}
+
+function fmtTime(t) { return t ? new Date(String(t).replace(' ','T') + 'Z').toLocaleString() : '\u2014'; }
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function renderGeminiKeys() {
+  // Backend picks the first usable candidate (free keys first). Mirror it here.
+  let activeId = null;
+  for (const k of geminiKeys) {
+    if (k.is_active && (k.status === 'healthy' || k.status === 'degraded')) { activeId = k.id; break; }
+  }
+  document.getElementById('keyActiveNote').textContent = activeId ? '\u25CF Preferred key: ' + escapeHtml((geminiKeys.find(k => k.id === activeId) || {}).label || ('id ' + activeId)) : '';
+  const html = geminiKeys.map(k => {
+    const isOne = k.id === activeId;
+    return `<div class="key-card${isOne ? ' key-active' : ''}">
+      <div class="row">
+        <span class="key-label">${escapeHtml(k.label || ('key ' + k.id))}</span>
+        <span class="badge ${k.is_paid ? 'badge-paid' : 'badge-free'}">${k.is_paid ? 'Paid' : 'Free'}</span>
+        <span class="badge st-${k.status}">${keyStatusLabel(k.status)}</span>
+        ${isOne ? '<span class="active-dot">\u25CF in use</span>' : ''}
+        <span class="key-masked">${escapeHtml(k.key_masked || '')}</span>
+      </div>
+      <div class="key-stats">
+        Requests: ${k.total_requests ?? 0} &middot; Failures: ${k.total_failures ?? 0} &middot; Consecutive fails: ${k.consecutive_failures ?? 0}
+        <br>Last success: ${fmtTime(k.last_success_at)} &middot; Last failure: ${fmtTime(k.last_failure_at)}
+        ${k.quota_exhausted_until ? `<br>Cooldown until: ${fmtTime(k.quota_exhausted_until)}` : ''}
+      </div>
+      <div class="key-actions">
+        <button class="key-btn" onclick="testGeminiKey(${k.id})">Test</button>
+        <button class="key-btn" onclick="toggleGeminiKey(${k.id}, ${k.is_active ? 'false' : 'true'})">${k.is_active ? 'Disable' : 'Enable'}</button>
+        <button class="key-btn danger" onclick="delGeminiKey(${k.id})">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('keyList').innerHTML = html || '<p style="color:#888;">No keys yet. Add one below &mdash; the existing GEMINI_API_KEY env var is seeded automatically as the paid fallback.</p>';
+}
+
+async function addGeminiKey() {
+  const key = document.getElementById('newKeyValue').value.trim();
+  const label = document.getElementById('newKeyLabel').value.trim();
+  const is_paid = document.getElementById('newKeyPaid').value === 'paid';
+  if (!key) return alert('Enter the API key');
+  const res = await api('POST', '/api/v1/admin/gemini-keys', { key, label, is_paid });
+  if (res.key) {
+    document.getElementById('newKeyValue').value = '';
+    document.getElementById('newKeyLabel').value = '';
+    loadGeminiKeys();
+  } else if (res.detail) alert('Error: ' + res.detail);
+}
+
+async function testGeminiKey(id) {
+  const res = await api('POST', `/api/v1/admin/gemini-keys/${id}/test`);
+  alert(res.ok ? 'OK \u2014 ' + res.status + (res.sample ? ': ' + res.sample : '')
+               : 'Failed \u2014 ' + res.status + (res.http_code ? ' (HTTP ' + res.http_code + ')' : '') + (res.error ? ': ' + res.error : ''));
+  loadGeminiKeys();
+}
+
+async function toggleGeminiKey(id, active) {
+  await api('PATCH', `/api/v1/admin/gemini-keys/${id}`, { is_active: active });
+  loadGeminiKeys();
+}
+
+async function delGeminiKey(id) {
+  if (!confirm('Delete this key?')) return;
+  await api('DELETE', `/api/v1/admin/gemini-keys/${id}`);
+  loadGeminiKeys();
+}
+
+function startKeyRefresh() {
+  if (keyRefreshTimer) clearInterval(keyRefreshTimer);
+  keyRefreshTimer = setInterval(() => {
+    if (!document.getElementById('tab-keys').classList.contains('hidden')) loadGeminiKeys();
+  }, 30000);
+}
+startKeyRefresh();
 </script>
 </body>
 </html>
