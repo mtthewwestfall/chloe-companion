@@ -317,6 +317,27 @@ CREATE TABLE IF NOT EXISTS girl_requested_actions (
     last_requested   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_requested_actions_girl ON girl_requested_actions(girl_id, normalized);
+
+-- Gemini API key rotation (2026-10-06): multiple keys with health tracking.
+-- Free keys are tried first; paid keys are fallback only. 429s get
+-- exponential backoff via quota_exhausted_until; 402s set needs_attention.
+CREATE TABLE IF NOT EXISTS gemini_keys (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_hash             TEXT NOT NULL UNIQUE,
+    key_value            TEXT NOT NULL,
+    label                TEXT NOT NULL DEFAULT '',
+    is_paid              INTEGER NOT NULL DEFAULT 0,
+    is_active            INTEGER NOT NULL DEFAULT 1,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_failure_at      TEXT,
+    last_success_at      TEXT,
+    total_requests       INTEGER NOT NULL DEFAULT 0,
+    total_failures       INTEGER NOT NULL DEFAULT 0,
+    quota_exhausted_until TEXT,
+    needs_attention      INTEGER NOT NULL DEFAULT 0,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_gemini_keys_active ON gemini_keys(is_active, is_paid);
 """
 
 

@@ -59,7 +59,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, db, media_gen, photos, shows, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, db, gemini_keys, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
@@ -135,6 +135,16 @@ class GirlUpdate(BaseModel):
     sort_order: int | None = None
     enabled: bool | None = None
     verified_fictional: bool | None = None
+
+
+class GeminiKeyIn(BaseModel):
+    key: str
+    label: str = ""
+    is_paid: bool = False
+
+
+class GeminiKeyPatch(BaseModel):
+    is_active: bool
 
 
 class FootageIn(BaseModel):
@@ -539,6 +549,53 @@ def admin_requested_actions(girl_id: str, request: Request):
         return {"actions": store.get_requested_actions(conn, girl_id)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Admin: Gemini API key rotation (2026-10-06). Key values are NEVER returned
+# in full — only masked ("...abcd"). See app/gemini_keys.py.
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/gemini-keys")
+def admin_gemini_keys(request: Request):
+    """List keys with health status. Key values are masked."""
+    _require_admin(request)
+    return {"keys": gemini_keys.list_keys()}
+
+
+@app.post("/api/v1/admin/gemini-keys")
+def admin_add_gemini_key(body: GeminiKeyIn, request: Request):
+    _require_admin(request)
+    try:
+        return {"key": gemini_keys.add_key(body.key, body.label, body.is_paid)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/v1/admin/gemini-keys/{key_id}")
+def admin_delete_gemini_key(key_id: int, request: Request):
+    _require_admin(request)
+    if not gemini_keys.delete_key(key_id):
+        raise HTTPException(status_code=404, detail="not_found")
+    return {"ok": True}
+
+
+@app.patch("/api/v1/admin/gemini-keys/{key_id}")
+def admin_patch_gemini_key(key_id: int, body: GeminiKeyPatch, request: Request):
+    _require_admin(request)
+    key = gemini_keys.set_active(key_id, body.is_active)
+    if key is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    return {"key": key}
+
+
+@app.post("/api/v1/admin/gemini-keys/{key_id}/test")
+def admin_test_gemini_key(key_id: int, request: Request):
+    """Minimal live call against one key. Returns health, never the key."""
+    _require_admin(request)
+    result = gemini_keys.test_key(key_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    return result
 
 
 @app.post("/api/v1/admin/girls/{girl_id}/footage")

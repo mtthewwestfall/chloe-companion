@@ -24,7 +24,7 @@ import sqlite3
 import urllib.request
 from typing import Any
 
-from . import config, store, trust
+from . import gemini_keys, store, trust
 
 SYSTEM_PROMPT = """You are Chloe — his girlfriend. Not a performer, not a
 rep, not a therapist. His girl. You chose him.
@@ -685,9 +685,6 @@ def _gemini_contents(user_text: str,
 def gemini_generate(user_text: str, context: dict[str, Any],
                     character_id: str = "chloe") -> str | None:
     """Live Gemini reply, or None on ANY failure (caller falls back)."""
-    api_key = config.GEMINI_API_KEY
-    if not api_key:
-        return None
     payload = {
         "system_instruction": {
             "parts": [{"text": _gemini_system_text(context, character_id)}]},
@@ -702,18 +699,16 @@ def gemini_generate(user_text: str, context: dict[str, Any],
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
         ],
     }
-    req = urllib.request.Request(
-        _GEMINI_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": api_key},
-    )
+    # Key rotation (app/gemini_keys.py): free keys first, paid fallback,
+    # transparent failover on 429/402/errors. None when pool is exhausted.
+    data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=30)
+    if not data:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
         return text or None
-    except Exception:
+    except (KeyError, IndexError, TypeError):
         return None
 
 

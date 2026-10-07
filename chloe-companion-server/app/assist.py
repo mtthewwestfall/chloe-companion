@@ -26,7 +26,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import config
+from . import gemini_keys
 
 # ---------------------------------------------------------------------------
 # Tier capability matrix — higher tier, more she can do.
@@ -164,19 +164,9 @@ def detect_intent(text: str) -> tuple[str | None, dict]:
 # Web search — grounded Gemini. Keyless for the caller: uses our own key.
 # ---------------------------------------------------------------------------
 def _gemini_post(payload: dict, timeout: int = 30) -> dict | None:
-    api_key = config.GEMINI_API_KEY
-    if not api_key:
-        return None
-    req = urllib.request.Request(
-        _GEMINI_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": api_key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
+    # Key rotation (app/gemini_keys.py): free keys first, paid fallback,
+    # transparent failover. None when the pool is exhausted.
+    return gemini_keys.post_json(_GEMINI_URL, payload, timeout=timeout)
 
 
 _REDIRECT_HOST = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
