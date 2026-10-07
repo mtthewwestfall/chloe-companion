@@ -2689,6 +2689,23 @@ def _require_proxy_token(request: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+
+def _default_safety_settings():
+    """Default safety settings: sexually explicit unblocked, others at medium+."""
+    return [
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    ]
+
+
+def _ensure_safety_settings(payload: dict):
+    """Inject default safetySettings if the caller didn't specify any."""
+    if isinstance(payload, dict) and "safetySettings" not in payload:
+        payload["safetySettings"] = _default_safety_settings()
+
+
 @app.post("/v1beta/models/{model}:generateContent")
 def proxy_gemini_generate_content(model: str, body: dict, request: Request):
     """Gemini native passthrough through the shared key pool."""
@@ -2699,6 +2716,7 @@ def proxy_gemini_generate_content(model: str, body: dict, request: Request):
     # Calling app identifies itself via X-Source header (e.g. "gods-greek",
     # "roof-rover", "whispr-telegram"); defaults to "proxy".
     source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
+    _ensure_safety_settings(body)
     data = gemini_keys.post_json(url, body, timeout=60, source=source)
     if data is None:
         raise HTTPException(status_code=502, detail="all_keys_failed")
@@ -2754,6 +2772,7 @@ def proxy_openai_chat_completions(body: dict, request: Request):
     if model == "default":
         model = _GEMINI_PROXY_DEFAULT_MODEL
     payload = _openai_messages_to_gemini(body)
+    _ensure_safety_settings(payload)
     url = "%s/%s:generateContent" % (_GEMINI_PROXY_BASE, model)
     source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
     data = gemini_keys.post_json(url, payload, timeout=60, source=source)
