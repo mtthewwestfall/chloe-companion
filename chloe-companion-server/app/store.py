@@ -1120,3 +1120,71 @@ def match_requested_action(conn: sqlite3.Connection, girl_id: str,
         (gid, f"%{norm}%", norm),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Custom video requests (2026-10-07): users describe a custom video; the
+# server attempts Sogni generation in the background. Blocked/failed
+# generations stay `pending` for manual fulfillment.
+# ---------------------------------------------------------------------------
+def save_custom_request(conn: sqlite3.Connection, user_id: str,
+                        girl_id: str, description: str) -> dict[str, Any]:
+    """Save a custom video request. Returns the row."""
+    desc = (description or "").strip()[:1000]
+    if not desc:
+        raise ValueError("description required")
+    gid = (girl_id or "").strip().lower()
+    if not gid:
+        raise ValueError("girl_id required")
+    cur = conn.execute(
+        "INSERT INTO custom_video_requests (user_id, girl_id, description, status) "
+        "VALUES (?, ?, ?, 'pending')",
+        (user_id, gid, desc),
+    )
+    conn.commit()
+    return dict(conn.execute(
+        "SELECT * FROM custom_video_requests WHERE id = ?", (cur.lastrowid,)
+    ).fetchone())
+
+
+def get_custom_requests(conn: sqlite3.Connection, user_id: str | None = None,
+                        status: str | None = None,
+                        limit: int = 100) -> list[dict[str, Any]]:
+    """List custom video requests, newest first. Filter by user and/or status."""
+    query = "SELECT * FROM custom_video_requests"
+    clauses: list[str] = []
+    params: list[Any] = []
+    if user_id:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def update_custom_request(conn: sqlite3.Connection, request_id: int,
+                          status: str,
+                          video_url: str | None = None) -> dict[str, Any] | None:
+    """Update a custom video request's status (and optional video URL)."""
+    if status not in ("pending", "generating", "fulfilled", "manual"):
+        raise ValueError(f"invalid status: {status}")
+    if video_url is not None:
+        conn.execute(
+            "UPDATE custom_video_requests SET status = ?, video_url = ? WHERE id = ?",
+            (status, video_url, request_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE custom_video_requests SET status = ? WHERE id = ?",
+            (status, request_id),
+        )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM custom_video_requests WHERE id = ?", (request_id,)
+    ).fetchone()
+    return dict(row) if row else None

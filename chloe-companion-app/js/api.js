@@ -99,5 +99,20 @@ const ApiClient = (() => {
     return data;
   }
 
-  return { probe, chat, me, shows, requestPreset, onStatus, isConnected: () => connected };
+  async function requestCustomVideo(girlId, description) {
+    const data = await request('POST', '/api/v1/custom-videos', {
+      girl_id: girlId,
+      description,
+    });
+    setConnected(true);
+    return data;
+  }
+
+  async function customVideos() {
+    const data = await request('GET', '/api/v1/custom-videos');
+    setConnected(true);
+    return data.requests || [];
+  }
+
+  return { probe, chat, me, shows, requestPreset, requestCustomVideo, customVideos, onStatus, isConnected: () => connected };
 })();

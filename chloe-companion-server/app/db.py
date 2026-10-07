@@ -338,6 +338,21 @@ CREATE TABLE IF NOT EXISTS gemini_keys (
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_gemini_keys_active ON gemini_keys(is_active, is_paid);
+
+-- Custom video requests (2026-10-07): users describe a custom video they
+-- want; the server attempts Sogni generation in the background. Blocked or
+-- failed generations stay `pending` for manual fulfillment by the owner.
+CREATE TABLE IF NOT EXISTS custom_video_requests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    girl_id     TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | generating | fulfilled | manual
+    video_url   TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_custom_video_requests_user ON custom_video_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_custom_video_requests_status ON custom_video_requests(status);
 """
 
 

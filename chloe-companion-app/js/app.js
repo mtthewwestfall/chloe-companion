@@ -329,8 +329,72 @@
       });
       list.appendChild(el);
     });
+    // Custom video request entry point
+    const customEl = document.createElement('div');
+    customEl.className = 'preset-item';
+    customEl.innerHTML = `
+      <div class="preset-thumb">✨</div>
+      <div><div class="preset-name">Request a custom video</div>
+      <div class="preset-count">describe it — she'll try to make it</div></div>`;
+    customEl.addEventListener('click', () => {
+      closeSheet('presetSheet');
+      openCustomVideoSheet();
+    });
+    list.appendChild(customEl);
     openSheet('presetSheet');
   });
+
+  /* ---------- custom videos ---------- */
+
+  function openCustomVideoSheet() {
+    $('customVideoGirlName').textContent = currentGirl.name || 'her';
+    $('customVideoDesc').value = '';
+    loadCustomVideoHistory();
+    openSheet('customVideoSheet');
+  }
+
+  $('customVideoSubmit').addEventListener('click', async () => {
+    const desc = $('customVideoDesc').value.trim();
+    if (!desc) { showToast('Describe what you want first'); return; }
+    $('customVideoSubmit').disabled = true;
+    try {
+      await ApiClient.requestCustomVideo(currentGirl.id, desc);
+      showToast('Requested — she\'ll try to make it');
+      $('customVideoDesc').value = '';
+      loadCustomVideoHistory();
+    } catch (e) {
+      showToast('Couldn\'t send that request');
+    } finally {
+      $('customVideoSubmit').disabled = false;
+    }
+  });
+
+  async function loadCustomVideoHistory() {
+    const box = $('customVideoHistory');
+    box.innerHTML = '<div class="sheet-sub">Loading…</div>';
+    try {
+      const reqs = await ApiClient.customVideos();
+      const mine = reqs.filter((r) => (r.girl_id || '').toLowerCase() === (currentGirl.id || '').toLowerCase());
+      if (!mine.length) { box.innerHTML = '<div class="sheet-sub">No requests yet.</div>'; return; }
+      box.innerHTML = mine.map((r) => {
+        const label = r.status === 'fulfilled' ? '✅ ready'
+          : r.status === 'generating' ? '⏳ making it…'
+          : '🕐 queued';
+        const media = r.status === 'fulfilled' && r.video_url
+          ? `<div style="margin-top:6px;"><video src="${r.video_url}" controls playsinline style="width:100%;border-radius:10px;"></video></div>`
+          : '';
+        return `<div class="preset-item" style="cursor:default;"><div style="flex:1;">
+          <div class="preset-name" style="font-size:13px;">${escapeHtml(r.description)}</div>
+          <div class="preset-count">${label}</div>${media}</div></div>`;
+      }).join('');
+    } catch (e) {
+      box.innerHTML = '<div class="sheet-sub">Couldn\'t load requests.</div>';
+    }
+  }
+
+  function escapeHtml(s) {
+    return (s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
 
   async function sendPresetVideo(presetName) {
     addText('him', `send me a ${presetName} video`);

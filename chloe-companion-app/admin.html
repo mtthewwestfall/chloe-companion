@@ -88,6 +88,7 @@
     <button class="tab" onclick="showTab('girls')">Characters</button>
     <button class="tab" onclick="showTab('accounts')">Accounts</button>
     <button class="tab" onclick="showTab('keys')">Gemini Keys</button>
+    <button class="tab" onclick="showTab('custom')">Custom Videos</button>
   </div>
 
   <div id="tab-media">
@@ -145,6 +146,20 @@
       </div>
     </div>
   </div>
+
+  <div id="tab-custom" class="hidden">
+    <div class="girl-card">
+      <div class="girl-name">Custom Video Requests</div>
+      <div class="sub" style="margin-bottom:12px;">Users describe a video — Sogni tries to make it. Blocked ones stay <b>pending</b> for you to fulfill manually.</div>
+      <div style="margin-bottom:12px;">
+        <button class="filter-btn active" onclick="setCustomFilter('')">All</button>
+        <button class="filter-btn" onclick="setCustomFilter('pending')">Pending</button>
+        <button class="filter-btn" onclick="setCustomFilter('generating')">Generating</button>
+        <button class="filter-btn" onclick="setCustomFilter('fulfilled')">Fulfilled</button>
+      </div>
+      <div id="customVideoList"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -174,8 +189,10 @@ function showTab(t) {
   document.getElementById('tab-girls').classList.toggle('hidden', t !== 'girls');
   document.getElementById('tab-accounts').classList.toggle('hidden', t !== 'accounts');
   document.getElementById('tab-keys').classList.toggle('hidden', t !== 'keys');
+  document.getElementById('tab-custom').classList.toggle('hidden', t !== 'custom');
   if (t === 'accounts') loadAccounts();
   if (t === 'keys') loadGeminiKeys();
+  if (t === 'custom') loadCustomVideos();
 }
 
 async function api(method, path, body) {
@@ -308,6 +325,34 @@ async function grantMonth(userId, tier) {
   if (!confirm(`Grant 1 free month of ${tier.toUpperCase()} to this account?`)) return;
   const res = await api('POST', '/api/v1/admin/grant-month', { user_id: userId, tier });
   if (res.ok) { alert(`Granted! Expires ${res.vip_expires_at}`); loadAccounts(); }
+}
+
+let customVideoFilter = '';
+
+async function setCustomFilter(s) {
+  customVideoFilter = s;
+  document.querySelectorAll('#tab-custom .filter-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  loadCustomVideos();
+}
+
+async function loadCustomVideos() {
+  const box = document.getElementById('customVideoList');
+  box.innerHTML = '<div class="sub">Loading…</div>';
+  const q = customVideoFilter ? `?status=${encodeURIComponent(customVideoFilter)}` : '';
+  const data = await api('GET', '/api/v1/admin/custom-videos' + q);
+  const reqs = data.requests || [];
+  if (!reqs.length) { box.innerHTML = '<div class="sub">No requests.</div>'; return; }
+  box.innerHTML = reqs.map(r => {
+    const badge = r.status === 'fulfilled' ? '✅' : r.status === 'generating' ? '⏳' : '🕐';
+    const video = r.video_url ? `<div style="margin-top:6px;"><a href="${r.video_url}" target="_blank" style="color:#6ab0ff;">${r.video_url}</a></div>` : '';
+    const dt = (r.created_at || '').slice(0, 16).replace('T', ' ');
+    return `<div class="girl-card" style="margin-bottom:10px;">
+      <div style="font-weight:700;">${badge} ${r.girl_id} <span style="color:#888;font-weight:400;font-size:12px;">· ${r.status} · ${dt}</span></div>
+      <div style="margin:6px 0;color:#ddd;">${(r.description || '').replace(/</g, '&lt;')}</div>
+      <div style="color:#888;font-size:12px;">user: ${r.user_id}</div>${video}
+    </div>`;
+  }).join('');
 }
 
 let geminiKeys = [];

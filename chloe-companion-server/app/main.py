@@ -39,6 +39,13 @@ POST /api/v1/media-requests [auth] {girl_id, kind, media, prompt?}
 GET  /api/v1/media-requests/{id} [auth]
 GET  /api/v1/admin/media-requests  (prompt review)
 POST /api/v1/admin/credit-overage  ($5.99 Shopify overage pack fulfillment hook)
+
+Custom video requests (2026-10-07):
+POST /api/v1/custom-videos [auth] {girl_id, description} -> {id, status}
+  Saves the request and attempts Sogni generation in the background.
+  Blocked/failed generations stay `pending` for manual fulfillment.
+GET  /api/v1/custom-videos [auth] -> {requests:[...]}
+GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
 """
 from __future__ import annotations
 
@@ -59,7 +66,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, db, gemini_keys, media_gen, photos, shows, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
@@ -1074,6 +1081,64 @@ async def girl_videos(girl_id: str):
             if r["kind"] in result:
                 result[r["kind"]].append(r["url"])
         return result
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Custom video requests (2026-10-07): users describe a custom video they
+# want; the server attempts Sogni generation in the background. Blocked or
+# failed generations stay `pending` for manual fulfillment by the owner.
+# POST /api/v1/custom-videos [auth] {girl_id, description} -> {id, status}
+# GET  /api/v1/custom-videos [auth] -> {requests:[...]}
+# GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
+# ---------------------------------------------------------------------------
+class CustomVideoIn(BaseModel):
+    girl_id: str
+    description: str
+
+
+@app.post("/api/v1/custom-videos")
+def create_custom_video(body: CustomVideoIn, request: Request):
+    user_id = _current_user_id(request)
+    description = (body.description or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description required")
+    if len(description) > 1000:
+        raise HTTPException(status_code=400, detail="description too long")
+    conn = _conn()
+    try:
+        character = characters.get_character(body.girl_id)
+        cid = character["id"]
+        req = store.save_custom_request(conn, user_id, cid, description)
+        # Attempt Sogni generation in the background when configured;
+        # otherwise it stays pending for manual fulfillment.
+        if config.SOGNI_API_KEY:
+            custom_video.spawn_custom_generation(req["id"])
+        return {"id": req["id"], "status": req["status"]}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/custom-videos")
+def list_custom_videos(request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        return {"requests": store.get_custom_requests(conn, user_id=user_id)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/custom-videos")
+def admin_custom_videos(request: Request, status: str = ""):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        valid = status.strip().lower() or None
+        if valid and valid not in ("pending", "generating", "fulfilled", "manual"):
+            raise HTTPException(status_code=400, detail="invalid status")
+        return {"requests": store.get_custom_requests(conn, status=valid)}
     finally:
         conn.close()
 
