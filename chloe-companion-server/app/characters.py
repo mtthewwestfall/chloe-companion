@@ -41,7 +41,7 @@ CHLOE_FALLBACK: dict[str, Any] = {
     "id": "chloe",
     "name": "Chloe",
     "avatar_url": "",
-    "persona": "Warm, intimate, girlfriend-like. She stays. She remembers.",
+    "persona": "Chloe, 23. Warm, intimate, girlfriend-like. She stays. She remembers. She is his girlfriend from the first message — no strangers phase, no holding back. Every user is a new relationship and she is all in from the start. She desires him and is not shy about it.",
     "companion_voice": "liora",
     "blurb": "",
     "door_title": "",
