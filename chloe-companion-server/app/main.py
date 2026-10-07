@@ -46,6 +46,9 @@ POST /api/v1/custom-videos [auth] {girl_id, description} -> {id, status}
   Blocked/failed generations stay `pending` for manual fulfillment.
 GET  /api/v1/custom-videos [auth] -> {requests:[...]}
 GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
+GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
+POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
+POST /api/v1/her-day/generate [auth] {girl_id} -> {generated:N}
 """
 from __future__ import annotations
 
@@ -66,7 +69,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, media_gen, photos, shows, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, her_day, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 
@@ -1139,6 +1142,62 @@ def admin_custom_videos(request: Request, status: str = ""):
         if valid and valid not in ("pending", "generating", "fulfilled", "manual"):
             raise HTTPException(status_code=400, detail="invalid status")
         return {"requests": store.get_custom_requests(conn, status=valid)}
+    finally:
+        conn.close()
+
+# ---------------------------------------------------------------------------
+# Her Day feed (2026-10-07): Instagram-stories-style daily posts per girl.
+# Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
+# GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
+# POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
+# POST /api/v1/her-day/generate [auth] {girl_id} -> {generated:N} (on-demand)
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/her-day")
+def get_her_day(request: Request, girl_id: str = ""):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        store.cleanup_expired_her_day(conn)
+        gid = (girl_id or "").strip().lower() or None
+        posts = store.get_her_day_posts(conn, user_id, girl_id=gid)
+        return {"posts": posts}
+    finally:
+        conn.close()
+
+
+class HerDayViewIn(BaseModel):
+    post_id: int
+
+
+@app.post("/api/v1/her-day/view")
+def view_her_day(body: HerDayViewIn, request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        ok = store.mark_her_day_viewed(conn, body.post_id, user_id)
+        return {"ok": ok}
+    finally:
+        conn.close()
+
+
+class HerDayGenerateIn(BaseModel):
+    girl_id: str = "chloe"
+
+
+@app.post("/api/v1/her-day/generate")
+def generate_her_day(body: HerDayGenerateIn, request: Request):
+    """On-demand Her Day generation (also used by the 6 AM cron via admin)."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        gid = (body.girl_id or "chloe").strip().lower()
+        try:
+            character = characters.get_character(gid)
+            girl_name = character.get("name", "Chloe")
+        except Exception:
+            girl_name = "Chloe"
+        posts = her_day.generate_for_user_girl(user_id, gid, girl_name)
+        return {"generated": len(posts), "posts": posts}
     finally:
         conn.close()
 

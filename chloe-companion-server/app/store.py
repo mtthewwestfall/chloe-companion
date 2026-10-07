@@ -1188,3 +1188,85 @@ def update_custom_request(conn: sqlite3.Connection, request_id: int,
         "SELECT * FROM custom_video_requests WHERE id = ?", (request_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Her Day feed (2026-10-07): Instagram-stories-style daily posts per girl.
+# ---------------------------------------------------------------------------
+
+def save_her_day_post(conn: "sqlite3.Connection", user_id: str, girl_id: str,
+                      post_type: str = "image", media_url: str = "",
+                      voice_url: str = "", caption: str = "") -> dict:
+    """Save a Her Day post. Returns the row."""
+    if post_type not in ("image", "video", "voice", "text"):
+        raise ValueError(f"invalid post_type: {post_type}")
+    gid = (girl_id or "").strip().lower()
+    if not gid:
+        raise ValueError("girl_id required")
+    cur = conn.execute(
+        "INSERT INTO her_day_posts (user_id, girl_id, post_type, media_url,"
+        " voice_url, caption) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, gid, post_type, media_url or "", voice_url or "",
+         (caption or "")[:500]),
+    )
+    conn.commit()
+    return dict(conn.execute(
+        "SELECT * FROM her_day_posts WHERE id = ?", (cur.lastrowid,)
+    ).fetchone())
+
+
+def get_her_day_posts(conn: "sqlite3.Connection", user_id: str,
+                      girl_id: str | None = None,
+                      include_expired: bool = False) -> list[dict]:
+    """Get active Her Day posts for a user (optionally filtered by girl),
+    newest first. Expired posts are excluded unless include_expired."""
+    query = "SELECT * FROM her_day_posts WHERE user_id = ?"
+    params: list = [user_id]
+    if girl_id:
+        query += " AND girl_id = ?"
+        params.append(girl_id.strip().lower())
+    if not include_expired:
+        query += " AND expires_at > datetime('now')"
+    query += " ORDER BY created_at DESC"
+    return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def mark_her_day_viewed(conn: "sqlite3.Connection", post_id: int,
+                        user_id: str) -> bool:
+    """Mark a Her Day post as viewed. Returns True if a row was updated."""
+    cur = conn.execute(
+        "UPDATE her_day_posts SET viewed = 1 WHERE id = ? AND user_id = ?",
+        (post_id, user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def cleanup_expired_her_day(conn: "sqlite3.Connection") -> int:
+    """Delete expired Her Day posts. Returns count deleted."""
+    cur = conn.execute(
+        "DELETE FROM her_day_posts WHERE expires_at <= datetime('now')")
+    conn.commit()
+    return cur.rowcount
+
+
+def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
+                         girl_id: str) -> bool:
+    """Check if a girl already has Her Day posts generated today for a user."""
+    row = conn.execute(
+        "SELECT 1 FROM her_day_posts WHERE user_id = ? AND girl_id = ?"
+        " AND date(created_at) = date('now') LIMIT 1",
+        (user_id, girl_id.strip().lower()),
+    ).fetchone()
+    return row is not None
+
+
+def get_random_give_media(conn: "sqlite3.Connection", girl_id: str,
+                          kind: str = "give") -> dict | None:
+    """Get a random media item from a girl's Give library for Her Day reuse."""
+    row = conn.execute(
+        "SELECT * FROM girl_media WHERE girl_id = ? AND kind = ?"
+        " ORDER BY RANDOM() LIMIT 1",
+        (girl_id.strip().lower(), kind),
+    ).fetchone()
+    return dict(row) if row else None

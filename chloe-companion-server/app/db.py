@@ -353,6 +353,23 @@ CREATE TABLE IF NOT EXISTS custom_video_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_custom_video_requests_user ON custom_video_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_custom_video_requests_status ON custom_video_requests(status);
+
+-- Her Day feed (2026-10-07): Instagram-stories-style daily feed. Each girl
+-- posts 3-5 "moments" per day per user. Stories expire after 24h.
+CREATE TABLE IF NOT EXISTS her_day_posts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    girl_id    TEXT NOT NULL,
+    post_type  TEXT NOT NULL DEFAULT 'image',  -- image | video | voice | text
+    media_url  TEXT NOT NULL DEFAULT '',
+    voice_url  TEXT NOT NULL DEFAULT '',
+    caption    TEXT NOT NULL DEFAULT '',
+    viewed     INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL DEFAULT (datetime('now', '+1 day'))
+);
+CREATE INDEX IF NOT EXISTS idx_her_day_user_girl ON her_day_posts(user_id, girl_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_her_day_expires ON her_day_posts(expires_at);
 """
 
 

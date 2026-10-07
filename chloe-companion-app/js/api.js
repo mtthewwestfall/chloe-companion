@@ -114,5 +114,24 @@ const ApiClient = (() => {
     return data.requests || [];
   }
 
-  return { probe, chat, me, shows, requestPreset, requestCustomVideo, customVideos, onStatus, isConnected: () => connected };
+  async function herDay(girlId) {
+    const q = girlId ? '?girl_id=' + encodeURIComponent(girlId) : '';
+    const data = await request('GET', '/api/v1/her-day' + q);
+    setConnected(true);
+    return data.posts || [];
+  }
+
+  async function herDayView(postId) {
+    try {
+      await request('POST', '/api/v1/her-day/view', { post_id: postId });
+    } catch (e) { /* non-critical */ }
+  }
+
+  async function herDayGenerate(girlId) {
+    const data = await request('POST', '/api/v1/her-day/generate', { girl_id: girlId });
+    setConnected(true);
+    return data;
+  }
+
+  return { probe, chat, me, shows, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, onStatus, isConnected: () => connected };
 })();

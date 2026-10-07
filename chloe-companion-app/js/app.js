@@ -91,6 +91,7 @@
     chatLog.appendChild(enc);
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
+    HerDay.load(girl.id, girl.avatar, girl.name);
     // Load last 8 turns so the conversation picks up where it left off
     let hasHistory = false;
     if (isLoggedIn()) {
@@ -834,4 +835,151 @@
   } else {
     showOnboarding();
   }
+
+  /* ============================================================
+     Her Day — Instagram-stories-style daily feed.
+     Stories bar at top of chat, tap for full-screen viewer.
+     ============================================================ */
+  const HerDay = (() => {
+    let posts = [];
+    let currentIdx = 0;
+    let timer = null;
+    let girlAvatar = '';
+    let girlName = '';
+
+    const STORY_MS = 5000;
+
+    async function load(girlId, avatar, name) {
+      girlAvatar = avatar;
+      girlName = name;
+      $('herDayThumb').src = avatar;
+      $('herDayViewerAvatar').src = avatar;
+      try {
+        posts = await ApiClient.herDay(girlId);
+      } catch (e) {
+        posts = [];
+      }
+      // Try on-demand generation if nothing today
+      if (!posts.length && ApiClient.isConnected()) {
+        try {
+          const res = await ApiClient.herDayGenerate(girlId);
+          posts = res.posts || [];
+        } catch (e) {}
+      }
+      renderBar();
+    }
+
+    function renderBar() {
+      const bar = $('herDayBar');
+      if (!posts.length) {
+        bar.classList.add('hidden');
+        return;
+      }
+      bar.classList.remove('hidden');
+      const hasUnviewed = posts.some(p => !p.viewed);
+      $('herDayRing').classList.toggle('unviewed', hasUnviewed);
+    }
+
+    function openViewer(startIdx) {
+      currentIdx = startIdx || 0;
+      $('herDayViewer').classList.remove('hidden');
+      showStory(currentIdx);
+    }
+
+    function closeViewer() {
+      $('herDayViewer').classList.add('hidden');
+      clearTimeout(timer);
+      $('herDayVideo').pause();
+      $('herDayAudio').pause();
+      renderBar();
+    }
+
+    function showStory(idx) {
+      clearTimeout(timer);
+      const post = posts[idx];
+      if (!post) { closeViewer(); return; }
+
+      // Progress bars
+      const prog = $('herDayProgress');
+      prog.innerHTML = '';
+      posts.forEach((p, i) => {
+        const seg = document.createElement('div');
+        seg.className = 'herday-seg' + (i < idx ? ' done' : '') + (i === idx ? ' active' : '');
+        prog.appendChild(seg);
+      });
+
+      // Header
+      $('herDayViewerName').textContent = girlName;
+      const created = new Date(post.created_at + 'Z');
+      const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
+      $('herDayViewerTime').textContent = mins < 60 ? mins + 'm ago' : Math.round(mins / 60) + 'h ago';
+
+      // Media
+      const img = $('herDayImage'), vid = $('herDayVideo'), txt = $('herDayTextCard');
+      img.classList.add('hidden'); vid.classList.add('hidden'); txt.classList.add('hidden');
+      vid.pause(); $('herDayAudio').pause();
+      if (post.post_type === 'video' && post.media_url) {
+        vid.src = post.media_url;
+        vid.classList.remove('hidden');
+        vid.play().catch(() => {});
+      } else if (post.media_url) {
+        img.src = post.media_url;
+        img.classList.remove('hidden');
+      } else {
+        txt.textContent = post.caption || '';
+        txt.classList.remove('hidden');
+      }
+
+      // Caption
+      $('herDayCaption').textContent = post.caption || '';
+
+      // Voice note
+      if (post.voice_url && !post.voice_url.startsWith('STUB')) {
+        $('herDayAudio').src = post.voice_url;
+        $('herDayAudio').play().catch(() => {});
+      }
+
+      // Mark viewed (fire and forget)
+      if (!post.viewed) {
+        post.viewed = 1;
+        ApiClient.herDayView(post.id);
+      }
+
+      // Auto-advance
+      timer = setTimeout(() => {
+        if (currentIdx < posts.length - 1) showStory(currentIdx + 1);
+        else closeViewer();
+      }, STORY_MS);
+      currentIdx = idx;
+    }
+
+    function init() {
+      $('herDayAvatar').addEventListener('click', () => openViewer(0));
+      $('herDayClose').addEventListener('click', closeViewer);
+      $('herDayPrev').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (currentIdx > 0) showStory(currentIdx - 1);
+      });
+      $('herDayNext').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (currentIdx < posts.length - 1) showStory(currentIdx + 1);
+        else closeViewer();
+      });
+      // Tap right/left halves to navigate
+      $('herDayMediaWrap').addEventListener('click', (e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        if (x < rect.width / 3 && currentIdx > 0) showStory(currentIdx - 1);
+        else if (x > rect.width * 2 / 3) {
+          if (currentIdx < posts.length - 1) showStory(currentIdx + 1);
+          else closeViewer();
+        }
+      });
+    }
+
+    return { load, init, openViewer };
+  })();
+
+  HerDay.init();
+
 })();
