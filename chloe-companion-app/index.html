@@ -118,40 +118,9 @@
           </div>
         </header>
 
-        <!-- Whispr Feed: Stories | Feed tab switcher -->
-        <div id="feedTabs" class="feed-tabs hidden">
-          <button id="feedTabStories" class="feed-tab active" aria-label="Stories">Stories</button>
-          <button id="feedTabTimeline" class="feed-tab" aria-label="Feed">Feed</button>
-        </div>
-
-        <!-- Whispr Feed stories bar: one avatar per girl with stories -->
-        <div id="herDayBar" class="herday-bar hidden">
-          <div id="herDayAvatars" class="herday-avatars"></div>
-        </div>
-
         <!-- Whispr Feed unified timeline: all girls' posts, newest first -->
-        <div id="feedTimeline" class="feed-timeline hidden">
+        <div id="feedTimeline" class="feed-timeline">
           <div id="feedPosts" class="feed-posts"></div>
-        </div>
-
-        <!-- Whispr Feed story viewer overlay -->
-        <div id="herDayViewer" class="herday-viewer hidden">
-          <div class="herday-progress" id="herDayProgress"></div>
-          <div class="herday-topbar">
-            <img id="herDayViewerAvatar" class="herday-viewer-avatar" alt="">
-            <span id="herDayViewerName" class="herday-viewer-name"></span>
-            <span id="herDayViewerTime" class="herday-viewer-time"></span>
-            <button id="herDayClose" class="herday-close" aria-label="Close">&times;</button>
-          </div>
-          <div class="herday-media-wrap" id="herDayMediaWrap">
-            <img id="herDayImage" class="herday-media hidden" alt="">
-            <video id="herDayVideo" class="herday-media hidden" playsinline></video>
-            <div id="herDayTextCard" class="herday-textcard hidden"></div>
-          </div>
-          <div id="herDayCaption" class="herday-caption"></div>
-          <audio id="herDayAudio" class="hidden"></audio>
-          <button id="herDayPrev" class="herday-nav herday-prev" aria-label="Previous"></button>
-          <button id="herDayNext" class="herday-nav herday-next" aria-label="Next"></button>
         </div>
 
         <main id="chatLog" class="chat-log" aria-live="polite"></main>

@@ -91,7 +91,6 @@
     chatLog.appendChild(enc);
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
-    HerDay.load();
     Feed.load();
     // Load last 8 turns so the conversation picks up where it left off
     let hasHistory = false;
@@ -837,199 +836,12 @@
     showOnboarding();
   }
 
-    /* ============================================================
-     Whispr Feed — Instagram-stories-style daily feed.
-     Stories bar shows ALL girls (tap an avatar to see her day).
-     ============================================================ */
-  const HerDay = (() => {
-    let girls = [];
-    let postsByGirl = {};
-    let currentGirl = null;
-    let posts = [];
-    let currentIdx = 0;
-    let timer = null;
-
-    const STORY_MS = 5000;
-
-    async function load() {
-      // All characters + all of today's posts (every girl gets her own feed)
-      try {
-        girls = await ApiClient.characters();
-      } catch (e) {
-        girls = [];
-      }
-      try {
-        let all = await ApiClient.herDay();
-        // On-demand generation if nothing today
-        if (!all.length && ApiClient.isConnected()) {
-          try {
-            await ApiClient.herDayGenerate();
-            all = await ApiClient.herDay();
-          } catch (e) {}
-        }
-        postsByGirl = {};
-        all.forEach(p => {
-          (postsByGirl[p.girl_id] = postsByGirl[p.girl_id] || []).push(p);
-        });
-      } catch (e) {
-        postsByGirl = {};
-      }
-      renderBar();
-    }
-
-    function girlFor(gid) {
-      return girls.find(g => g.id === gid) || { id: gid, name: gid, avatar_url: '' };
-    }
-
-    function renderBar() {
-      const wrap = $('herDayAvatars');
-      const bar = $('herDayBar');
-      const gids = Object.keys(postsByGirl).filter(gid => postsByGirl[gid].length);
-      gids.sort((a, b) => {
-        const ia = girls.findIndex(g => g.id === a);
-        const ib = girls.findIndex(g => g.id === b);
-        return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
-      });
-      if (!gids.length) {
-        bar.classList.add('hidden');
-        return;
-      }
-      bar.classList.remove('hidden');
-      wrap.innerHTML = '';
-      gids.forEach(gid => {
-        const g = girlFor(gid);
-        const hasUnviewed = postsByGirl[gid].some(p => !p.viewed);
-        const btn = document.createElement('button');
-        btn.className = 'herday-avatar-btn';
-        btn.setAttribute('aria-label', g.name + "'s Day");
-        const ring = document.createElement('span');
-        ring.className = 'herday-ring' + (hasUnviewed ? ' unviewed' : '');
-        const img = document.createElement('img');
-        img.className = 'herday-thumb';
-        img.src = g.avatar_url || '';
-        img.alt = g.name;
-        ring.appendChild(img);
-        const label = document.createElement('span');
-        label.className = 'herday-label';
-        label.textContent = g.name;
-        btn.appendChild(ring);
-        btn.appendChild(label);
-        btn.addEventListener('click', () => openViewer(gid));
-        wrap.appendChild(btn);
-      });
-    }
-
-    function openViewer(girlId) {
-      const g = girlFor(girlId);
-      currentGirl = g;
-      posts = postsByGirl[girlId] || [];
-      if (!posts.length) return;
-      $('herDayViewerAvatar').src = g.avatar_url || '';
-      $('herDayViewerName').textContent = g.name;
-      currentIdx = 0;
-      $('herDayViewer').classList.remove('hidden');
-      showStory(0);
-    }
-
-    function closeViewer() {
-      $('herDayViewer').classList.add('hidden');
-      clearTimeout(timer);
-      $('herDayVideo').pause();
-      $('herDayAudio').pause();
-      renderBar();
-    }
-
-    function showStory(idx) {
-      clearTimeout(timer);
-      const post = posts[idx];
-      if (!post) { closeViewer(); return; }
-
-      // Progress bars
-      const prog = $('herDayProgress');
-      prog.innerHTML = '';
-      posts.forEach((p, i) => {
-        const seg = document.createElement('div');
-        seg.className = 'herday-seg' + (i < idx ? ' done' : '') + (i === idx ? ' active' : '');
-        prog.appendChild(seg);
-      });
-
-      // Header
-      const created = new Date(post.created_at + 'Z');
-      const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
-      $('herDayViewerTime').textContent = mins < 60 ? mins + 'm ago' : Math.round(mins / 60) + 'h ago';
-
-      // Media
-      const img = $('herDayImage'), vid = $('herDayVideo'), txt = $('herDayTextCard');
-      img.classList.add('hidden'); vid.classList.add('hidden'); txt.classList.add('hidden');
-      vid.pause(); $('herDayAudio').pause();
-      if (post.post_type === 'video' && post.media_url) {
-        vid.src = post.media_url;
-        vid.classList.remove('hidden');
-        vid.play().catch(() => {});
-      } else if (post.media_url) {
-        img.src = post.media_url;
-        img.classList.remove('hidden');
-      } else {
-        txt.textContent = post.caption || '';
-        txt.classList.remove('hidden');
-      }
-
-      // Caption
-      $('herDayCaption').textContent = post.caption || '';
-
-      // Voice note
-      if (post.voice_url && !post.voice_url.startsWith('STUB')) {
-        $('herDayAudio').src = post.voice_url;
-        $('herDayAudio').play().catch(() => {});
-      }
-
-      // Mark viewed (fire and forget)
-      if (!post.viewed) {
-        post.viewed = 1;
-        ApiClient.herDayView(post.id);
-      }
-
-      // Auto-advance
-      timer = setTimeout(() => {
-        if (currentIdx < posts.length - 1) showStory(currentIdx + 1);
-        else closeViewer();
-      }, STORY_MS);
-      currentIdx = idx;
-    }
-
-    function init() {
-      $('herDayClose').addEventListener('click', closeViewer);
-      $('herDayPrev').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (currentIdx > 0) showStory(currentIdx - 1);
-      });
-      $('herDayNext').addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (currentIdx < posts.length - 1) showStory(currentIdx + 1);
-        else closeViewer();
-      });
-      // Tap right/left halves to navigate
-      $('herDayMediaWrap').addEventListener('click', (e) => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        if (x < rect.width / 3 && currentIdx > 0) showStory(currentIdx - 1);
-        else if (x > rect.width * 2 / 3) {
-          if (currentIdx < posts.length - 1) showStory(currentIdx + 1);
-          else closeViewer();
-        }
-      });
-    }
-
-    return { load, init, openViewer };
-  })();
-
 
   /* ============================================================
      Unified Feed — all girls' posts in one chronological timeline.
      ============================================================ */
   const Feed = (() => {
     let posts = [];
-    let mode = 'stories'; // 'stories' | 'timeline'
 
     function timeAgo(createdAt) {
       const created = new Date(createdAt + 'Z');
@@ -1046,11 +858,7 @@
       } catch (e) {
         posts = [];
       }
-      // Show tabs only if there are posts
-      const tabs = $('feedTabs');
-      if (posts.length) tabs.classList.remove('hidden');
-      else tabs.classList.add('hidden');
-      if (mode === 'timeline') renderTimeline();
+      renderTimeline();
     }
 
     function renderTimeline() {
@@ -1112,33 +920,18 @@
           card.appendChild(cap);
         }
 
-        // Tap a post to open that girl's story viewer
-        card.addEventListener('click', () => {
-          if (p.girl_id) HerDay.openViewer(p.girl_id);
-        });
         wrap.appendChild(card);
       });
     }
 
-    function setMode(m) {
-      mode = m;
-      $('feedTabStories').classList.toggle('active', m === 'stories');
-      $('feedTabTimeline').classList.toggle('active', m === 'timeline');
-      $('herDayBar').classList.toggle('hidden', m !== 'stories');
-      $('feedTimeline').classList.toggle('hidden', m !== 'timeline');
-      if (m === 'timeline') renderTimeline();
-    }
-
     function init() {
-      $('feedTabStories').addEventListener('click', () => setMode('stories'));
-      $('feedTabTimeline').addEventListener('click', () => setMode('timeline'));
+      // Feed is the only view; nothing to wire up.
     }
 
-    return { load, init, setMode };
+    return { load, init };
   })();
 
 
-  HerDay.init();
   Feed.init();
 
 })();
