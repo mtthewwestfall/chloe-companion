@@ -46,6 +46,32 @@ Hardening (bulletproofing) notes:
   for 10 minutes; the per-key RPM limit is automatically halved and
   /api/v1/admin/gemini-health exposes the signal so callers can slow
   down too.
+
+Efficiency model (fail-fast + background prober):
+- A background prober thread keeps an in-memory "believed healthy" view
+  of the pool fresh OFF the request path: it re-checks keys whose state
+  is unknown or stale with a 1-token generation (never needs_attention
+  or disabled keys, never inside a backoff window, never when real
+  traffic already produced fresher evidence). A key that recovers is
+  believed healthy again within ~a probe cycle (~20s) of its backoff
+  expiring, instead of whenever the next unlucky request discovers it.
+- post_json() tries believed-healthy keys first (active pool, free-first,
+  latency-ranked) with a short per-attempt timeout
+  (GEMINI_FAST_TIMEOUT_S, default 8s) and fails over immediately — no
+  sleeping on the request path; all backoff intelligence lives in the
+  health state written by real attempts and the prober. If nothing is
+  believed healthy (cold start, all keys sick), it falls back to the
+  classic eligible-key sweep, then the all-active last-resort sweep —
+  same semantics as before, bounded by GEMINI_MAX_ATTEMPTS (default 8)
+  and GEMINI_ATTEMPT_BUDGET_S (default 50s) per call.
+- Optional hedging (GEMINI_HEDGE_AFTER_S > 0): if the first fast attempt
+  runs longer than that many seconds, a second believed-healthy key is
+  raced in parallel; at most 2 requests are ever in flight. Off by
+  default so a thin pool is never double-spent.
+- Belief is seeded from the persisted health columns at first use and
+  every attempt/probe writes its outcome back through the same
+  report_success/report_failure path, so a restart doesn't cold-start
+  into probing on live traffic.
 """
 from __future__ import annotations
 
@@ -58,6 +84,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 
 from . import config, db
@@ -82,6 +109,30 @@ _DEGRADED_WINDOW_S = 600.0
 _LATENCY_PENALTY_S = 10.0
 _MAX_LATENCY_SAMPLES = 20
 
+# --- Fail-fast request path -------------------------------------------------
+# How long a single attempt on a believed-healthy key may take before
+# failover. Real generations on a healthy key finish well inside this;
+# a dead/slow key must not eat the whole caller timeout serially.
+_FAST_TIMEOUT_DEFAULT_S = 8.0
+# Max attempts (across all phases) for one post_json call.
+_MAX_ATTEMPTS_DEFAULT = 8
+# Total wall-clock budget for one post_json call across attempts.
+_ATTEMPT_BUDGET_DEFAULT_S = 50.0
+# Ranking latency assumed for a believed-healthy key with no samples yet.
+_UNKNOWN_LATENCY_S = 2.0
+# A confirmed success keeps a key "believed healthy" for this long
+# (real traffic and the prober refresh it well before it lapses).
+_BELIEF_TTL_S = 180.0
+
+# --- Background prober ------------------------------------------------------
+_PROBE_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+              "gemini-3.1-flash-lite:generateContent")
+_PROBE_INTERVAL_DEFAULT_S = 20.0   # prober wake-up cadence
+_PROBE_CONFIRM_S = 120.0           # re-confirm an idle healthy key (< TTL)
+_PROBE_MIN_INTERVAL_S = 45.0       # never probe the same key more often
+_PROBE_QUIET_S = 45.0              # real traffic fresher than this = no probe
+_PROBE_TIMEOUT_S = 12.0
+
 # In-memory per-process state, guarded by _lock. The DB columns remain
 # the source of truth for consecutive failures and backoff windows;
 # these structures only carry soft signals (rate, recent failures,
@@ -91,6 +142,26 @@ _recent_fail_ts: dict[int, deque] = {}  # key_id -> failure timestamps (5min)
 _latencies: dict[int, deque] = {}       # key_id -> recent request latencies (s)
 _last_reserve_tap: float | None = None  # monotonic time of last reserve use
 
+# Believed-health view for the fail-fast path, guarded by _lock:
+# key_id -> {"ok": bool, "at": wall-clock of last confirmation,
+#            "lat": EWMA latency seconds or None}
+_belief: dict[int, dict] = {}
+_belief_seeded = False
+
+# Prober bookkeeping, guarded by _lock.
+_prober_thread: threading.Thread | None = None
+_last_probe_mono: dict[int, float] = {}  # key_id -> monotonic time of last probe
+_prober_last_cycle_at: float | None = None
+_probes_total = 0
+_probes_ok = 0
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
 
 def _per_key_rpm() -> int:
     """Max dispatches per key per rolling 60s window. Free Gemini keys
@@ -99,6 +170,46 @@ def _per_key_rpm() -> int:
         return max(1, int(os.environ.get("GEMINI_PER_KEY_RPM", "12")))
     except ValueError:
         return 12
+
+
+def _fast_timeout_s() -> float:
+    return max(1.0, _env_float("GEMINI_FAST_TIMEOUT_S", _FAST_TIMEOUT_DEFAULT_S))
+
+
+def _max_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("GEMINI_MAX_ATTEMPTS",
+                                         _MAX_ATTEMPTS_DEFAULT)))
+    except (TypeError, ValueError):
+        return _MAX_ATTEMPTS_DEFAULT
+
+
+def _attempt_budget_s() -> float:
+    return max(1.0, _env_float("GEMINI_ATTEMPT_BUDGET_S",
+                               _ATTEMPT_BUDGET_DEFAULT_S))
+
+
+def _hedge_after_s() -> float:
+    """Seconds after which a second healthy key is raced (0 = off)."""
+    return max(0.0, _env_float("GEMINI_HEDGE_AFTER_S", 0.0))
+
+
+def _probe_interval_s() -> float:
+    return max(5.0, _env_float("GEMINI_PROBE_INTERVAL_S",
+                               _PROBE_INTERVAL_DEFAULT_S))
+
+
+def _parse_ts(value) -> float | None:
+    """Parse a stored UTC timestamp string to epoch seconds."""
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(
+                value, fmt).replace(tzinfo=timezone.utc).timestamp()
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
 def _prune(dq: deque, cutoff: float) -> None:
@@ -145,10 +256,18 @@ def _recent_failure_count(key_id: int) -> int:
     return len(dq)
 
 
+def _belief_entry_locked(key_id: int) -> dict:
+    """The belief record for key_id, created if needed. Hold _lock."""
+    return _belief.setdefault(key_id, {"ok": False, "at": 0.0, "lat": None})
+
+
 def _record_latency_locked(key_id: int, seconds: float) -> None:
     """Record a request latency sample. Caller must hold _lock."""
     dq = _latencies.setdefault(key_id, deque(maxlen=_MAX_LATENCY_SAMPLES))
     dq.append(max(0.0, seconds))
+    entry = _belief_entry_locked(key_id)
+    prev = entry.get("lat")
+    entry["lat"] = seconds if prev is None else (prev * 0.6 + seconds * 0.4)
 
 
 def _avg_latency(key_id: int) -> float | None:
@@ -167,6 +286,28 @@ def _health_score(key_id: int, consecutive_failures: int) -> float:
     if avg is not None and avg > _LATENCY_PENALTY_S:
         score += 5.0
     return score
+
+
+def _seed_belief_locked(conn) -> None:
+    """Seed the believed-healthy view from persisted health at first use,
+    so a restart starts from the last known pool state instead of
+    cold-probing on live traffic. Caller must hold _lock."""
+    global _belief_seeded
+    if _belief_seeded:
+        return
+    _belief_seeded = True
+    try:
+        rows = conn.execute(
+            """SELECT id, consecutive_failures, last_success_at
+               FROM gemini_keys
+               WHERE is_active = 1 AND needs_attention = 0"""
+        ).fetchall()
+    except Exception:
+        return
+    for r in rows:
+        ts = _parse_ts(r["last_success_at"])
+        ok = ts is not None and (r["consecutive_failures"] or 0) == 0
+        _belief[r["id"]] = {"ok": bool(ok), "at": ts or 0.0, "lat": None}
 
 
 def is_degraded() -> bool:
@@ -196,7 +337,7 @@ def degradation_info() -> dict:
             time.time() - (time.monotonic() - _last_reserve_tap),
             tz=timezone.utc,
         ).isoformat()
-    return {
+    info = {
         "degraded": degraded,
         "reserve_tapped": _last_reserve_tap is not None,
         "reserve_tapped_at": tapped_at,
@@ -205,6 +346,37 @@ def degradation_info() -> dict:
         "advice": ("pool serving from reserves - halve your request rate"
                    if degraded else "pool healthy"),
     }
+    # Live pool view: persisted per-key status counts, the fail-fast
+    # belief set, and prober state (refreshed off the request path).
+    try:
+        with _lock:
+            conn = db.connect()
+            try:
+                _ensure_table(conn)
+                _seed_belief_locked(conn)
+                rows = conn.execute("SELECT * FROM gemini_keys").fetchall()
+                statuses = [_row_to_public(r)["status"] for r in rows]
+            finally:
+                conn.close()
+            now = time.time()
+            healthy_ids = sorted(
+                kid for kid, b in _belief.items()
+                if b.get("ok") and (now - b.get("at", 0.0)) <= _BELIEF_TTL_S)
+            info["believed_healthy_key_ids"] = healthy_ids
+            info["pool"] = {s: statuses.count(s) for s in sorted(set(statuses))}
+            info["prober"] = {
+                "running": bool(_prober_thread is not None
+                                and _prober_thread.is_alive()),
+                "last_cycle_at": (
+                    datetime.fromtimestamp(_prober_last_cycle_at,
+                                           tz=timezone.utc).isoformat()
+                    if _prober_last_cycle_at else None),
+                "probes_total": _probes_total,
+                "probes_ok": _probes_ok,
+            }
+    except Exception:
+        pass  # health reporting must never break the caller
+    return info
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS gemini_keys (
@@ -232,7 +404,8 @@ CREATE TABLE IF NOT EXISTS gemini_key_usage (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     key_id     INTEGER,
     source     TEXT NOT NULL DEFAULT 'unknown',
-    success    INTEGER NOT NULL DEFAULT 0
+    success    INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER
 )
 """
 
@@ -246,21 +419,28 @@ def _now_str() -> str:
 def _ensure_table(conn) -> None:
     conn.execute(_CREATE_TABLE)
     conn.execute(_CREATE_USAGE_TABLE)
-    # Migration: add last_used_at to pre-existing tables
+    # Migrations for pre-existing tables
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(gemini_keys)").fetchall()]
     if "last_used_at" not in cols:
         conn.execute("ALTER TABLE gemini_keys ADD COLUMN last_used_at TEXT")
         conn.commit()
+    ucols = [r["name"] for r in conn.execute("PRAGMA table_info(gemini_key_usage)").fetchall()]
+    if ucols and "latency_ms" not in ucols:
+        conn.execute("ALTER TABLE gemini_key_usage ADD COLUMN latency_ms INTEGER")
+        conn.commit()
 
 
-def _log_usage(conn, key_id: int | None, source: str, success: bool) -> None:
-    """Lightweight per-request log: which app used which key, and whether
-    it worked. Powers the admin usage endpoint."""
+def _log_usage(conn, key_id: int | None, source: str, success: bool,
+               latency_ms: int | None = None) -> None:
+    """Lightweight per-request log: which app used which key, whether
+    it worked, and how long the attempt took. Powers the admin usage
+    endpoint and before/after efficiency measurement."""
     try:
         conn.execute(
-            "INSERT INTO gemini_key_usage (key_id, source, success)"
-            " VALUES (?, ?, ?)",
-            (key_id, (source or "unknown")[:64], 1 if success else 0),
+            "INSERT INTO gemini_key_usage (key_id, source, success, latency_ms)"
+            " VALUES (?, ?, ?, ?)",
+            (key_id, (source or "unknown")[:64], 1 if success else 0,
+             latency_ms),
         )
         # Keep the table small: retain the most recent 5000 rows.
         conn.execute(
@@ -416,6 +596,55 @@ def get_candidate_keys() -> list[tuple[int, str]]:
             conn.close()
 
 
+def _fast_candidates() -> list[tuple[int, str]]:
+    """Keys currently *believed healthy*: confirmed by a successful real
+    attempt or prober check recently, with no failure since, and under
+    the per-key rate cap. Active pool first; the reserve pool appears
+    only when no active key is believed healthy (reserve rules, incl.
+    the degraded-mode tap signal, are preserved). Ordered free-first,
+    then by recent latency, then least-recently-used. Empty when nothing
+    is believed healthy — the caller then uses the classic sweep."""
+    global _last_reserve_tap
+    now = time.time()
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            _seed_belief_locked(conn)
+            active_ids, reserve_ids = _pool_ids(conn)
+            rows = _eligible_rows(conn)
+        finally:
+            conn.close()
+
+        def fresh(r) -> bool:
+            b = _belief.get(r["id"])
+            if not b or not b.get("ok"):
+                return False
+            if now - b.get("at", 0.0) > _BELIEF_TTL_S:
+                return False
+            return not _key_over_limit(r["id"])
+
+        def rank(r):
+            b = _belief.get(r["id"]) or {}
+            lat = b.get("lat")
+            return (0 if not r["is_paid"] else 1,
+                    lat if lat is not None else _UNKNOWN_LATENCY_S,
+                    r["last_used_at"] or "")
+
+        pool = sorted(
+            (r for r in rows if r["id"] in active_ids and fresh(r)), key=rank)
+        if not pool:
+            pool = sorted(
+                (r for r in rows if r["id"] in reserve_ids and fresh(r)),
+                key=rank)
+            if pool:
+                _last_reserve_tap = time.monotonic()
+                logger.warning(
+                    "gemini_keys: no active key believed healthy, "
+                    "fast path tapping reserve pool")
+        return [(r["id"], r["key_value"]) for r in pool]
+
+
 def get_key(source: str = "unknown") -> tuple[int, str] | None:
     """Next key in round-robin rotation, or None when pool is exhausted.
 
@@ -469,6 +698,9 @@ def report_success(key_id: int) -> None:
             conn.commit()
         finally:
             conn.close()
+        entry = _belief_entry_locked(key_id)
+        entry["ok"] = True
+        entry["at"] = time.time()
 
 
 def report_failure(key_id: int, error_type: str) -> None:
@@ -534,6 +766,9 @@ def report_failure(key_id: int, error_type: str) -> None:
             conn.commit()
         finally:
             conn.close()
+        entry = _belief_entry_locked(key_id)
+        entry["ok"] = False
+        entry["at"] = time.time()
 
 
 def retry_exhausted() -> int:
@@ -547,8 +782,8 @@ def retry_exhausted() -> int:
             cur = conn.execute(
                 """UPDATE gemini_keys
                    SET quota_exhausted_until = NULL
-                   WHERE quota_exhausted_until IS NOT NULL
-                     AND quota_exhausted_until <= datetime('now')"""
+                   WHERE quota_exhausted_until <= datetime('now')
+                     AND quota_exhausted_until IS NOT NULL"""
             )
             conn.commit()
             return cur.rowcount or 0
@@ -582,64 +817,281 @@ def _all_active_keys() -> list[tuple[int, str]]:
             conn.close()
 
 
+def _http_post(url: str, payload: dict, key_value: str, timeout: float) -> dict:
+    """One raw Gemini POST. Raises HTTPError on HTTP failure, and
+    URLError/timeout/JSON errors as-is."""
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json",
+                 "x-goog-api-key": key_value},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _attempt(key_id: int, key_value: str, url: str, payload: dict,
+             timeout: float, source: str) -> tuple[bool, dict | None, float]:
+    """One attempt against one key. Records the dispatch, latency, health
+    outcome and usage row. Returns (ok, data, seconds_taken). All failure
+    semantics (backoff ladders, needs_attention, circuit breaker) are the
+    classic report_failure ones — an attempt never sleeps."""
+    with _lock:
+        _record_dispatch_locked(key_id)
+    start = time.monotonic()
+    data, error_type = None, None
+    try:
+        data = _http_post(url, payload, key_value, timeout)
+    except urllib.error.HTTPError as e:
+        error_type = _classify_http_error(e.code)
+    except Exception:
+        error_type = "other"
+    seconds = time.monotonic() - start
+    with _lock:
+        _record_latency_locked(key_id, seconds)
+    if error_type is None:
+        report_success(key_id)
+        _log_usage_conn(key_id, source, True, seconds)
+        return True, data, seconds
+    report_failure(key_id, error_type)
+    _log_usage_conn(key_id, source, False, seconds)
+    return False, None, seconds
+
+
+def _try_candidates(candidates, url, payload, timeout, source, tried,
+                    state) -> dict | None:
+    """Try candidates in order until one succeeds. `tried` (set of key
+    ids) and `state` ({"n": attempts made, "deadline": monotonic}) are
+    shared across the phases of one post_json call so the attempt cap
+    and time budget hold globally."""
+    for key_id, key_value in candidates:
+        if key_id in tried:
+            continue
+        if state["n"] >= _max_attempts() or time.monotonic() >= state["deadline"]:
+            break
+        tried.add(key_id)
+        state["n"] += 1
+        ok, data, _seconds = _attempt(key_id, key_value, url, payload,
+                                      timeout, source)
+        if ok:
+            return data
+    return None
+
+
+def _try_hedged(candidates, url, payload, timeout, source, tried,
+                state) -> dict | None:
+    """Hedged variant of _try_candidates: race a second candidate when
+    the first runs past GEMINI_HEDGE_AFTER_S. At most 2 requests are in
+    flight at once; the first success wins. Attempt bookkeeping is
+    identical to the sequential path."""
+    delay = _hedge_after_s()
+    executor = ThreadPoolExecutor(max_workers=2,
+                                  thread_name_prefix="gemini-hedge")
+    try:
+        queue = list(candidates)
+        pending: dict = {}
+
+        def launch() -> bool:
+            while queue:
+                key_id, key_value = queue.pop(0)
+                if key_id in tried:
+                    continue
+                if state["n"] >= _max_attempts() \
+                        or time.monotonic() >= state["deadline"]:
+                    return False
+                tried.add(key_id)
+                state["n"] += 1
+                fut = executor.submit(_attempt, key_id, key_value, url,
+                                      payload, timeout, source)
+                pending[fut] = key_id
+                return True
+            return False
+
+        launch()
+        hedge_armed = True
+        while pending:
+            wait_s = delay if (hedge_armed and len(pending) < 2) else None
+            done, _ = wait(list(pending), timeout=wait_s,
+                           return_when=FIRST_COMPLETED)
+            if not done:
+                # First attempt still running past the hedge delay: race
+                # the next believed-healthy key.
+                hedge_armed = False
+                launch()
+                continue
+            for fut in done:
+                pending.pop(fut, None)
+                ok, data, _seconds = fut.result()
+                if ok:
+                    return data
+            # A failure drained: top up to one running attempt.
+            while len(pending) < 1:
+                if not launch():
+                    break
+        return None
+    finally:
+        executor.shutdown(wait=False)
+
+
 def post_json(url: str, payload: dict, timeout: int = 30,
               source: str = "unknown") -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
-    Tries each eligible key in order (free first, healthiest first). On a
-    failure the key's health is recorded (with backoff so the next request
-    skips it) and the next key is tried immediately. If every eligible key
-    is cooling down, falls back to trying all active keys ignoring backoff
-    as a last resort. Returns the parsed JSON response, or None when every
-    key failed / no keys exist.
+    Fail-fast phases (no sleeping anywhere on the request path):
+    1. Believed-healthy keys (kept fresh by the background prober and by
+       real attempt outcomes): tried with a short per-attempt timeout,
+       active pool first, free first, latency-ranked. Optionally hedged
+       (GEMINI_HEDGE_AFTER_S) with at most 2 requests in flight.
+    2. The classic eligible-key sweep (free first, healthiest first) at
+       the caller's timeout — covers cold starts and stale belief.
+    3. Last resort: all active keys ignoring backoff, as before.
+
+    Every failure records health (backoff so later requests skip the
+    key) and the next key is tried immediately. Attempts per call are
+    capped (GEMINI_MAX_ATTEMPTS) inside a total time budget
+    (GEMINI_ATTEMPT_BUDGET_S). Returns the parsed JSON response, or None
+    when every attempt failed / no keys exist.
 
     `source` names the calling app (e.g. "whispr-web", "creator-bot");
     each attempt is logged to gemini_key_usage for the admin endpoint.
     """
-    candidates = get_candidate_keys()
-    if not candidates:
-        # Last resort: all keys are cooling down — try them anyway
-        # ignoring backoff rather than failing the request outright.
-        candidates = _all_active_keys()
-    for key_id, key_value in candidates:
-        with _lock:
-            _record_dispatch_locked(key_id)
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode("utf-8"), method="POST",
-            headers={"Content-Type": "application/json",
-                     "x-goog-api-key": key_value},
-        )
-        start = time.monotonic()
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            with _lock:
-                _record_latency_locked(key_id, time.monotonic() - start)
-            report_failure(key_id, _classify_http_error(e.code))
-            _log_usage_conn(key_id, source, False)
-            continue
-        except Exception:
-            with _lock:
-                _record_latency_locked(key_id, time.monotonic() - start)
-            report_failure(key_id, "other")
-            _log_usage_conn(key_id, source, False)
-            continue
-        with _lock:
-            _record_latency_locked(key_id, time.monotonic() - start)
-        report_success(key_id)
-        _log_usage_conn(key_id, source, True)
+    caller_timeout = int(timeout or 30)
+    attempt_timeout = max(1, min(caller_timeout, int(_fast_timeout_s())))
+    state = {"n": 0, "deadline": time.monotonic() + _attempt_budget_s()}
+    tried: set[int] = set()
+
+    fast = _fast_candidates()
+    if fast:
+        if _hedge_after_s() > 0 and len(fast) >= 2:
+            data = _try_hedged(fast, url, payload, attempt_timeout, source,
+                               tried, state)
+        else:
+            data = _try_candidates(fast, url, payload, attempt_timeout,
+                                   source, tried, state)
+        if data is not None:
+            return data
+    data = _try_candidates(get_candidate_keys(), url, payload,
+                           caller_timeout, source, tried, state)
+    if data is not None:
         return data
-    return None
+    return _try_candidates(_all_active_keys(), url, payload,
+                           caller_timeout, source, tried, state)
 
 
-def _log_usage_conn(key_id: int | None, source: str, success: bool) -> None:
+# ---------------------------------------------------------------------------
+# Background prober — keeps the believed-healthy view fresh off the
+# request path so recovery is discovered within ~a probe cycle, and
+# death is known before a live request has to discover it.
+# ---------------------------------------------------------------------------
+
+def _probe_payload() -> dict:
+    """Cheapest truthful generation: one token of output."""
+    return {
+        "contents": [{"role": "user", "parts": [{"text": "ok"}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 1},
+    }
+
+
+def _probe_cycle() -> int:
+    """One prober pass. Sends a 1-token probe to each key whose true
+    state is stale or unknown:
+
+    - backoff just expired (recovery check — prompt, not next-request),
+    - unknown state (never succeeded, or marked bad outside backoff),
+    - believed healthy but idle (re-confirm before belief lapses).
+
+    Never probes needs_attention or disabled keys, never inside a
+    backoff window, and never when real traffic touched the key within
+    _PROBE_QUIET_S (real evidence beats a probe, and probes must never
+    starve real traffic — each probe counts toward the per-key dispatch
+    window like any other dispatch). Returns probes sent."""
+    global _prober_last_cycle_at, _probes_total, _probes_ok
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            _seed_belief_locked(conn)
+            rows = conn.execute(
+                """SELECT id, key_value, quota_exhausted_until
+                   FROM gemini_keys
+                   WHERE is_active = 1 AND needs_attention = 0"""
+            ).fetchall()
+        finally:
+            conn.close()
+        due = []
+        for r in rows:
+            key_id = r["id"]
+            if now_mono - _last_probe_mono.get(key_id, 0.0) \
+                    < _PROBE_MIN_INTERVAL_S:
+                continue
+            dq = _dispatch_times.get(key_id)
+            if dq and (now_mono - dq[-1]) < _PROBE_QUIET_S:
+                continue
+            until = _parse_ts(r["quota_exhausted_until"])
+            if until and until > now_wall + 5:
+                continue  # still cooling down; check again at expiry
+            belief = _belief.get(key_id)
+            if until:
+                due.append(r)  # backoff expired: confirm recovery now
+            elif belief and belief.get("ok"):
+                if now_wall - belief.get("at", 0.0) >= _PROBE_CONFIRM_S:
+                    due.append(r)  # idle healthy key: re-confirm
+            else:
+                due.append(r)  # unknown state: find out off-path
+    sent = 0
+    for r in due:
+        _last_probe_mono[r["id"]] = time.monotonic()
+        ok, _data, _seconds = _attempt(
+            r["id"], r["key_value"], _PROBE_URL, _probe_payload(),
+            _PROBE_TIMEOUT_S, "prober")
+        sent += 1
+        with _lock:
+            _probes_total += 1
+            if ok:
+                _probes_ok += 1
+    _prober_last_cycle_at = time.time()
+    return sent
+
+
+def _prober_loop() -> None:
+    interval = _probe_interval_s()
+    while True:
+        try:
+            _probe_cycle()
+        except Exception:
+            logger.exception("gemini_keys: prober cycle failed")
+        time.sleep(interval)
+
+
+def start_prober() -> bool:
+    """Start the background key prober thread (idempotent). Enabled by
+    default; set GEMINI_PROBER=0 to disable. Returns True when this call
+    started the thread."""
+    global _prober_thread
+    if (os.environ.get("GEMINI_PROBER", "1").strip() == "0"):
+        return False
+    with _lock:
+        if _prober_thread is not None and _prober_thread.is_alive():
+            return False
+        _prober_thread = threading.Thread(
+            target=_prober_loop, name="gemini-key-prober", daemon=True)
+        thread = _prober_thread
+    thread.start()
+    logger.info("gemini_keys: background prober started (interval %.0fs)",
+                _probe_interval_s())
+    return True
+
+
+def _log_usage_conn(key_id: int | None, source: str, success: bool,
+                    seconds: float | None = None) -> None:
     """Open a short-lived connection just for usage logging."""
     try:
         conn = db.connect()
         try:
             _ensure_table(conn)
-            _log_usage(conn, key_id, source, success)
+            _log_usage(conn, key_id, source, success,
+                       int(seconds * 1000) if seconds is not None else None)
         finally:
             conn.close()
     except Exception:
@@ -648,7 +1100,7 @@ def _log_usage_conn(key_id: int | None, source: str, success: bool) -> None:
 
 def get_usage(limit: int = 100) -> list[dict]:
     """Recent key usage for the admin endpoint: last N requests with
-    source, key label, timestamp, and success/failure."""
+    source, key label, timestamp, success/failure and attempt latency."""
     limit = max(1, min(int(limit or 100), 500))
     with _lock:
         conn = db.connect()
@@ -656,6 +1108,7 @@ def get_usage(limit: int = 100) -> list[dict]:
             _ensure_table(conn)
             rows = conn.execute(
                 """SELECT u.id, u.created_at, u.key_id, u.source, u.success,
+                          u.latency_ms,
                           k.label AS key_label, k.is_paid AS is_paid
                    FROM gemini_key_usage u
                    LEFT JOIN gemini_keys k ON k.id = u.key_id
@@ -671,6 +1124,7 @@ def get_usage(limit: int = 100) -> list[dict]:
                 "is_paid": bool(r["is_paid"]) if r["is_paid"] is not None else None,
                 "source": r["source"],
                 "success": bool(r["success"]),
+                "latency_ms": r["latency_ms"],
             } for r in rows]
         finally:
             conn.close()
@@ -829,8 +1283,7 @@ def set_active(key_id: int, is_active: bool) -> dict | None:
             conn.close()
 
 
-_TEST_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
-             "gemini-3.1-flash-lite:generateContent")
+_TEST_URL = _PROBE_URL
 
 
 def test_key(key_id: int) -> dict | None:
@@ -851,14 +1304,8 @@ def test_key(key_id: int) -> dict | None:
                       "parts": [{"text": "Reply with the single word: ok"}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 5},
     }
-    req = urllib.request.Request(
-        _TEST_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": row["key_value"]},
-    )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _http_post(_TEST_URL, payload, row["key_value"], 20)
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts if p.get("text"))
         report_success(key_id)
