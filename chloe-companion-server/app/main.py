@@ -50,6 +50,7 @@ GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
 # GET  /api/v1/feed [auth] -> {posts:[...]} (unified timeline, all girls)
 POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
 POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls)
+POST /api/v1/admin/her-day/generate-all (admin) -> {ok, generated, skipped, failed, errors}
 """
 from __future__ import annotations
 
@@ -1299,6 +1300,32 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
                 "users": len(user_ids)}
     finally:
         conn.close()
+
+
+@app.post("/api/v1/admin/her-day/generate-all")
+def admin_her_day_generate_all(request: Request):
+    """Admin: run the daily Whispr Feed generation for ALL users.
+
+    Same work the 6 AM cron performs, but callable with the admin token
+    (X-Admin-Token header) instead of a per-user session. Idempotent:
+    users/girls that already have today's posts are skipped
+    (her_day_exists_today). Per-user failures are collected in `errors`,
+    not fatal to the batch.
+
+    Returns {ok, generated, skipped, failed, errors:[...]}.
+    """
+    _require_admin(request)
+    try:
+        report = her_day.generate_daily()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500,
+                            detail=f"generate_daily failed: {e}") from e
+    errors = report.get("errors", [])
+    return {"ok": True,
+            "generated": report.get("generated", 0),
+            "skipped": report.get("skipped", 0),
+            "failed": len(errors),
+            "errors": errors}
 
 
 # ---------------------------------------------------------------------------
