@@ -10,7 +10,7 @@
   /* ---------- characters ---------- */
   const AVATAR_BASE = 'https://keyhole-latest-production.up.railway.app';
   const MEDIA_BASE = 'https://keyhole-latest-production.up.railway.app';
-  const CHARACTERS = [
+  const CURATED_CHARACTERS = [
     { id: 'isabella', name: 'Isabella',
       avatar: AVATAR_BASE + '/media/files/isabella_6c8d820baed84544.png',
       videos: [
@@ -51,6 +51,9 @@
       desc: 'Sun-kissed, easygoing, and always mid-laugh.',
       bestFor: 'Beach-day lightness, music at sunset, and talks that drift past midnight.' },
   ];
+  // The live picker list: starts as the curated cards, then loadRoster()
+  // reconciles it with the server roster (see below).
+  let CHARACTERS = CURATED_CHARACTERS.slice();
   let currentGirl = CHARACTERS[1];
   let avatarCycleTimer = null;
 
@@ -83,17 +86,63 @@
     CHARACTERS.forEach((c) => {
       const el = document.createElement('div');
       el.className = 'girl-card';
+      const descBits = [];
+      if (c.desc) descBits.push(c.desc);
+      if (c.bestFor) descBits.push(`<b>Best for:</b> ${c.bestFor}`);
+      const descHtml = descBits.length
+        ? `<div class="girl-desc">${descBits.join('<br>')}</div>` : '';
       el.innerHTML = `
         <img class="girl-photo" src="${c.avatar}" alt="${c.name}" loading="lazy">
         <div class="girl-info">
           <div class="girl-name">${c.name}</div>
           <span class="online-dot">● Online Now</span>
-          <div class="girl-desc">${c.desc}<br><b>Best for:</b> ${c.bestFor}</div>
+          ${descHtml}
           <button class="start-chat-btn">[ Chat on Whispr ]</button>
         </div>`;
       el.addEventListener('click', () => openChat(c.id));
       wrap.appendChild(el);
     });
+  }
+
+  /* ---------- roster (server-driven picker) ---------- */
+  // The picker list comes from GET /api/v1/characters (with the auth token
+  // when signed in; owner-scoped characters appear only for their owner —
+  // the server decides). Curated cards keep their look/copy and come first;
+  // anything else on the roster (creations, future girls) is appended from
+  // server fields. On any fetch failure the curated list stays as-is
+  // (offline/demo fallback).
+  async function loadRoster() {
+    try {
+      const headers = {};
+      const tok = getToken();
+      if (tok) headers['Authorization'] = 'Bearer ' + tok;
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/characters', { headers });
+      if (!res.ok) return;
+      const data = await res.json();
+      const roster = (data && data.characters) || [];
+      if (!Array.isArray(roster) || !roster.length) return;
+      const onRoster = new Set(roster.map((c) => String(c.id || '').toLowerCase()));
+      const merged = CURATED_CHARACTERS.filter((c) => onRoster.has(c.id));
+      const known = new Set(merged.map((c) => c.id));
+      roster.forEach((rc) => {
+        const id = String(rc.id || '').toLowerCase();
+        if (!id || known.has(id)) return;
+        known.add(id);
+        merged.push({
+          id,
+          name: rc.name || id,
+          avatar: rc.avatar_url || '',
+          videos: [],
+          desc: '',
+          bestFor: '',
+        });
+      });
+      if (!merged.length) return;
+      CHARACTERS = merged;
+      const cg = CHARACTERS.find((c) => c.id === currentGirl.id);
+      if (cg) currentGirl = cg;
+      renderGirlCards();
+    } catch (e) { /* offline/demo: curated fallback stays */ }
   }
 
   async function openChat(girlId) {
@@ -673,6 +722,7 @@
       showToast('Welcome back!');
       updateBalance();
       loadLandingReferral();
+      loadRoster();
     } catch (e) {
       authError('Network error — try again');
     }
@@ -824,8 +874,8 @@
         closeSheet('creatorSheet');
         reset();
         showToast("She's live! Pick her from the girls list.");
-        // Refresh the girl list so she appears
-        if (typeof renderGirlCards === 'function') renderGirlCards();
+        // Refresh the girl list so she appears (refetch: roster is server-scoped)
+        loadRoster();
       } catch (e) {
         const msg = (e && e.message) || '';
         if (msg.includes('402')) showError('Creating a companion needs a paid plan.');
@@ -1139,6 +1189,7 @@
   WhisprFeed.init();
 
   // Go.
+  loadRoster();
   if (localStorage.getItem('chloe_name')) {
     showApp();
     bootChat(false);
