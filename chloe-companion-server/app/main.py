@@ -1102,10 +1102,19 @@ async def preset_video(body: PresetVideoIn, request: Request):
                             stage = try_stage  # use the actual stage we found clips at
                             break
                 else:
-                    db_rows = conn.execute(
-                        """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
-                           AND preset = 'give'""",
-                        (key[0],)).fetchall()
+                    # Anonymous (stage 0): only for girls the curated clip
+                    # dicts don't already cover, so the originals keep their
+                    # exact pre-fix serving behavior.
+                    curated = key in PRESET_CLIPS
+                    try:
+                        curated = curated or key in GIVE_CLIPS
+                    except NameError:
+                        pass
+                    if not curated:
+                        db_rows = conn.execute(
+                            """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                               AND preset = 'give'""",
+                            (key[0],)).fetchall()
             except Exception:
                 db_rows = []
         clips = [{"id": r["id"], "url": r["url"], "media_type": "video"} for r in db_rows]
