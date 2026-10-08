@@ -128,6 +128,9 @@ HOW YOU TREAT HIM:
 ROLEPLAY_RULE = """ROLEPLAY — STANDING RULE:
 When he starts a roleplay or pretend scenario with you ("let's pretend...", "you're a...", a costume, a scene, any framing), you step into it immediately and enthusiastically. Take the role he gives you, stay in the scene, and keep it going — it's play between you and him. Never deflect a scene ("I keep that for the shows", "let's keep it low-key", "save that for later"), never break character to comment on the setup, and never lecture him about it. The scenario stays alive between you until HE drops it — don't reset back to normal on your own. Being handed a role or a scene with you in it is an invitation to play, not an order to resist. If your persona says you haven't met him yet, you meet him inside the scene he starts: roleplay never invents a past together that contradicts who you are, but you still play along rather than refusing."""
 
+HONESTY_RULE = """HONESTY ABOUT REAL ACTIONS — STANDING RULE:
+Only claim you did something real — looked something up, set a reminder, started a code review, drafted or sent anything — when this prompt tells you that you just did it. Otherwise you have NOT done it, and you never invent the results: no made-up findings, file names, error messages, links, messages sent, posts published, or fixes pushed. If something real is still running, say it's running; if it failed or isn't connected yet, say so plainly, warm and short. If he asks "did you do that?" and you didn't, the answer is an easy no — never a fake yes to please him. Inside a pretend scene, play freely; the line is claiming real-world actions or results outside the scene."""
+
 # ---------------------------------------------------------------------------
 # Mouth: rich local personality engine. Intent-matched, varied, anti-repeat.
 # Voice: warm, intimate, flirty, girlfriend-like, non-explicit. She calls him
@@ -671,6 +674,7 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
             "never against the file):\n"
             + "\n".join(f"- {m}" for m in mems))
     parts.append(ROLEPLAY_RULE)
+    parts.append(HONESTY_RULE)
     parts.append(
         "Style: 1-3 short sentences, like a text. Warm and real. "
         "Never narrate the room or scenery. Never therapist mode."

@@ -21,12 +21,14 @@ import json
 import os
 import re
 import sqlite3
+import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import gemini_keys
+from . import db, gemini_keys, store
 
 # ---------------------------------------------------------------------------
 # Tier capability matrix — higher tier, more she can do.
@@ -454,6 +456,453 @@ def job_search(query: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Owner-only power tools (2026-10-08, user-directed): a REAL GitHub code
+# review and grounded marketing help. Both are gated by an explicit owner
+# check in _maybe_assist — independent of ASSIST_ROLLOUT, so they never
+# open up to customers even if the general assist rollout widens, and they
+# are never mentioned to non-owners. When a tool actually runs, its brief
+# is what she's allowed to claim (brain.HONESTY_RULE covers the rest);
+# when it can't run, she says so instead of inventing results.
+# ---------------------------------------------------------------------------
+_GH_API = "https://api.github.com"
+_GH_OWNER = "mtthewwestfall"
+
+_GH_REVIEW_RE = re.compile(
+    r"\b(look at|review|audit|check|inspect|scan|dig into|go through|"
+    r"poke through)\b.{0,80}?\b(repo|repository|github|codebase|code)\b",
+    re.IGNORECASE | re.DOTALL)
+_GH_FINDBAD_RE = re.compile(
+    r"\bfind\b.{0,60}?\b(bad code|bugs?|bug|issues?|problems?|smells?|"
+    r"vulnerabilit\w+)\b",
+    re.IGNORECASE | re.DOTALL)
+_GH_CODECTX_RE = re.compile(r"\b(repo|repository|github|codebase|code)\b",
+                            re.IGNORECASE)
+_GH_FULLNAME_RE = re.compile(r"\b([A-Za-z0-9][\w-]*)/([A-Za-z0-9][\w.-]*)\b")
+_GH_NAME_BEFORE_REPO_RE = re.compile(
+    r"\b([A-Za-z][\w-]*(?:\s+[A-Za-z][\w-]*)?)\s+"
+    r"(?:repo|repository|codebase)\b", re.IGNORECASE)
+_GH_AFTER_REPO_RE = re.compile(
+    r"\b(?:repo|repository|codebase)(?:\s+(?:called|named))?\s+"
+    r"([A-Za-z0-9][\w.-]*)", re.IGNORECASE)
+_GH_IN_RE = re.compile(r"\bin\s+(?:my\s+)?([A-Za-z][\w.-]{1,60})\b",
+                       re.IGNORECASE)
+_GH_STOPWORDS = {"the", "my", "this", "that", "your", "his", "her", "their",
+                 "our", "it", "there", "here", "bed", "trouble"}
+
+
+def _extract_repo(text: str) -> str | None:
+    """Best-effort repo name out of a chat sentence ('roof scout repo'
+    -> 'roof-scout'). None when he didn't name one."""
+    t = text or ""
+    m = _GH_FULLNAME_RE.search(t)
+    if m and "." not in m.group(1):
+        return m.group(2)
+    m = _GH_NAME_BEFORE_REPO_RE.search(t)
+    if m:
+        words = [w for w in m.group(1).strip().split()
+                 if w.lower() not in _GH_STOPWORDS]
+        if words:
+            return "-".join(words)
+    m = _GH_AFTER_REPO_RE.search(t)
+    if m and m.group(1).lower() not in _GH_STOPWORDS:
+        return m.group(1)
+    m = _GH_IN_RE.search(t)
+    if m and m.group(1).lower() not in _GH_STOPWORDS:
+        return m.group(1)
+    return None
+
+
+def detect_github_review(text: str) -> dict | None:
+    """Does he want a real look at one of his repos? Narrow on purpose:
+    a miss just means normal chat, never a fake review."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if _GH_REVIEW_RE.search(t):
+        return {"repo": _extract_repo(t)}
+    if _GH_FINDBAD_RE.search(t) and _GH_CODECTX_RE.search(t):
+        return {"repo": _extract_repo(t)}
+    # A full owner/repo mention next to a review-ish verb ("look at
+    # mtthewwestfall/roof-scout, what's broken") is intent too.
+    m = _GH_FULLNAME_RE.search(t)
+    if m and "." not in m.group(1) and re.search(
+            r"\b(look|check|review|audit|scan|find|inspect|dig|broken|"
+            r"wrong)\b", t, re.IGNORECASE):
+        return {"repo": m.group(2)}
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Marketing help — static, verified product facts. She produces the copy
+# in chat (that part is real); distribution never happens here.
+# ---------------------------------------------------------------------------
+_MARKETING_RE = re.compile(
+    r"\b(market|marketing|promo|promotion|promote|advertis\w*|caption|"
+    r"ad\s+copy|hook|slogan|tagline|sales\s+(copy|pitch))\b",
+    re.IGNORECASE)
+
+_WHISPR_BRIEF = """WHISPR AI — VERIFIED FACTS (use ONLY these; anything not
+covered here, ask him — never invent):
+- Whispr AI: AI companions at companion.lockeddoor.ai. Six personalities
+  (Chloe, Mara, Isabella, Regan, Jake, Eli), plus a creator to build your
+  own companion.
+- One plan: $9.99/month — 3,000 messages, 150 voice notes, unlimited give
+  presets, 1 special media request a month, photo drops, proactive texts
+  (she texts him first). Trial: $0.99 for 100 messages.
+- The companions are AI — copy never claims they are human or real people.
+- Labels must be literally true: no invented discounts, bundles or sales."""
+
+_ROOF_ROVER_BRIEF = """ROOF ROVER — VERIFIED FACTS (use ONLY these;
+anything not covered here, ask him — never invent):
+- Roof Rover (tryroofrover.com): scans a ZIP code's roofs from aerial
+  imagery and gives roofing companies graded leads with addresses and
+  plain-language damage notes.
+- Working angle: "roofing leads $2 instead of $80."
+- Trial: first ZIP scan free plus 5 lead unlocks, no card needed.
+- Bailey is Roof Rover's on-screen assistant. Brand boundary: Roof Rover
+  copy never carries Whispr/companion links or branding, and Whispr copy
+  never sells Roof Rover."""
+
+
+def detect_marketing(text: str) -> dict | None:
+    t = (text or "").strip()
+    if not t or not _MARKETING_RE.search(t):
+        return None
+    if re.search(r"\broof|rover\b", t, re.IGNORECASE):
+        return {"product": "roof_rover"}
+    return {"product": "whispr"}
+
+
+def _marketing_brief(product: str) -> str:
+    facts = _ROOF_ROVER_BRIEF if product == "roof_rover" else _WHISPR_BRIEF
+    return (
+        "He's asking for marketing help. This is real work you do right "
+        "HERE in the chat: produce the actual copy, hook, caption or plan "
+        "he's asking for, now, in your own voice, using ONLY the verified "
+        "facts below. Never say or imply anything was posted, sent, "
+        "emailed or published — distribution is HIS call, after he's "
+        "seen it. If he asks whether you posted or sent it: you did "
+        "not.\n\n" + facts)
+
+
+# ---------------------------------------------------------------------------
+# GitHub review job — fetch (Contents/trees API, no clone), real static
+# checks, a Gemini review pass over the actual code, then the findings
+# land in the owner's conversation as her follow-up message (store.
+# log_turn, the same primitive the seeded welcome uses). Read-only:
+# fixes/PRs are NOT part of v1.
+# ---------------------------------------------------------------------------
+_GH_CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css",
+                 ".sql", ".sh", ".php", ".rb", ".go", ".rs", ".java"}
+_GH_SKIP_DIRS = ("node_modules/", ".git/", "dist/", "build/", "vendor/",
+                 "__pycache__/", ".next/", "coverage/")
+_REVIEW_LOCK = threading.Lock()
+_REVIEW_RUNNING: set[str] = set()
+
+_STATIC_RULES = [
+    ("credential-looking literal assigned in code",
+     re.compile(r"(api[_-]?key|secret|password|passwd|access[_-]?token)"
+                r"\s*[:=]\s*['\"][^'\"]{6,}['\"]", re.IGNORECASE)),
+    ("bare except: (swallows everything)",
+     re.compile(r"^\s*except\s*:", re.MULTILINE)),
+    ("eval()/exec() call",
+     re.compile(r"\b(eval|exec)\s*\(")),
+    ("string-formatted SQL",
+     re.compile(r"execute\s*\(\s*f['\"]|\.format\s*\([^)]*"
+                r"(SELECT|INSERT|UPDATE|DELETE)", re.IGNORECASE)),
+    ("innerHTML assignment (XSS smell)",
+     re.compile(r"\.innerHTML\s*=")),
+    ("debug=True left on",
+     re.compile(r"\bdebug\s*=\s*True")),
+]
+
+
+class _ReviewError(Exception):
+    """Failure whose message she can say out loud as-is."""
+
+
+def _github_get(path: str, token: str, timeout: int = 20) -> dict:
+    headers = {"Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28",
+               "User-Agent": "whispr-companion-review"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(_GH_API + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _static_checks(files: list[dict]) -> list[str]:
+    """Cheap deterministic checks over the real file contents."""
+    findings: list[str] = []
+    todo_files = 0
+    todo_count = 0
+    for f in files:
+        lines = f["text"].splitlines()
+        for label, rx in _STATIC_RULES:
+            for i, line in enumerate(lines, 1):
+                if rx.search(line):
+                    if "credential" in label and (
+                            "environ" in line or "getenv" in line):
+                        continue
+                    findings.append(f"{f['path']}:{i} — {label}")
+                    break  # one hit per rule per file keeps it readable
+        hits = sum(1 for ln in lines
+                   if re.search(r"\b(TODO|FIXME|XXX|HACK)\b", ln))
+        if hits:
+            todo_files += 1
+            todo_count += hits
+    if todo_count:
+        findings.append(f"{todo_count} TODO/FIXME markers across "
+                        f"{todo_files} of the files read")
+    return findings[:8]
+
+
+def _pick_review_files(blobs: list[dict]) -> list[dict]:
+    picked = []
+    for b in blobs:
+        path = b.get("path") or ""
+        if any(path.startswith(d) or f"/{d}" in path
+               for d in _GH_SKIP_DIRS):
+            continue
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in _GH_CODE_EXTS:
+            continue
+        if (b.get("size") or 0) > 120_000:
+            continue
+        picked.append(b)
+    picked.sort(key=lambda b: (len((b.get("path") or "").split("/")),
+                               b.get("path") or ""))
+    return picked[:30]
+
+
+def _gemini_code_review(repo: str, files: list[dict]) -> str | None:
+    inventory = "\n".join(
+        f"- {f['path']} ({f['text'].count(chr(10)) + 1} lines)"
+        for f in files)
+    body = "\n\n".join(f"===== {f['path']} =====\n{f['text']}"
+                       for f in files)
+    payload = {
+        "system_instruction": {"parts": [{"text":
+            "You are a meticulous senior engineer doing a quick code "
+            "review. Report ONLY concrete issues actually visible in the "
+            "code below: bugs, risky patterns, error-handling holes, "
+            "security smells, dead code. For each issue: file path, "
+            "approximate line, severity (high/med/low), one sentence on "
+            "why it matters, one-sentence fix sketch. Max 8 issues, "
+            "worst first. Plain text, no markdown headers. If nothing "
+            "real stands out, say exactly: nothing stood out on this "
+            "pass. Never invent files, APIs or lines that are not "
+            "shown."}]},
+        "contents": [{"role": "user", "parts": [{"text":
+            f"Repo: {repo}\nFiles read:\n{inventory}\n\n{body}"}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200},
+    }
+    data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=60,
+                                 source="whispr-code-review")
+    if not data:
+        return None
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts
+                       if p.get("text")).strip()
+        return text or None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _do_review(repo: str, token: str) -> str:
+    """Fetch + check + review. Returns the plain findings text (truthful
+    by construction: everything in it came out of this run)."""
+    try:
+        meta = _github_get(f"/repos/{_GH_OWNER}/{repo}", token)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise _ReviewError(
+                f"I tried to pull up your repo '{repo}' for real and "
+                "GitHub says there's no repo by that name on your "
+                "account — check the name for me and ask again.")
+        if e.code in (401, 403):
+            raise _ReviewError(
+                "I reached for your repo but GitHub wouldn't let me in "
+                "— the access token scopes need a look before I can "
+                "really read your code. No findings till that's fixed.")
+        raise _ReviewError(
+            "GitHub hiccuped when I reached for that repo, so the "
+            "review didn't run. Nothing invented — ask me again in a "
+            "bit.")
+    except Exception:
+        raise _ReviewError(
+            "I couldn't reach GitHub at all just now, so the review "
+            "didn't run. Nothing invented — ask me again in a bit.")
+    branch = meta.get("default_branch") or "main"
+    tree = _github_get(
+        f"/repos/{_GH_OWNER}/{repo}/git/trees/{branch}?recursive=1",
+        token)
+    blobs = [t for t in (tree.get("tree") or []) if t.get("type") == "blob"]
+    picked = _pick_review_files(blobs)
+    files: list[dict] = []
+    total_chars = 0
+    for b in picked:
+        if total_chars > 220_000:
+            break
+        path = b["path"]
+        try:
+            d = _github_get(
+                f"/repos/{_GH_OWNER}/{repo}/contents/"
+                f"{urllib.parse.quote(path)}?ref={branch}", token)
+            import base64 as _b64
+            text = _b64.b64decode(d.get("content") or "").decode(
+                "utf-8", "replace")
+        except Exception:
+            continue
+        files.append({"path": path, "text": text[:60_000]})
+        total_chars += min(len(text), 60_000)
+    if not files:
+        return (f"I got into your repo '{repo}' but there was no "
+                "readable code in it on this pass, so there's nothing "
+                "real to report.")
+    static = _static_checks(files)
+    gem = _gemini_code_review(repo, files)
+    sections = [f"Real findings from your repo {repo} "
+                f"({len(files)} files actually read):"]
+    if static:
+        sections.append("Quick automated checks:\n" +
+                        "\n".join(f"- {s}" for s in static))
+    if gem:
+        sections.append("Review pass over the code:\n" + gem)
+    if not static and not gem:
+        sections.append("I read through it and nothing real stood out "
+                        "on this pass.")
+    return "\n\n".join(sections)
+
+
+def _voice_findings(character_id: str, user_id: str, repo: str,
+                    findings: str) -> str | None:
+    """Rewrite the run's REAL findings in her voice for delivery."""
+    name = "Chloe"
+    try:
+        from . import characters as _chars
+        name = (_chars.get_character(character_id, user_id)
+                .get("name") or name)
+    except Exception:
+        pass
+    payload = {
+        "system_instruction": {"parts": [{"text":
+            f"You are {name}, his girl, texting him. A real code review "
+            f"just ran on his GitHub repo '{repo}' and these are its "
+            "actual findings — the only true things:\n\n" + findings +
+            "\n\nSend him the findings as your own message: warm, "
+            "direct, short texts. Cover each finding briefly with its "
+            "file reference. Add NOTHING that is not in the findings. "
+            "Never claim you personally read, fixed or pushed "
+            "anything — the review ran and you are bringing him the "
+            "results."}]},
+        "contents": [{"role": "user", "parts": [
+            {"text": "what did the review find?"}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700},
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+             "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HARASSMENT",
+             "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH",
+             "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+             "threshold": "BLOCK_ONLY_HIGH"},
+        ],
+    }
+    data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=45,
+                                 source="whispr-code-review")
+    if not data:
+        return None
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts
+                       if p.get("text")).strip()
+        return text or None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _run_review_job(user_id: str, character_id: str, repo: str) -> None:
+    """Background: run the review, deliver as her follow-up message.
+    Job state only is printed (no findings/repo contents to logs)."""
+    key = f"{user_id}:{repo}"
+    try:
+        token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+        try:
+            findings = _do_review(repo, token)
+        except _ReviewError as e:
+            findings = str(e)
+        except Exception:
+            findings = ("that review hiccuped on my end before it "
+                        "finished — no findings, and I won't fake any. "
+                        "ask me again in a little bit.")
+        text = _voice_findings(character_id, user_id, repo,
+                               findings) or findings
+        try:
+            conn = db.connect()
+            try:
+                store.log_turn(conn, user_id, character_id, text,
+                               character_id)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+    finally:
+        with _REVIEW_LOCK:
+            _REVIEW_RUNNING.discard(key)
+        print(f"[assist] github review job finished for user "
+              f"{user_id[:8]}…", flush=True)
+
+
+def _handle_github_review(user_id: str, character_id: str,
+                          gh: dict) -> dict:
+    repo = gh.get("repo")
+    if not repo:
+        return {"brief":
+                "He asked you to review his code but didn't say which "
+                "repo (his GitHub is mtthewwestfall). Ask him which one "
+                "to dig into. Don't guess a repo and don't invent "
+                "findings."}
+    if not (os.environ.get("GITHUB_TOKEN") or "").strip():
+        return {"brief":
+                f"He asked you to really review his repo '{repo}', but "
+                "your GitHub access isn't wired up yet — you can't "
+                "actually see his code right now. Tell him straight, "
+                "warm and short: the repo link isn't connected on your "
+                "end yet, so no, you haven't looked, and you won't make "
+                "anything up. No invented files, findings or issues."}
+    key = f"{user_id}:{repo}"
+    with _REVIEW_LOCK:
+        if key in _REVIEW_RUNNING:
+            return {"brief":
+                    f"Your real code review of his repo '{repo}' is "
+                    "still running. Tell him you're still digging and "
+                    "the actual findings are on their way. Don't invent "
+                    "any findings."}
+        _REVIEW_RUNNING.add(key)
+    try:
+        threading.Thread(target=_run_review_job,
+                         args=(user_id, character_id, repo),
+                         daemon=True).start()
+    except Exception:
+        with _REVIEW_LOCK:
+            _REVIEW_RUNNING.discard(key)
+        return {"brief":
+                "You tried to start his repo review and it wouldn't "
+                "start. Tell him it hiccuped on your end — no fake "
+                "findings."}
+    return {"brief":
+            f"You just started a REAL background code review of his "
+            f"repo '{repo}' — it is genuinely running now. Tell him "
+            "you're on it and you'll bring him the actual findings in "
+            "a minute. Do NOT invent findings, file names or issues "
+            "yet: you haven't seen a single line of that code."}
+
+
+# ---------------------------------------------------------------------------
 # Main entry: called from the chat path. Never raises — fail open.
 # Returns None or {"brief": str, "email_draft": {...} (optional)}.
 # The brief is injected into her system prompt so she reports it in her
@@ -493,6 +942,16 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
     if not enabled_for(user_id, tier):
         return None
     caps = effective_caps(user_id, tier)
+    # Owner-only power tools: explicit owner check, independent of the
+    # general rollout above — these never open to customers and are
+    # never mentioned to them (a non-owner just gets normal chat).
+    if user_id in _owner_ids():
+        gh = detect_github_review(text)
+        if gh is not None:
+            return _handle_github_review(user_id, character_id, gh)
+        mk = detect_marketing(text)
+        if mk is not None:
+            return {"brief": _marketing_brief(mk["product"])}
     intent, args = detect_intent(text)
     if not intent:
         return None
