@@ -1085,6 +1085,29 @@ async def preset_video(body: PresetVideoIn, request: Request):
                         break
         except Exception:
             db_rows = []  # table may not have stage column; fall back to clips dict
+        if not db_rows:
+            # Girls added after the original three tag their staged give
+            # library 'give' instead of a named preset; when the requested
+            # named preset has no rows for her, serve that library instead
+            # of 404ing. (The query above already matched for the original
+            # girls, so their behavior is unchanged.)
+            try:
+                if stage > 0:
+                    for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+                        db_rows = conn.execute(
+                            """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                               AND preset = 'give' AND stage = ?""",
+                            (key[0], try_stage)).fetchall()
+                        if db_rows:
+                            stage = try_stage  # use the actual stage we found clips at
+                            break
+                else:
+                    db_rows = conn.execute(
+                        """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
+                           AND preset = 'give'""",
+                        (key[0],)).fetchall()
+            except Exception:
+                db_rows = []
         clips = [{"id": r["id"], "url": r["url"], "media_type": "video"} for r in db_rows]
         # Prefer unseen clips at this stage; if all seen, start a fresh rotation
         fresh = [c for c in clips if c["id"] not in seen_ids] if user_id else clips

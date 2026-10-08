@@ -378,6 +378,10 @@
     chloe: [{ name: 'love', count: 6, emoji: '💕' }],
     mara: [{ name: 'love', count: 1, emoji: '💕' }],
     isabella: [{ name: 'love', count: 1, emoji: '💕' }],
+    regan: [{ name: 'love', count: 6, emoji: '💕' }],
+    jake: [{ name: 'love', count: 9, emoji: '💕' }],
+    eli: [{ name: 'love', count: 9, emoji: '💕' }],
+    brooklyn: [{ name: 'love', count: 11, emoji: '💕' }],
   };
 
   $('plusBtn').addEventListener('click', () => {
