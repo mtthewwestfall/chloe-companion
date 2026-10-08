@@ -800,6 +800,8 @@ def refund_request(conn: sqlite3.Connection, user_id: str,
                    pool_source: str) -> None:
     """Return one consumed request to the bucket it came from (used when a
     regular generation fails or a request is rejected after consuming)."""
+    if pool_source == "give_unlimited":
+        return  # give presets are unlimited — nothing was consumed
     col = {
         "included": "included_remaining",
         "overage_regular": "overage_regular_videos",
@@ -854,6 +856,24 @@ def requests_used_today(conn: sqlite3.Connection, user_id: str) -> int:
     row = conn.execute(
         "SELECT COUNT(*) AS c FROM media_requests "
         "WHERE user_id = ? AND date(created_at) = date('now')",
+        (user_id,),
+    ).fetchone()
+    return row["c"] if row else 0
+
+
+def regular_requests_used_this_month(conn: sqlite3.Connection,
+                                     user_id: str) -> int:
+    """Count consumed regular (custom) requests in the current month.
+
+    Powers the 1/month hard cap on custom requests (2026-10-08). Only
+    pending/ready count: rejected prompts never consumed anything, and
+    failed generations were refunded (failures auto-refund).
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM media_requests "
+        "WHERE user_id = ? AND kind = 'regular' "
+        "AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now') "
+        "AND status IN ('pending', 'ready')",
         (user_id,),
     ).fetchone()
     return row["c"] if row else 0

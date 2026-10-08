@@ -261,6 +261,10 @@ def _request_balance(conn: Any, user_id: str, girl_id: str = "") -> dict[str, An
         "daily_cap": config.DAILY_REQUEST_CAPS.get(tier, 3),
         "give_available": (store.girl_has_give(conn, girl_id)
                            if girl_id else False),
+        "give_unlimited": True,  # give presets unlimited (2026-10-08)
+        "regular_monthly_cap": 1,  # custom requests: 1/month (2026-10-08)
+        "regular_used_this_month":
+            store.regular_requests_used_this_month(conn, user_id),
     }
 
 
@@ -867,11 +871,22 @@ def create_media_request(body: MediaRequestIn, request: Request):
         user = store.get_or_create_user(conn, user_id)
         tier = user.get("tier") or "basic"
 
-        # Daily cap (anti-farming). Owners bypass (2026-10-05).
+        # Owners bypass all limits (2026-10-05).
         is_owner = user_id in assist._owner_ids()
-        cap = config.DAILY_REQUEST_CAPS.get(tier, 3)
-        if not is_owner and store.requests_used_today(conn, user_id) >= cap:
-            raise HTTPException(status_code=429, detail="daily_request_cap")
+        if kind == "give":
+            # Give presets are unlimited (2026-10-08): pre-made clips, $0
+            # marginal cost. Skip the daily cap and pool consumption.
+            pool = {"source": "give_unlimited"}
+        else:
+            # Regular (custom) requests: 1 per month hard cap (2026-10-08).
+            if (not is_owner and
+                    store.regular_requests_used_this_month(conn, user_id) >= 1):
+                raise HTTPException(status_code=402,
+                                    detail="monthly_regular_cap")
+            # Daily cap (anti-farming) still applies to regular requests.
+            cap = config.DAILY_REQUEST_CAPS.get(tier, 3)
+            if not is_owner and store.requests_used_today(conn, user_id) >= cap:
+                raise HTTPException(status_code=429, detail="daily_request_cap")
 
         # Give is only offered for girls that actually have give footage.
         if kind == "give" and not store.girl_has_give(conn, cid):
@@ -905,12 +920,15 @@ def create_media_request(body: MediaRequestIn, request: Request):
             raise HTTPException(status_code=503,
                                 detail="generation_unavailable")
 
-        if is_owner:
-            pool = {"source": "owner"}  # unlimited: nothing consumed
-        else:
-            pool = store.consume_request(conn, user_id, kind)
-            if pool is None:
-                raise HTTPException(status_code=402, detail="no_requests_left")
+        if kind != "give":
+            # (give already set pool = give_unlimited above)
+            if is_owner:
+                pool = {"source": "owner"}  # unlimited: nothing consumed
+            else:
+                pool = store.consume_request(conn, user_id, kind)
+                if pool is None:
+                    raise HTTPException(status_code=402,
+                                        detail="no_requests_left")
 
         req = store.create_media_request(
             conn, user_id, cid, kind, media, body.prompt,

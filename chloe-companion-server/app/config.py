@@ -175,16 +175,23 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # ---------------------------------------------------------------------------
 # Custom media requests ("request-a-pic", 2026-10-01). Per-tier monthly
-# included pools, shared across BOTH categories (regular + give) — user
-# locked 2026-09-30. Pools top up like the message banks (no stacking):
-# set_tier and the Stripe renewal path both refill included_remaining to
-# the tier allocation via store.refill_request_pool().
+# included pools — regular (custom) requests only since 2026-10-08; give
+# presets are unlimited and bypass the pool entirely. Pools top up like
+# the message banks (no stacking): set_tier and the Stripe renewal path
+# both refill included_remaining to the tier allocation via
+# store.refill_request_pool().
+#
+# Effective limits (2026-10-08): give = unlimited; regular = 1/month hard
+# cap (enforced in main.create_media_request via
+# store.regular_requests_used_this_month). The pool below is a formality
+# for regular — 1/month can never exhaust it.
 # ---------------------------------------------------------------------------
 REQUEST_POOLS = {
     "basic": 20,   # single $9.99 tier gets the old VIP pool (2026-10-08)
 }
 
-# Daily per-user request caps (anti-farming). Admin-configurable later.
+# Daily per-user request caps (anti-farming). Applies to regular requests
+# only since 2026-10-08 (give is unlimited). Admin-configurable later.
 DAILY_REQUEST_CAPS = {
     "basic": 10,   # single tier gets the old VIP cap (2026-10-08)
 }
