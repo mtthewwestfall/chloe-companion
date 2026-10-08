@@ -2,7 +2,7 @@
 
 Message types: good_morning, missed_you, show_hype.
 Guards:
-  - tier-gated: proactive only on $19.99+ (plus/vip)
+  - proactive included in the single $9.99 tier (2026-10-08)
   - per-user cap: max 2 proactive messages per day
   - quiet hours: 11pm–8am user-local (user.timezone on the users row)
   - per-user opt-out: proactive_enabled flag

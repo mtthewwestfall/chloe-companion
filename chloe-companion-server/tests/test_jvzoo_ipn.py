@@ -98,13 +98,13 @@ class JvzooIpnTest(unittest.TestCase):
     def test_bill_fulfills_paid_tier(self):
         self._make_user("buyer@example.com")
         res = api._handle_jvzoo_ipn(
-            self._form(transaction_type="BILL", total="19.99", paykey="PK2"))
+            self._form(transaction_type="BILL", total="9.99", paykey="PK2"))
         self.assertEqual(res["action"], "rebill_topup")
-        self.assertEqual(res["tier"], "plus")
+        self.assertEqual(res["tier"], "basic")
         u = self._user("u_jv1")
-        self.assertEqual(u["tier"], "plus")
-        self.assertEqual(u["messages_remaining"], 2000)
-        self.assertEqual(u["voice_notes_remaining"], 60)
+        self.assertEqual(u["tier"], "basic")
+        self.assertEqual(u["messages_remaining"], 3000)
+        self.assertEqual(u["voice_notes_remaining"], 150)
 
     def test_duplicate_paykey_ignored(self):
         self._make_user("buyer@example.com")
@@ -117,10 +117,10 @@ class JvzooIpnTest(unittest.TestCase):
     def test_refund_downgrades_to_basic(self):
         self._make_user("buyer@example.com")
         api._handle_jvzoo_ipn(
-            self._form(transaction_type="BILL", total="29.99", paykey="PK4"))
-        self.assertEqual(self._user("u_jv1")["tier"], "vip")
+            self._form(transaction_type="BILL", total="9.99", paykey="PK4"))
+        self.assertEqual(self._user("u_jv1")["tier"], "basic")
         res = api._handle_jvzoo_ipn(
-            self._form(transaction_type="RFND", total="29.99", paykey="PK5"))
+            self._form(transaction_type="RFND", total="9.99", paykey="PK5"))
         self.assertEqual(res["action"], "downgraded_to_basic")
         self.assertEqual(self._user("u_jv1")["tier"], "basic")
 

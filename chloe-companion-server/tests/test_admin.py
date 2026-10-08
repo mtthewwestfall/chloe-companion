@@ -88,18 +88,18 @@ class AdminTest(unittest.TestCase):
 
     # -- accounts -------------------------------------------------------
     def test_accounts_listing_and_stats(self):
-        self._mk_user("u1", "a@example.com", "Ada", "plus", True, 1500, 500)
+        self._mk_user("u1", "a@example.com", "Ada", "basic", True, 1500, 500)
         self._mk_user("u2", "b@example.com", "Bo", "basic", False, 300, 0)
         res = api._admin_accounts()
         self.assertEqual(res["stats"]["total"], 2)
         self.assertEqual(res["stats"]["verified"], 1)
-        self.assertEqual(res["stats"]["by_tier"]["plus"], 1)
+        self.assertEqual(res["stats"]["by_tier"]["basic"], 2)
         self.assertEqual(res["stats"]["by_tier"]["basic"], 1)
         accts = {a["user_id"]: a for a in res["accounts"]}
         self.assertTrue(accts["u1"]["verified"])
         self.assertFalse(accts["u2"]["verified"])
         self.assertEqual(accts["u1"]["messages_used_total"], 500)
-        self.assertEqual(accts["u1"]["tier"], "plus")
+        self.assertEqual(accts["u1"]["tier"], "basic")
 
     # -- girls ----------------------------------------------------------
     def test_create_girl_resolves_in_roster(self):

@@ -7,35 +7,18 @@ from __future__ import annotations
 import os
 
 # ---------------------------------------------------------------------------
-# Tiers (updated 2026-09-28 per user: $9.99 / $19.99 / $29.99).
-# $9.99 -> 1,000 msgs (text-only); $19.99 -> 2,000 msgs + 60 voice notes +
-# photos + proactive; $29.99 -> 3,000 msgs + 150 voice notes + photos +
-# proactive. Voice-note counts confirmed by user 2026-09-29
-# ("use the preset options for now").
+# Tiers (updated 2026-10-08 per user: single $9.99 tier).
+# $9.99 -> 3,000 msgs + 150 voice notes + photos + proactive.
+# The old $19.99 (plus) and $29.99 (vip) tiers were removed; their Stripe
+# payment links are ARCHIVED (not deleted) in STRIPE_LINKS_ARCHIVE.md at the
+# repo root for reuse later.
 # Banks top up monthly, never stack: a renewal refills TO the allocation.
 # ---------------------------------------------------------------------------
 TIERS = {
     "basic": {
         "name": "Companion",
         "price_usd": 9.99,
-        "messages_per_month": 1000,
-        "voice_notes_per_month": 0,
-        "photo_drops": False,
-        "proactive": False,
-    },
-    "plus": {
-        "name": "Companion Plus",
-        "price_usd": 19.99,
-        "messages_per_month": 2000,
-        "voice_notes_per_month": 60,
-        "photo_drops": True,
-        "proactive": True,
-    },
-    "vip": {
-        "name": "Companion VIP",
-        "price_usd": 29.99,
         "messages_per_month": 3000,
-        # Confirmed by user 2026-09-29 ("use the preset options for now").
         "voice_notes_per_month": 150,
         "photo_drops": True,
         "proactive": True,
@@ -53,9 +36,12 @@ TIERS = {
 # ---------------------------------------------------------------------------
 STRIPE_LIVE_CHECKOUT = {
     "basic": "https://buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c",
-    "plus": "https://buy.stripe.com/bJecMYdHd38H81xfUldjO0d",
-    "vip": "https://buy.stripe.com/4gM4gs8mT10zchN9vXdjO0e",
 }
+# ARCHIVED (2026-10-08): old tier checkout links, disconnected from the tier
+# system but NOT deleted from Stripe — saved for reuse. Full details in
+# STRIPE_LINKS_ARCHIVE.md.
+#   plus ($19.99/mo): https://buy.stripe.com/bJecMYdHd38H81xfUldjO0d
+#   vip  ($29.99/mo): https://buy.stripe.com/4gM4gs8mT10zchN9vXdjO0e
 
 # ---------------------------------------------------------------------------
 # Purchase fulfillment (live, 2026-09-29). The webhook at
@@ -70,18 +56,22 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 # LIVE price -> tier, read from the Stripe dashboard 2026-09-29.
 STRIPE_PRICE_TIERS = {
     "price_1UKjDn6qicU1CK4U7LwzZr9A": "basic",  # $9.99/mo Companion
-    "price_1UKiwL6qicU1CK4UBFqunzeH": "plus",   # $19.99/mo Companion Plus
-    "price_1UKqZl6qicU1CK4U5QNulgOY": "vip",    # $29.99/mo Companion VIP
 }
+# ARCHIVED (2026-10-08) price -> tier mappings, disconnected from fulfillment.
+# See STRIPE_LINKS_ARCHIVE.md for reuse.
+#   "price_1UKiwL6qicU1CK4UBFqunzeH": "plus",   # $19.99/mo Companion Plus
+#   "price_1UKqZl6qicU1CK4U5QNulgOY": "vip",    # $29.99/mo Companion VIP
 
 # LIVE payment link -> tier (checkout.session.completed carries payment_link).
 STRIPE_LINK_TIERS = {
     "plink_1UKjPK6qicU1CK4UJsgj7721": "basic",  # buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c
-    "plink_1UKjPv6qicU1CK4UpaV1VAHb": "plus",   # buy.stripe.com/bJecMYdHd38H81xfUldjO0d
-    "plink_1UKqaT6qicU1CK4UoO0GbptK": "vip",    # buy.stripe.com/4gM4gs8mT10zchN9vXdjO0e
 }
+# ARCHIVED (2026-10-08) payment-link -> tier mappings, disconnected.
+# See STRIPE_LINKS_ARCHIVE.md for reuse.
+#   "plink_1UKjPv6qicU1CK4UpaV1VAHb": "plus",   # buy.stripe.com/bJecMYdHd38H81xfUldjO0d
+#   "plink_1UKqaT6qicU1CK4UoO0GbptK": "vip",    # buy.stripe.com/4gM4gs8mT10zchN9vXdjO0e
 
-TIER_RANK = {"basic": 1, "plus": 2, "vip": 3}
+TIER_RANK = {"basic": 1}  # single tier (2026-10-08)
 
 # Companion -> Keyhole free-show grant. The companion webhook calls the
 # Keyhole backend's /internal/companion-show-grant with the shared secret;
@@ -91,7 +81,7 @@ KEYHOLE_BACKEND_URL = os.environ.get(
     "https://sorority-house-production-aeb5.up.railway.app",
 )
 COMPANION_GRANT_SECRET = os.environ.get("COMPANION_GRANT_SECRET", "")
-SHOW_GRANT_MINUTES = {"basic": 10, "plus": 15, "vip": 30}
+SHOW_GRANT_MINUTES = {"basic": 30}  # single tier gets the old VIP grant (2026-10-08)
 
 # $0.99 one-time trial -> 100 messages, one per customer (live, 2026-09-29).
 TRIAL_PRODUCT_ID = "prod_VLZInf7B1PDPRZ"
@@ -124,9 +114,8 @@ JVZIPN_SECRET = os.environ.get("JVZIPN_SECRET", "")
 # on the first BILL (paid rebill), which is also when the affiliate earns.
 JVZOO_TIER_TOTALS = {
     9.99: "basic",
-    19.99: "plus",
-    29.99: "vip",
 }
+# ARCHIVED (2026-10-08): 19.99 -> "plus", 29.99 -> "vip" removed with the tiers.
 
 # ---------------------------------------------------------------------------
 # Stripe product/price DEFINITIONS — TEST-MODE PLACEHOLDERS.
@@ -140,16 +129,6 @@ STRIPE_TEST_PLACEHOLDERS = {
             "product_id": "prod_TEST_PLACEHOLDER_BASIC",
             "price_id": "price_TEST_PLACEHOLDER_BASIC",
             "tier": "basic",
-        },
-        "plus": {
-            "product_id": "prod_TEST_PLACEHOLDER_PLUS",
-            "price_id": "price_TEST_PLACEHOLDER_PLUS",
-            "tier": "plus",
-        },
-        "vip": {
-            "product_id": "prod_TEST_PLACEHOLDER_VIP",
-            "price_id": "price_TEST_PLACEHOLDER_VIP",
-            "tier": "vip",
         },
     },
 }
@@ -202,23 +181,17 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # the tier allocation via store.refill_request_pool().
 # ---------------------------------------------------------------------------
 REQUEST_POOLS = {
-    "basic": 5,    # $9.99
-    "plus": 10,    # $19.99
-    "vip": 20,     # $29.99
+    "basic": 20,   # single $9.99 tier gets the old VIP pool (2026-10-08)
 }
 
 # Daily per-user request caps (anti-farming). Admin-configurable later.
 DAILY_REQUEST_CAPS = {
-    "basic": 3,
-    "plus": 6,
-    "vip": 10,
+    "basic": 10,   # single tier gets the old VIP cap (2026-10-08)
 }
 
-# Lifetime video request cap for free/trial users (basic tier)
-# to encourage upgrades. Paid tiers (plus/vip) have no lifetime cap.
-LIFETIME_VIDEO_CAPS = {
-    "basic": 2,
-}
+# Lifetime video request cap (2026-10-08): removed — with a single paid tier
+# there is nothing to upgrade to, so no cap.
+LIFETIME_VIDEO_CAPS = {}
 
 # Overage pack ($5.99, paid through Shopify — product + webhook are a
 # separate item; fulfillment calls store.credit_overage_pack()).
@@ -257,3 +230,4 @@ MEDIA_REQUEST_COST_USD = {
 GENERATED_DIR = os.environ.get(
     "CHLOE_GENERATED_DIR",
     os.path.join(os.path.dirname(__file__), "..", "generated"))
+

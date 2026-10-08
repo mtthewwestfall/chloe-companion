@@ -338,12 +338,8 @@ def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = N
                      "empty. try me for $0.99, or grab the $9.99 plan and "
                      "i'm yours all month.")
         elif tier == "basic":
-            nudge = ("i'm out of messages for tonight, babe — "
-                     "want me to stay up with you? plus is $19.99 and i get "
-                     "voice notes too.")
-        elif tier == "plus":
-            nudge = ("i've used up this month's messages, love — "
-                     "vip is $29.99 with way more of me, if you want.")
+            nudge = ("i've used up this month's messages, babe — they'll top "
+                     "back up on my renewal. i'll be right here.")
         else:
             nudge = ("i've used up this month's messages — they'll top back up "
                      "on your renewal. i'll be right here.")
@@ -353,12 +349,8 @@ def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = N
                      f"try the $0.99 trial, or the $9.99 plan for a whole "
                      f"month of me.")
         elif tier == "basic":
-            nudge = (f"i'm out of messages for tonight — "
-                     f"want more of me? {char_name} plus is $19.99 and i get "
-                     "voice notes too.")
-        elif tier == "plus":
-            nudge = ("i've used up this month's messages, love — "
-                     "vip is $29.99 with way more of me, if you want.")
+            nudge = (f"i've used up this month's messages — they'll top back up "
+                     f"on my renewal. i'll be right here.")
         else:
             nudge = ("i've used up this month's messages — they'll top back up "
                      "on your renewal. i'll be right here.")
@@ -1522,7 +1514,7 @@ def _seed_girl_media(conn):
 
 class GrantMonthIn(BaseModel):
     user_id: str
-    tier: str  # basic | plus | vip
+    tier: str  # single tier: "basic"
 
 
 @app.get("/api/v1/admin/accounts")
@@ -1545,11 +1537,11 @@ async def admin_accounts_list(request: Request):
 async def admin_grant_month(body: GrantMonthIn, request: Request):
     """Grant a free month at any plan level."""
     _require_admin(request)
-    if body.tier not in ("basic", "plus", "vip"):
+    if body.tier != "basic":
         raise HTTPException(status_code=400, detail="invalid tier")
-    # Tier message allocations
-    tier_msgs = {"basic": 1000, "plus": 2000, "vip": 3000}
-    tier_voice = {"basic": 0, "plus": 60, "vip": 150}
+    # Tier message allocations (single tier, 2026-10-08)
+    tier_msgs = {"basic": 3000}
+    tier_voice = {"basic": 150}
     conn = _conn()
     try:
         from datetime import datetime, timedelta
@@ -1636,7 +1628,7 @@ def _evaluate_referral_reward(conn, referrer_id: str) -> dict:
         new_exp = base + timedelta(days=days)
         months = (row["vip_months_earned"] or 0) + (12 if active >= 6 else active)
         conn.execute(
-            "UPDATE users SET vip_expires_at = ?, vip_months_earned = ?, tier = 'vip' WHERE user_id = ?",
+            "UPDATE users SET vip_expires_at = ?, vip_months_earned = ?, tier = 'basic' WHERE user_id = ?",
             (new_exp.isoformat(), months, referrer_id))
         conn.commit()
         result["days_granted"] = days
@@ -1877,7 +1869,7 @@ def create_submission(body: SubmissionIn, request: Request):
     conn = _conn()
     try:
         user = store.get_or_create_user(conn, user_id)
-        if (user.get("tier") or "free") not in ("basic", "plus", "vip"):
+        if (user.get("tier") or "free") != "basic":
             raise HTTPException(status_code=402,
                                 detail="paid_tier_required")
         try:
@@ -1898,7 +1890,7 @@ def create_companion(body: CompanionCreateIn, request: Request):
     conn = _conn()
     try:
         user = store.get_or_create_user(conn, user_id)
-        if (user.get("tier") or "free") not in ("basic", "plus", "vip"):
+        if (user.get("tier") or "free") != "basic":
             raise HTTPException(status_code=402,
                                 detail="paid_tier_required")
         # Temporarily owner-only until photo moderation is fixed.
@@ -2363,7 +2355,7 @@ def list_tiers():
         "proactive": False,
         "checkout_url": config.TRIAL_CHECKOUT_URL,
     }]
-    for key in ("basic", "plus", "vip"):
+    for key in ("basic",):
         t = config.TIERS[key]
         plans.append({
             "key": key,

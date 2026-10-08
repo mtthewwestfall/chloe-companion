@@ -312,9 +312,7 @@ async function loadAccounts() {
       <td>${a.messages_remaining ?? '—'}</td>
       <td>${a.email_verified_at ? '<span class="verified">✓</span>' : '<span class="unverified">✗</span>'}</td>
       <td>
-        <button class="grant-btn" onclick="grantMonth('${a.user_id}','basic')">Basic</button>
-        <button class="grant-btn" onclick="grantMonth('${a.user_id}','plus')">Plus</button>
-        <button class="grant-btn" onclick="grantMonth('${a.user_id}','vip')">VIP</button>
+        <button class="grant-btn" onclick="grantMonth('${a.user_id}','basic')">Grant month</button>
       </td>
     </tr>`;
   }).join('');

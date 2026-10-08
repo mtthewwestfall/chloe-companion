@@ -1,10 +1,7 @@
-"""Photo drops: manifest-driven library, tier-gated.
+"""Photo drops: manifest-driven library.
 
-Manifest schema (photo_drops/manifest.json):
-  { "drops": [ { "id": str, "file": str, "tier_min": "plus"|"vip",
-                 "caption": str, "placeholder": bool } ] }
-
-The user curates real photos later; this phase ships 2 PLACEHOLDER entries.
+Single paid tier (2026-10-08): all drops are eligible for "basic".
+Legacy manifest entries may still carry tier_min "plus"|"vip" — ignored.
 """
 from __future__ import annotations
 
@@ -14,7 +11,8 @@ from typing import Any
 
 from . import config
 
-_TIER_RANK = {"basic": 0, "plus": 1, "vip": 2}
+# Legacy rank map kept for reference; drops_for_tier no longer gates.
+_TIER_RANK = {"basic": 2}
 
 
 def manifest_path() -> str:
@@ -31,8 +29,10 @@ def load_manifest() -> list[dict[str, Any]]:
 
 
 def drops_for_tier(tier: str) -> list[dict[str, Any]]:
-    rank = _TIER_RANK.get(tier, 0)
-    return [d for d in load_manifest() if _TIER_RANK.get(d.get("tier_min", "vip"), 99) <= rank]
+    # Single paid tier: every paid user sees every drop.
+    if tier == "basic":
+        return load_manifest()
+    return []
 
 
 def maybe_drop_photo(tier: str, messages_used_total: int, every_n: int = 7) -> dict[str, Any] | None:
