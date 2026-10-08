@@ -214,6 +214,9 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
         "sort_order": 900,
         "enabled": True,
         "photos": images,
+        # Private by default (2026-10-08): user-created companions are
+        # owner-only — visible in the roster only to their creator.
+        "owner_user_id": user_id,
     })
     return {
         "id": girl["id"],
