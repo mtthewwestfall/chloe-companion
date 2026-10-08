@@ -135,6 +135,8 @@ class GirlIn(BaseModel):
     door_title: str = ""
     sort_order: int = 0
     enabled: bool = True
+    verified_fictional: bool = False
+    owner_user_id: str = ""  # 2026-10-08: owner-only private character
 
 
 class GirlUpdate(BaseModel):
@@ -147,6 +149,7 @@ class GirlUpdate(BaseModel):
     sort_order: int | None = None
     enabled: bool | None = None
     verified_fictional: bool | None = None
+    owner_user_id: str | None = None  # 2026-10-08: owner-only privacy scope
 
 
 class GeminiKeyIn(BaseModel):
