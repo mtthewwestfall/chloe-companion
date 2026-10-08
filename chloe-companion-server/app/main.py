@@ -234,6 +234,16 @@ def _current_user_id(request: Request) -> str:
     return user_id
 
 
+def _optional_user_id(request: Request) -> str | None:
+    """Resolve the signed-in user when a valid session is present; None
+    for anonymous calls. Used by endpoints that are public but reveal
+    owner-scoped (private) characters to their owner."""
+    try:
+        return _current_user_id(request)
+    except HTTPException:
+        return None
+
+
 def _user_summary(user: dict[str, Any]) -> dict[str, Any]:
     return {
         "user_id": user["user_id"],
@@ -379,15 +389,16 @@ def _startup():
 def health():
     return {"ok": True, "service": "chloe-companion", "phase": "3-multichar"}
 @app.get("/api/v1/characters")
-def list_characters():
+def list_characters(request: Request):
     """Public roster: companion-enabled characters from the Keyhole admin
     list (kh_companion=true), cached ~5 minutes. Chloe is always first and
-    always present (built-in fallback when the Keyhole backend is down)."""
-    return {"characters": characters.public_list()}
+    always present (built-in fallback when the Keyhole backend is down).
+    Owner-scoped (private) characters appear only for their owner."""
+    return {"characters": characters.public_list(_optional_user_id(request))}
 
 
 @app.get("/api/v1/characters/{character_id}/footage")
-def character_footage(character_id: str):
+def character_footage(character_id: str, request: Request):
     """Public: labeled footage for a companion-local girl, so the app can
     build her video tile. Only the labels the companion app may play
     (typing-main, main, activity) — 'give' is Keyhole-only and is never
@@ -395,6 +406,9 @@ def character_footage(character_id: str):
     whose clips are hardcoded in the app) return an empty list."""
     cid = (character_id or "").strip().lower()
     if not cid or cid == "chloe":
+        return {"footage": []}
+    if not characters.visible_to(cid, _optional_user_id(request)):
+        # Owner-scoped (private) girl: invisible to everyone but her owner.
         return {"footage": []}
     conn = _conn()
     try:
@@ -436,7 +450,7 @@ def _admin_accounts() -> dict:
 
 
 def _admin_girls() -> dict:
-    remote = characters.get_characters()
+    remote = characters.get_characters(include_private=True)
     conn = _conn()
     try:
         local = store.list_local_characters(conn)
@@ -448,7 +462,7 @@ def _admin_girls() -> dict:
         girls.append({**{k: c.get(k) for k in
                          ("id", "name", "avatar_url", "persona",
                           "companion_voice", "blurb", "door_title",
-                          "sort_order")},
+                          "sort_order", "owner_user_id")},
                       "source": "local" if c["id"] in local_ids else
                                 ("builtin" if c["id"] == "chloe" else "keyhole")})
     return {"girls": girls}
@@ -711,8 +725,9 @@ def chat(body: ChatIn, request: Request):
     user_id = _current_user_id(request)  # login required — no free use
     conn = _conn()
     try:
-        # Resolve the character (unknown ids fall back to Chloe).
-        character = characters.get_character(body.character_id)
+        # Resolve the character (unknown ids — and other users' private
+        # characters — fall back to Chloe).
+        character = characters.get_character(body.character_id, user_id)
         cid = character["id"]
 
         user = store.get_or_create_user(conn, user_id)
@@ -848,6 +863,8 @@ def me(user_id: str = "", request: Request = None):
 @app.get("/api/v1/media-requests/balance")
 def media_balance(request: Request, girl_id: str = ""):
     user_id = _current_user_id(request)
+    if girl_id and not characters.visible_to(girl_id, user_id):
+        girl_id = ""  # private girl: invisible to everyone but her owner
     conn = _conn()
     try:
         return _request_balance(conn, user_id, girl_id)
@@ -866,7 +883,7 @@ def create_media_request(body: MediaRequestIn, request: Request):
         raise HTTPException(status_code=400, detail="media must be pic|video")
     conn = _conn()
     try:
-        character = characters.get_character(body.girl_id)
+        character = characters.get_character(body.girl_id, user_id)
         cid = character["id"]
         user = store.get_or_create_user(conn, user_id)
         tier = user.get("tier") or "basic"
@@ -1013,6 +1030,10 @@ async def preset_video(body: PresetVideoIn, request: Request):
         except Exception:
             pass
 
+        # Owner-scoped (private) girls are invisible to everyone else.
+        if not characters.visible_to(key[0], user_id):
+            raise HTTPException(status_code=404, detail="no clips for preset")
+
         stage = 0
         seen_ids = set()
         if user_id:
@@ -1103,15 +1124,19 @@ async def preset_video(body: PresetVideoIn, request: Request):
 
 
 @app.get("/api/v1/girl-videos/{girl_id}")
-async def girl_videos(girl_id: str):
+async def girl_videos(girl_id: str, request: Request):
     """Public: get a girl's main, typing, and activity videos for the chat UI."""
+    result = {"main": [], "typing": [], "activity": []}
+    gid = girl_id.lower().strip()
+    if not characters.visible_to(gid, _optional_user_id(request)):
+        # Owner-scoped (private) girl: invisible to everyone but her owner.
+        return result
     conn = _conn()
     try:
         _seed_girl_media(conn)
         rows = conn.execute(
             "SELECT kind, url FROM girl_media WHERE girl_id = ? AND kind IN ('main', 'typing', 'activity')",
-            (girl_id.lower().strip(),)).fetchall()
-        result = {"main": [], "typing": [], "activity": []}
+            (gid,)).fetchall()
         for r in rows:
             if r["kind"] in result:
                 result[r["kind"]].append(r["url"])
@@ -1143,7 +1168,7 @@ def create_custom_video(body: CustomVideoIn, request: Request):
         raise HTTPException(status_code=400, detail="description too long")
     conn = _conn()
     try:
-        character = characters.get_character(body.girl_id)
+        character = characters.get_character(body.girl_id, user_id)
         cid = character["id"]
         req = store.save_custom_request(conn, user_id, cid, description)
         # Attempt Sogni generation in the background when configured;
@@ -1208,8 +1233,8 @@ def get_unified_feed(request: Request):
     try:
         store.cleanup_expired_her_day(conn)
         posts = store.get_her_day_posts(conn, user_id, girl_id=None)
-        # Attach girl info
-        girl_map = {g["id"]: g for g in characters.public_list()}
+        # Attach girl info (owner-scoped girls resolve only for their owner)
+        girl_map = {g["id"]: g for g in characters.public_list(user_id)}
         for p in posts:
             g = girl_map.get(p.get("girl_id"), {})
             p["girl_name"] = g.get("name", p.get("girl_id", ""))
@@ -2059,7 +2084,7 @@ def poll_media_request(req_id: int, request: Request):
         if req["status"] == "ready":
             out["result_url"] = req["result_url"]
         elif req["status"] == "failed":
-            character = characters.get_character(req["girl_id"])
+            character = characters.get_character(req["girl_id"], user_id)
             out["failed_line"] = _request_failed_line(character)
         return out
     finally:

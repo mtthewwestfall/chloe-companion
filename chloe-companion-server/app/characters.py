@@ -20,6 +20,14 @@ overrides it. The 'chloe' id is reserved and can never be added locally.
 
 Character dicts (internal): {id, name, avatar_url, persona,
 companion_voice, blurb, door_title, sort_order}.
+
+Owner-only private characters (2026-10-08): a local character may carry
+an owner_user_id. Such a character is private — it is only listed for,
+and only resolvable by, that one account. Everyone else gets the same
+behavior as if she did not exist (roster omits her, chat resolution falls
+back to Chloe). Callers without a user context (public endpoints, feed
+generation) pass user_id=None and never see private characters; the admin
+panel passes include_private=True so she stays manageable.
 """
 from __future__ import annotations
 
@@ -59,7 +67,7 @@ def _local_characters() -> list[dict[str, Any]]:
         try:
             rows = conn.execute(
                 "SELECT id, name, avatar_url, persona, companion_voice, blurb,"
-                " door_title, sort_order FROM local_characters "
+                " door_title, sort_order, owner_user_id FROM local_characters "
                 "WHERE enabled = 1 ORDER BY sort_order, name"
             ).fetchall()
             return [dict(r) for r in rows]
@@ -103,9 +111,15 @@ def _fetch() -> list[dict[str, Any]]:
     return out
 
 
-def get_characters(refresh: bool = False) -> list[dict[str, Any]]:
+def get_characters(refresh: bool = False,
+                   user_id: str | None = None,
+                   include_private: bool = False) -> list[dict[str, Any]]:
     """Companion-enabled characters, cached ~5 minutes. Chloe first, then
-    admin sort_order."""
+    admin sort_order.
+
+    Owner-scoped (private) characters are filtered out unless
+    include_private is set (admin) or user_id is their owner.
+    """
     now = time.time()
     if refresh or now - _cache["ts"] > CACHE_TTL_S:
         try:
@@ -123,23 +137,58 @@ def get_characters(refresh: bool = False) -> list[dict[str, Any]]:
         chars.append(dict(lc))
     if not any(c["id"] == "chloe" for c in chars):
         chars.append(dict(CHLOE_FALLBACK))
+    if not include_private:
+        uid = user_id or ""
+        chars = [c for c in chars
+                 if not c.get("owner_user_id") or c.get("owner_user_id") == uid]
     chars.sort(key=lambda c: (0 if c["id"] == "chloe" else 1, c.get("sort_order") or 0))
     return chars
 
 
-def get_character(character_id: str | None) -> dict[str, Any]:
-    """Resolve a character id; unknown ids fall back to Chloe (old clients
-    never 400)."""
+def get_character(character_id: str | None,
+                  user_id: str | None = None) -> dict[str, Any]:
+    """Resolve a character id for this user; unknown ids — and private
+    characters requested by anyone but their owner — fall back to Chloe
+    (old clients never 400)."""
     cid = (character_id or "").strip().lower() or "chloe"
-    for c in get_characters():
+    for c in get_characters(user_id=user_id):
         if c["id"] == cid:
             return c
-    return next(c for c in get_characters() if c["id"] == "chloe")
+    return next(c for c in get_characters(user_id=user_id) if c["id"] == "chloe")
 
 
-def public_list() -> list[dict[str, Any]]:
-    """The shape served by GET /api/v1/characters."""
+def owner_of(character_id: str | None) -> str | None:
+    """The owner_user_id of a companion-local character, or None when the
+    character is public (or not a local character at all)."""
+    cid = (character_id or "").strip().lower()
+    if not cid:
+        return None
+    try:
+        from . import db as _db
+        conn = _db.connect()
+        try:
+            row = conn.execute(
+                "SELECT owner_user_id FROM local_characters WHERE id = ?",
+                (cid,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — roster paths must never break on this
+        return None
+    return (row[0] if row else None) or None
+
+
+def visible_to(character_id: str | None, user_id: str | None) -> bool:
+    """True when this user may see/interact with the character: public
+    characters always; owner-scoped ones only for their owner."""
+    owner = owner_of(character_id)
+    return owner is None or owner == (user_id or "")
+
+
+def public_list(user_id: str | None = None) -> list[dict[str, Any]]:
+    """The shape served by GET /api/v1/characters (owner-scoped characters
+    appear only for their owner)."""
     return [
         {"id": c["id"], "name": c["name"], "avatar_url": c["avatar_url"]}
-        for c in get_characters()
+        for c in get_characters(user_id=user_id)
     ]

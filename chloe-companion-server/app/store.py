@@ -566,7 +566,7 @@ def list_local_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         for r in conn.execute(
             "SELECT id, name, avatar_url, persona, companion_voice, blurb, "
             "door_title, sort_order, enabled, verified_fictional, photos, "
-            "created_at, updated_at "
+            "owner_user_id, created_at, updated_at "
             "FROM local_characters ORDER BY sort_order, name"
         ).fetchall()
     ]
@@ -582,11 +582,19 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
     if isinstance(_photos, list):
         _photos = json.dumps(_photos)
     _photos = _photos if isinstance(_photos, str) and _photos else "[]"
+    # Owner-scoped (private) characters (2026-10-08): owner_user_id is only
+    # changed when the caller explicitly provides the key, so routine admin
+    # edits of a private girl never silently make her public (or vice versa).
+    _owner = char.get("owner_user_id")
+    _owner = _owner.strip() if isinstance(_owner, str) else None
+    _owner = _owner or None
+    _owner_provided = 1 if "owner_user_id" in char else 0
     conn.execute(
         "INSERT INTO local_characters "
         "(id, name, avatar_url, persona, companion_voice, blurb, door_title, "
-        " sort_order, enabled, verified_fictional, photos, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        " sort_order, enabled, verified_fictional, photos, owner_user_id, "
+        " updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
         "ON CONFLICT(id) DO UPDATE SET "
         "name=excluded.name, avatar_url=excluded.avatar_url, "
         "persona=excluded.persona, companion_voice=excluded.companion_voice, "
@@ -594,6 +602,8 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
         "sort_order=excluded.sort_order, enabled=excluded.enabled, "
         "verified_fictional=excluded.verified_fictional, "
         "photos=excluded.photos, "
+        "owner_user_id=CASE WHEN ? THEN excluded.owner_user_id "
+        "ELSE local_characters.owner_user_id END, "
         "updated_at=datetime('now')",
         (
             cid,
@@ -607,6 +617,8 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
             1 if char.get("enabled", True) else 0,
             1 if char.get("verified_fictional") else 0,
             _photos,
+            _owner,
+            _owner_provided,
         ),
     )
     conn.commit()
