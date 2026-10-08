@@ -657,3 +657,18 @@ body {
 .herday-viewer-cta .btn-primary {
   min-width: 200px;
 }
+
+/* ---------- companion creator ---------- */
+.creator-cta { margin: 18px 16px 4px; text-align: center; }
+.creator-cta-sub { color: var(--sub); font-size: 13px; margin: 8px 0 0; }
+.creator-gender-row { display: flex; gap: 10px; margin-bottom: 10px; }
+.gender-pill { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 15px; cursor: pointer; }
+.gender-pill.active { border-color: var(--pink); color: var(--pink); font-weight: 600; }
+.creator-photos-label { display: block; font-size: 13px; color: var(--sub); margin: 4px 0 6px; }
+.creator-photos-input { width: 100%; margin-bottom: 10px; color: var(--text); font-size: 14px; }
+.creator-photo-preview { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.creator-photo-preview img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.creator-check { display: flex; align-items: flex-start; gap: 10px; margin: 10px 0; font-size: 14px; color: var(--text); cursor: pointer; }
+.creator-check input { width: 18px; height: 18px; margin-top: 1px; accent-color: var(--pink); flex-shrink: 0; }
+#creatorSheet .auth-input { margin-bottom: 10px; }
+#creatorSheet textarea.auth-input { resize: vertical; min-height: 80px; font-family: inherit; }

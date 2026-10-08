@@ -720,6 +720,131 @@
     s.addEventListener('click', (e) => { if (e.target === s) s.classList.add('hidden'); });
   });
 
+  /* ---------- companion creator ---------- */
+  const Creator = (() => {
+    let gender = 'female';
+    let photoDataUris = [];
+
+    function setGender(g) {
+      gender = g;
+      $('creatorGenderF').classList.toggle('active', g === 'female');
+      $('creatorGenderM').classList.toggle('active', g === 'male');
+    }
+
+    function downscaleImage(file) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          const maxDim = 1024;
+          let w = img.width, h = img.height;
+          if (Math.max(w, h) > maxDim) {
+            const scale = maxDim / Math.max(w, h);
+            w = Math.round(w * scale);
+            h = Math.round(h * scale);
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('bad image')); };
+        img.src = url;
+      });
+    }
+
+    async function handlePhotos(files) {
+      const list = Array.from(files).slice(0, 3);
+      photoDataUris = [];
+      const preview = $('creatorPhotoPreview');
+      preview.innerHTML = '';
+      for (const f of list) {
+        try {
+          const uri = await downscaleImage(f);
+          photoDataUris.push(uri);
+          const img = document.createElement('img');
+          img.src = uri;
+          preview.appendChild(img);
+        } catch (e) { /* skip bad files */ }
+      }
+    }
+
+    function showError(msg) {
+      const el = $('creatorError');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    function clearError() {
+      $('creatorError').classList.add('hidden');
+    }
+
+    async function submit() {
+      clearError();
+      const name = $('creatorName').value.trim();
+      const persona = $('creatorPersona').value.trim();
+      const blurb = $('creatorBlurb').value.trim();
+      if (!name) return showError('Give your companion a name.');
+      if (!photoDataUris.length) return showError('Add at least 1 photo.');
+      if (!$('creatorAttest18').checked) return showError('Please confirm this companion is over 18.');
+      if (!$('creatorAttestRights').checked) return showError('Please confirm you have the right to use these photos.');
+
+      const btn = $('creatorSubmit');
+      btn.disabled = true;
+      btn.textContent = 'Creating…';
+      try {
+        const resp = await ApiClient.createCompanion({
+          name, persona, blurb, gender,
+          attest_18: true, attest_rights: true,
+          images: photoDataUris,
+        });
+        closeSheet('creatorSheet');
+        reset();
+        showToast("She's live! Pick her from the girls list.");
+        // Refresh the girl list so she appears
+        if (typeof renderGirlCards === 'function') renderGirlCards();
+      } catch (e) {
+        const msg = (e && e.message) || '';
+        if (msg.includes('402')) showError('Creating a companion needs a paid plan.');
+        else if (msg.includes('400')) showError('Couldn\'t create her — check your details and try again.');
+        else showError('Something went wrong — try again.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Create Companion';
+      }
+    }
+
+    function reset() {
+      $('creatorName').value = '';
+      $('creatorPersona').value = '';
+      $('creatorBlurb').value = '';
+      $('creatorPhotos').value = '';
+      $('creatorPhotoPreview').innerHTML = '';
+      $('creatorAttest18').checked = false;
+      $('creatorAttestRights').checked = false;
+      photoDataUris = [];
+      setGender('female');
+      clearError();
+    }
+
+    function init() {
+      const openBtn = $('createCompanionBtn');
+      if (openBtn) openBtn.addEventListener('click', () => {
+        if (!isLoggedIn()) { showAuth(); return; }
+        openSheet('creatorSheet');
+      });
+      $('creatorGenderF').addEventListener('click', () => setGender('female'));
+      $('creatorGenderM').addEventListener('click', () => setGender('male'));
+      $('creatorPhotos').addEventListener('change', (e) => handlePhotos(e.target.files));
+      $('creatorSubmit').addEventListener('click', submit);
+    }
+
+    return { init };
+  })();
+
+  Creator.init();
+
   $('profileBtn').addEventListener('click', async () => {
     openSheet('profileSheet');
     const me = await ApiClient.me();
@@ -1047,3 +1172,4 @@
 
 
 })();
+

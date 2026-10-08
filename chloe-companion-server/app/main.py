@@ -1901,7 +1901,8 @@ def create_submission(body: SubmissionIn, request: Request):
 
 # Companion creator (2026-10-01): ported from the Sorority-house companion
 # creator. Paid members create a custom companion with 1-3 REAL photos;
-# every photo is AI-moderated and the character goes live immediately.
+# 18+ is a user attestation (no photo scan) and the character goes live
+# immediately.
 @app.post("/api/v1/companions/create")
 def create_companion(body: CompanionCreateIn, request: Request):
     user_id = _current_user_id(request)
@@ -1911,11 +1912,6 @@ def create_companion(body: CompanionCreateIn, request: Request):
         if (user.get("tier") or "free") != "basic":
             raise HTTPException(status_code=402,
                                 detail="paid_tier_required")
-        # Temporarily owner-only until photo moderation is fixed.
-        if not creator._is_owner(user_id):
-            raise HTTPException(
-                status_code=503,
-                detail="Companion creation is temporarily disabled — please try again later.")
         try:
             comp = creator.create_companion(conn, user_id,
                                             body.model_dump())
@@ -2893,3 +2889,4 @@ def proxy_openai_chat_completions(body: dict, request: Request):
             "total_tokens": usage.get("totalTokenCount", 0),
         },
     }
+

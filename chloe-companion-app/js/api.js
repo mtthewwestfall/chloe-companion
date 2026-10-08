@@ -146,5 +146,12 @@ const ApiClient = (() => {
     return data;
   }
 
-  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, onStatus, isConnected: () => connected };
+  async function createCompanion(data) {
+    const resp = await request('POST', '/api/v1/companions/create', data);
+    setConnected(true);
+    return resp;
+  }
+
+  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, createCompanion, onStatus, isConnected: () => connected };
 })();
+

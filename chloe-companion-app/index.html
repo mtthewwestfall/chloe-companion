@@ -49,6 +49,12 @@
         </div>
         <div id="girlCards" class="girl-cards"></div>
 
+        <!-- Create a companion -->
+        <div class="creator-cta">
+          <button id="createCompanionBtn" class="btn-primary full">✨ Create Your Own Companion</button>
+          <p class="creator-cta-sub">Design her personality, upload her photos — she goes live instantly.</p>
+        </div>
+
         <!-- Her Day stories -->
         <div class="herday-section">
           <h3 class="herday-title">Her Day <span class="herday-live">● today</span></h3>
@@ -201,6 +207,35 @@
       </div>
     </div>
 
+    <!-- Companion creator sheet -->
+    <div id="creatorSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Create a Companion</h2><button class="sheet-close" data-close="creatorSheet">✕</button></div>
+        <p class="sheet-sub">She goes live the moment you hit create.</p>
+        <input id="creatorName" class="auth-input" placeholder="Her name" maxlength="60" autocomplete="off">
+        <div class="creator-gender-row">
+          <button type="button" id="creatorGenderF" class="gender-pill active">Female</button>
+          <button type="button" id="creatorGenderM" class="gender-pill">Male</button>
+        </div>
+        <textarea id="creatorPersona" class="auth-input" rows="4" maxlength="2000" placeholder="Personality — how does she act? What makes her tick?"></textarea>
+        <input id="creatorBlurb" class="auth-input" placeholder="Tagline (short, shows on her card)" maxlength="280" autocomplete="off">
+        <label class="creator-photos-label">Photos (1–3)</label>
+        <input id="creatorPhotos" type="file" accept="image/*" multiple class="creator-photos-input">
+        <div id="creatorPhotoPreview" class="creator-photo-preview"></div>
+        <label class="creator-check">
+          <input type="checkbox" id="creatorAttest18">
+          <span>I confirm this companion is over 18</span>
+        </label>
+        <label class="creator-check">
+          <input type="checkbox" id="creatorAttestRights">
+          <span>I confirm I have the right to use these photos</span>
+        </label>
+        <div id="creatorError" class="auth-error hidden"></div>
+        <button id="creatorSubmit" class="btn-primary full">Create Companion</button>
+      </div>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
 
     <!-- Preset videos sheet -->
@@ -309,3 +344,4 @@
 </script>
 </body>
 </html>
+

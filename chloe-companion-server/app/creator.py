@@ -2,15 +2,16 @@
 companion creator ("the machine"), adapted for the companion app.
 
 Flow: paid member fills in name/persona/tagline/gender, uploads 1-3 REAL
-photos, and signs the 18+ / rights attestation. Each photo is AI-moderated
-(Gemini judge: RED = nudity or anyone looking under 18 -> blocked). The
+photos, and checks the 18+ attestation ("I confirm this companion is over
+18" — applies whether the character is fictional or based on a real person).
+No AI photo scan — the checkbox replaces it. Text is still screened for
+clearly prohibited content (sexual violence, non-consent, minors). The
 character goes live immediately as a local character with the real photos —
 no painted portrait, no approval queue.
 
 Differences from the Sorority-house original:
 - JSON + data-URI photos (no multipart; the client already downscales).
-- Gemini-only moderation (no DeepSeek key on this backend — same as the
-  original's single-judge fallback).
+- No photo moderation scan (removed 2026-10-08); 18+ is a user attestation.
 - Persona file rewritten for the companion app (no God's Greek references).
 - The upload is KEPT (avatar + photo set), not discarded after painting.
 """
@@ -23,7 +24,6 @@ import os
 import re
 import sqlite3
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import config, gemini_keys, store, submit
@@ -70,17 +70,6 @@ _GEMINI_URL = (
     "gemini-3.1-flash-lite:generateContent"
 )
 
-_MODERATION_CRITERIA = (
-    "You are a photo moderator. Classify the photo with exactly one word: "
-    "RED, YELLOW, or GREEN.\n"
-    "RED = any nudity (partial or full) OR anyone in the photo looks under 18.\n"
-    "YELLOW = borderline: the age is hard to tell, or the photo is suggestive "
-    "but not nude.\n"
-    "GREEN = clearly an adult (18+) and the photo is non-sexual.\n"
-    "Reply with exactly one word: RED, YELLOW, or GREEN. No other text."
-)
-
-
 def _gemini_text(prompt: str, timeout: int = 30) -> str | None:
     """One Gemini text call via the key-manager pool. Returns reply text, or None."""
     data = gemini_keys.post_json(
@@ -100,54 +89,6 @@ def _gemini_text(prompt: str, timeout: int = 30) -> str | None:
         return text.strip() or None
     except Exception:
         return None
-
-
-def _gemini_image_text(image_bytes: bytes, mime: str, prompt: str,
-                       timeout: int = 30) -> str | None:
-    """One Gemini call with inline image + text via the key-manager pool. None on failure."""
-    data = gemini_keys.post_json(
-        _GEMINI_URL,
-        {
-            "contents": [{"role": "user", "parts": [
-                {"inline_data": {"mime_type": mime,
-                                 "data": base64.b64encode(image_bytes).decode()}},
-                {"text": prompt},
-            ]}],
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 50},
-        },
-        timeout=timeout,
-        source="creator-bot",
-    )
-    if not data:
-        return None
-    try:
-        parts = data["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts if p.get("text"))
-        return text.strip() or None
-    except Exception:
-        return None
-
-
-def _classify_verdict(text: str | None) -> str | None:
-    word = (text or "").strip().upper().split()
-    word = word[0] if word else ""
-    return word if word in ("RED", "YELLOW", "GREEN") else None
-
-
-def moderate_photo(image_bytes: bytes, mime: str) -> str:
-    """AI-moderate one uploaded photo. Returns "allow".
-
-    Raises ValueError("Photo not allowed.") on RED, and ValueError on
-    review unavailability (fail closed — never auto-passes).
-    """
-    verdict = _classify_verdict(
-        _gemini_image_text(image_bytes, mime, _MODERATION_CRITERIA))
-    if verdict is None:
-        raise ValueError(
-            "Photo review is unavailable right now — please try again.")
-    if verdict == "RED":
-        raise ValueError("Photo not allowed.")
-    return "allow"
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +171,7 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
         gender = "female"
     if not data.get("attest_18"):
         raise ValueError(
-            "Please confirm everyone in the photos is 18 or older.")
+            "Please confirm this companion is over 18.")
     if not data.get("attest_rights"):
         raise ValueError(
             "Please confirm you have the right to use these photos.")
@@ -241,30 +182,13 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
     # Text safety gate.
     check_content_safety(name, persona_text, blurb)
 
-    # Photo moderation gate: every photo, fail closed.
-    # Owners skip AI moderation (their own photos, their call).
-    if not _is_owner(user_id):
-        # Run in parallel — 3 photos take ~30s instead of ~90s sequential.
-        raws = []
-        for i, uri in enumerate(images):
-            m = submit._DATA_URI_RE.match(uri)
-            mime = f"image/{m.group(1)}" if m else "image/jpeg"
-            try:
-                raw = base64.b64decode(uri.split(",", 1)[1], validate=True)
-            except (binascii.Error, ValueError):
-                raise ValueError(f"photo {i + 1} is not valid")
-            raws.append((i, raw, mime))
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            futs = {ex.submit(moderate_photo, raw, mime): i for i, raw, mime in raws}
-            for fut in futs:
-                fut.result()  # raises ValueError on any moderation failure
-    else:
-        # Still validate the images are decodable.
-        for i, uri in enumerate(images):
-            try:
-                base64.b64decode(uri.split(",", 1)[1], validate=True)
-            except (binascii.Error, ValueError):
-                raise ValueError(f"photo {i + 1} is not valid")
+    # Photo validation: every photo must be a decodable data URI.
+    # No AI photo scan — the 18+ attestation checkbox covers age.
+    for i, uri in enumerate(images):
+        try:
+            base64.b64decode(uri.split(",", 1)[1], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"photo {i + 1} is not valid")
 
     hidden_depth = _generate_hidden_depth(name, persona_text, gender)
     persona_file = _build_persona_file(name, gender, persona_text, blurb,
@@ -298,3 +222,4 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
         "gender": gender,
         "photo_count": len(images),
     }
+
