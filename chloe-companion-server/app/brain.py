@@ -657,11 +657,6 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
         "Style: 1-3 short sentences, like a text. Warm and real. "
         "Never narrate the room or scenery. Never therapist mode."
     )
-    her_day = (context.get("her_day_teaser") or "").strip()
-    if her_day:
-        parts.append(
-            "HER DAY (your stories feed — he can tap to view):\n" + her_day
-        )
     assist_result = (context.get("assist_result") or "").strip()
     if assist_result:
         parts.append(
@@ -1002,32 +997,6 @@ def relevant_memories(
     return out
 
 
-def _her_day_teaser(conn, user_id: str, character_id: str) -> str:
-    """One-line teaser about today's Her Day posts, for the girl to reference.
-
-    Returns e.g. "You posted 3 Her Day stories today (gym, cooking...)."
-    Empty string when there are no posts. The girl may reference her stories
-    naturally in chat ("did you see my gym pic?") but should never force it.
-    """
-    try:
-        posts = store.get_her_day_posts(conn, user_id, girl_id=character_id)
-        if not posts:
-            return ""
-        unviewed = sum(1 for p in posts if not p.get("viewed"))
-        kinds = []
-        for p in posts[:4]:
-            cap = (p.get("caption") or "")[:40]
-            if cap:
-                kinds.append(cap)
-        teaser = f"You posted {len(posts)} Her Day stories today"
-        if kinds:
-            teaser += f" ({'; '.join(kinds)})"
-        teaser += "."
-        if unviewed:
-            teaser += f" He hasn't seen {unviewed} yet — you can mention one naturally if it fits the conversation, but don't force it."
-        return teaser
-    except Exception:
-        return ""
 
 
 def build_brain_context(
@@ -1071,5 +1040,4 @@ def build_brain_context(
         "recent": store.recent_turns(conn, user_id, limit=6, character_id=cid),
         "character": char,
         "character_name": char.get("name") or "Chloe",
-        "her_day_teaser": _her_day_teaser(conn, user_id, cid),
     }

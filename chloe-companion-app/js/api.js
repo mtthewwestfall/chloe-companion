@@ -139,11 +139,12 @@ const ApiClient = (() => {
     return data;
   }
 
-  async function feed() {
-    const data = await request('GET', '/api/v1/feed');
-    setConnected(true);
-    return data.posts || [];
+  async function publicHerDay() {
+    // Public landing-page feed — no auth required. Falls back to empty
+    // (stories bar shows a "check back soon" placeholder) when offline.
+    const data = await request('GET', '/api/v1/her-day/public');
+    return data;
   }
 
-  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, feed, onStatus, isConnected: () => connected };
+  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, onStatus, isConnected: () => connected };
 })();

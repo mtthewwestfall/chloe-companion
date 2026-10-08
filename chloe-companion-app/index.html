@@ -49,6 +49,33 @@
         </div>
         <div id="girlCards" class="girl-cards"></div>
 
+        <!-- Her Day stories -->
+        <div class="herday-section">
+          <h3 class="herday-title">Her Day <span class="herday-live">● today</span></h3>
+          <p class="herday-sub">A glimpse into their day — fresh moments, updated daily.</p>
+          <div id="herdayStories" class="herday-stories"></div>
+        </div>
+
+        <!-- Her Day story viewer overlay -->
+        <div id="herdayViewer" class="herday-viewer hidden">
+          <div class="herday-viewer-top">
+            <div class="herday-progress" id="herdayProgress"></div>
+            <div class="herday-viewer-header">
+              <img id="herdayViewerAvatar" class="herday-viewer-avatar" alt="">
+              <span id="herdayViewerName" class="herday-viewer-name"></span>
+              <span id="herdayViewerTime" class="herday-viewer-time"></span>
+              <button id="herdayViewerClose" class="herday-viewer-close" aria-label="Close">&times;</button>
+            </div>
+          </div>
+          <div class="herday-viewer-media" id="herdayViewerMedia"></div>
+          <div id="herdayViewerCaption" class="herday-viewer-caption"></div>
+          <button id="herdayPrev" class="herday-nav herday-prev" aria-label="Previous">&#8249;</button>
+          <button id="herdayNext" class="herday-nav herday-next" aria-label="Next">&#8250;</button>
+          <div class="herday-viewer-cta">
+            <button id="herdayViewerChat" class="btn-primary">Chat with her</button>
+          </div>
+        </div>
+
         <!-- Pricing -->
         <div class="pricing-section">
           <div class="free-banner">
@@ -117,18 +144,6 @@
             <button id="phoneCallBtn" aria-label="Voice call">📞</button>
           </div>
         </header>
-
-        <!-- Whispr Feed unified timeline: all girls' posts, newest first -->
-        <div id="feedTimeline" class="feed-timeline">
-          <div id="feedPosts" class="feed-posts"></div>
-        </div>
-
-        <!-- Whispr Feed video viewer overlay -->
-        <div id="feedVideoViewer" class="feed-video-viewer hidden">
-          <div id="feedVideoBackdrop" class="feed-video-backdrop"></div>
-          <button id="feedVideoClose" class="feed-video-close" aria-label="Close video">&times;</button>
-          <video id="feedVideoPlayer" class="feed-video-player" controls playsinline preload="metadata"></video>
-        </div>
 
         <main id="chatLog" class="chat-log" aria-live="polite"></main>
 

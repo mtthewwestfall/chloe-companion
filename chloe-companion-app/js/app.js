@@ -91,7 +91,6 @@
     chatLog.appendChild(enc);
     $('landingView').classList.add('hidden');
     $('chatView').classList.remove('hidden');
-    Feed.load();
     // Load last 8 turns so the conversation picks up where it left off
     let hasHistory = false;
     if (isLoggedIn()) {
@@ -828,6 +827,216 @@
     }
   }
 
+  /* ============================================================
+     Her Day stories — public landing page stories bar.
+     Fetches from /api/v1/her-day/public (no auth). Instagram-style:
+     horizontal avatar bar, tap to open fullscreen story viewer.
+     ============================================================ */
+  const LandingStories = (() => {
+    let posts = [];
+    let currentIdx = 0;
+    let progressTimer = null;
+
+    function timeAgo(createdAt) {
+      const created = new Date((createdAt || '').replace(' ', 'T') + 'Z');
+      if (isNaN(created)) return '';
+      const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
+      if (mins < 60) return mins + 'm';
+      const hrs = Math.round(mins / 60);
+      if (hrs < 24) return hrs + 'h';
+      return Math.round(hrs / 24) + 'd';
+    }
+
+    // Group posts by girl, keeping newest-first order per girl
+    function groupByGirl() {
+      const map = new Map();
+      posts.forEach(p => {
+        const gid = p.girl_id || 'unknown';
+        if (!map.has(gid)) {
+          map.set(gid, {
+            girl_id: gid,
+            girl_name: p.girl_name || gid,
+            girl_avatar_url: p.girl_avatar_url || '',
+            posts: [],
+          });
+        }
+        map.get(gid).posts.push(p);
+      });
+      return [...map.values()];
+    }
+
+    async function load() {
+      const wrap = $('herdayStories');
+      if (!wrap) return;
+      try {
+        const data = await ApiClient.publicHerDay();
+        posts = data.posts || [];
+      } catch (e) {
+        posts = [];
+      }
+      renderBar();
+    }
+
+    function renderBar() {
+      const wrap = $('herdayStories');
+      wrap.innerHTML = '';
+      const groups = groupByGirl();
+      if (!groups.length) {
+        const empty = document.createElement('div');
+        empty.className = 'herday-empty';
+        empty.textContent = 'New moments drop daily — check back soon.';
+        wrap.appendChild(empty);
+        return;
+      }
+      groups.forEach((g, gi) => {
+        const item = document.createElement('button');
+        item.className = 'herday-story-item';
+        item.setAttribute('aria-label', g.girl_name + "'s day");
+        const ring = document.createElement('span');
+        ring.className = 'herday-ring';
+        const av = document.createElement('img');
+        av.className = 'herday-avatar';
+        av.src = g.girl_avatar_url || '';
+        av.alt = g.girl_name;
+        av.loading = 'lazy';
+        ring.appendChild(av);
+        const label = document.createElement('span');
+        label.className = 'herday-name';
+        label.textContent = g.girl_name;
+        const count = document.createElement('span');
+        count.className = 'herday-count';
+        count.textContent = g.posts.length;
+        item.appendChild(ring);
+        item.appendChild(label);
+        item.appendChild(count);
+        // Open viewer at this girl's first post
+        item.addEventListener('click', () => {
+          const flatIdx = posts.indexOf(g.posts[0]);
+          openViewer(flatIdx >= 0 ? flatIdx : 0);
+        });
+        wrap.appendChild(item);
+      });
+    }
+
+    function renderPost(idx) {
+      const p = posts[idx];
+      if (!p) return;
+      $('herdayViewerAvatar').src = p.girl_avatar_url || '';
+      $('herdayViewerName').textContent = p.girl_name || '';
+      $('herdayViewerTime').textContent = timeAgo(p.created_at);
+      $('herdayViewerCaption').textContent = p.caption || '';
+      const mediaBox = $('herdayViewerMedia');
+      mediaBox.innerHTML = '';
+      if (p.post_type === 'video' && p.media_url) {
+        const v = document.createElement('video');
+        v.src = p.media_url;
+        v.controls = true;
+        v.playsInline = true;
+        v.preload = 'metadata';
+        v.className = 'herday-viewer-video';
+        mediaBox.appendChild(v);
+      } else if (p.media_url) {
+        const img = document.createElement('img');
+        img.src = p.media_url;
+        img.alt = '';
+        img.className = 'herday-viewer-img';
+        mediaBox.appendChild(img);
+      } else if (p.post_type === 'voice' && p.voice_url) {
+        const a = document.createElement('audio');
+        a.src = p.voice_url;
+        a.controls = true;
+        a.className = 'herday-viewer-audio';
+        mediaBox.appendChild(a);
+        const note = document.createElement('div');
+        note.className = 'herday-voice-note';
+        note.textContent = '\u266A voice note';
+        mediaBox.appendChild(note);
+      } else {
+        const txt = document.createElement('div');
+        txt.className = 'herday-viewer-text';
+        txt.textContent = p.caption || '';
+        mediaBox.appendChild(txt);
+      }
+      // Progress segments
+      const prog = $('herdayProgress');
+      prog.innerHTML = '';
+      posts.forEach((_, i) => {
+        const seg = document.createElement('span');
+        seg.className = 'herday-seg' + (i === idx ? ' active' : '') + (i < idx ? ' seen' : '');
+        prog.appendChild(seg);
+      });
+      // Chat CTA opens chat with this girl
+      const chatBtn = $('herdayViewerChat');
+      chatBtn.onclick = () => {
+        closeViewer();
+        const girl = CHARACTERS.find(c => c.id === (p.girl_id || '').toLowerCase());
+        openChat(girl ? girl.id : CHARACTERS[1].id);
+      };
+    }
+
+    function openViewer(idx) {
+      if (!posts.length) return;
+      currentIdx = Math.max(0, Math.min(idx, posts.length - 1));
+      renderPost(currentIdx);
+      $('herdayViewer').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeViewer() {
+      $('herdayViewer').classList.add('hidden');
+      document.body.style.overflow = '';
+      const mediaBox = $('herdayViewerMedia');
+      mediaBox.querySelectorAll('video, audio').forEach(el => { el.pause(); });
+      mediaBox.innerHTML = '';
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+    }
+
+    function step(dir) {
+      const next = currentIdx + dir;
+      if (next < 0 || next >= posts.length) {
+        if (dir > 0) closeViewer();
+        return;
+      }
+      currentIdx = next;
+      renderPost(currentIdx);
+    }
+
+    function init() {
+      if (!$('herdayViewer')) return;
+      $('herdayViewerClose').addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeViewer();
+      });
+      $('herdayNext').addEventListener('click', (e) => {
+        e.stopPropagation();
+        step(1);
+      });
+      $('herdayPrev').addEventListener('click', (e) => {
+        e.stopPropagation();
+        step(-1);
+      });
+      // Tap left/right edges to navigate
+      $('herdayViewerMedia').addEventListener('click', (e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        const x = (e.clientX - r.left) / r.width;
+        if (x < 0.3) step(-1);
+        else if (x > 0.7) step(1);
+      });
+      document.addEventListener('keydown', (e) => {
+        if ($('herdayViewer').classList.contains('hidden')) return;
+        if (e.key === 'Escape') closeViewer();
+        else if (e.key === 'ArrowRight') step(1);
+        else if (e.key === 'ArrowLeft') step(-1);
+      });
+      // Load stories when landing page shows
+      load();
+    }
+
+    return { load, init };
+  })();
+
+  LandingStories.init();
+
   // Go.
   if (localStorage.getItem('chloe_name')) {
     showApp();
@@ -836,150 +1045,5 @@
     showOnboarding();
   }
 
-
-  /* ============================================================
-     Unified Feed — all girls' posts in one chronological timeline.
-     ============================================================ */
-  const Feed = (() => {
-    let posts = [];
-
-    function timeAgo(createdAt) {
-      const created = new Date(createdAt + 'Z');
-      const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
-      if (mins < 60) return mins + 'm ago';
-      const hrs = Math.round(mins / 60);
-      if (hrs < 24) return hrs + 'h ago';
-      return Math.round(hrs / 24) + 'd ago';
-    }
-
-    async function load() {
-      try {
-        posts = await ApiClient.feed();
-      } catch (e) {
-        posts = [];
-      }
-      renderTimeline();
-    }
-
-    function renderTimeline() {
-      const wrap = $('feedPosts');
-      wrap.innerHTML = '';
-      if (!posts.length) {
-        const empty = document.createElement('div');
-        empty.className = 'feed-empty';
-        empty.textContent = "No posts yet today — check back soon.";
-        wrap.appendChild(empty);
-        return;
-      }
-      posts.forEach(p => {
-        const card = document.createElement('div');
-        card.className = 'feed-post';
-
-        const header = document.createElement('div');
-        header.className = 'feed-post-header';
-        const avatar = document.createElement('img');
-        avatar.className = 'feed-post-avatar';
-        avatar.src = p.girl_avatar_url || '';
-        avatar.alt = p.girl_name || '';
-        const name = document.createElement('span');
-        name.className = 'feed-post-girl';
-        name.textContent = p.girl_name || p.girl_id || '';
-        const time = document.createElement('span');
-        time.className = 'feed-post-time';
-        time.textContent = timeAgo(p.created_at);
-        header.appendChild(avatar);
-        header.appendChild(name);
-        header.appendChild(time);
-        card.appendChild(header);
-
-        if (p.post_type === 'video' && p.media_url) {
-          // Tap layer over the video: taps open our viewer overlay, never the
-          // native fullscreen player (which has no reliable exit in webviews).
-          const mediaWrap = document.createElement('div');
-          mediaWrap.className = 'feed-post-mediawrap';
-          const vid = document.createElement('video');
-          vid.className = 'feed-post-media';
-          vid.src = p.media_url;
-          vid.playsInline = true;
-          vid.preload = 'metadata';
-          vid.setAttribute('disablepictureinpicture', '');
-          const tap = document.createElement('button');
-          tap.className = 'feed-post-videotap';
-          tap.setAttribute('aria-label', 'Play video');
-          const playIcon = document.createElement('span');
-          playIcon.className = 'feed-post-playicon';
-          playIcon.textContent = '\u25B6';
-          tap.appendChild(playIcon);
-          tap.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            openViewer(p.media_url);
-          });
-          mediaWrap.appendChild(vid);
-          mediaWrap.appendChild(tap);
-          card.appendChild(mediaWrap);
-        } else if (p.media_url) {
-          const img = document.createElement('img');
-          img.className = 'feed-post-media';
-          img.src = p.media_url;
-          img.alt = '';
-          img.loading = 'lazy';
-          card.appendChild(img);
-        } else {
-          const txt = document.createElement('div');
-          txt.className = 'feed-post-textcard';
-          txt.textContent = p.caption || '';
-          card.appendChild(txt);
-        }
-
-        if (p.caption && p.media_url) {
-          const cap = document.createElement('div');
-          cap.className = 'feed-post-caption';
-          cap.textContent = p.caption;
-          card.appendChild(cap);
-        }
-
-        wrap.appendChild(card);
-      });
-    }
-
-    function openViewer(src) {
-      const viewer = $('feedVideoViewer');
-      const player = $('feedVideoPlayer');
-      player.src = src;
-      viewer.classList.remove('hidden');
-      document.body.style.overflow = 'hidden';
-      player.play().catch(() => {});
-    }
-
-    function closeViewer() {
-      const viewer = $('feedVideoViewer');
-      const player = $('feedVideoPlayer');
-      player.pause();
-      player.removeAttribute('src');
-      player.load();
-      viewer.classList.add('hidden');
-      document.body.style.overflow = '';
-    }
-
-    function init() {
-      // Video viewer: X button, tap-outside, and Escape all close it.
-      $('feedVideoClose').addEventListener('click', (e) => {
-        e.stopPropagation();
-        closeViewer();
-      });
-      $('feedVideoBackdrop').addEventListener('click', closeViewer);
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && !$('feedVideoViewer').classList.contains('hidden')) {
-          closeViewer();
-        }
-      });
-    }
-
-    return { load, init };
-  })();
-
-
-  Feed.init();
 
 })();

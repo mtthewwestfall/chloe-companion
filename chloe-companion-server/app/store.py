@@ -1250,6 +1250,23 @@ def cleanup_expired_her_day(conn: "sqlite3.Connection") -> int:
     return cur.rowcount
 
 
+def get_public_her_day_posts(conn: "sqlite3.Connection",
+                             limit: int = 24) -> list[dict]:
+    """Get recent Her Day posts across all users for the public landing page.
+
+    Returns the most recent non-expired posts (no user_id exposed).
+    Used by GET /api/v1/her-day/public — no auth required.
+    """
+    rows = conn.execute(
+        "SELECT girl_id, post_type, media_url, voice_url, caption,"
+        " created_at FROM her_day_posts"
+        " WHERE expires_at > datetime('now')"
+        " ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
                          girl_id: str) -> bool:
     """Check if a girl already has Her Day posts generated today for a user."""

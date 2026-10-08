@@ -1209,6 +1209,27 @@ def get_unified_feed(request: Request):
         conn.close()
 
 
+@app.get("/api/v1/her-day/public")
+def get_public_her_day():
+    """Public Her Day feed for the landing page — NO auth required.
+
+    Returns recent non-expired posts across all users (no user_id exposed),
+    with girl info attached. Powers the public stories bar on the landing page.
+    """
+    conn = _conn()
+    try:
+        store.cleanup_expired_her_day(conn)
+        posts = store.get_public_her_day_posts(conn, limit=24)
+        girl_map = {g["id"]: g for g in characters.public_list()}
+        for p in posts:
+            g = girl_map.get(p.get("girl_id"), {})
+            p["girl_name"] = g.get("name", p.get("girl_id", ""))
+            p["girl_avatar_url"] = g.get("avatar_url", "")
+        return {"posts": posts}
+    finally:
+        conn.close()
+
+
 class HerDayViewIn(BaseModel):
     post_id: int
 
