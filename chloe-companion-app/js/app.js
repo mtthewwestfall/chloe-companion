@@ -35,6 +35,21 @@
       ],
       desc: 'Sweet, witty, and subtly captivating.',
       bestFor: 'Honest check-ins, shared secrets, and effortless chemistry.' },
+    { id: 'regan', name: 'Regan',
+      avatar: 'https://companion.lockeddoor.ai/img/regan-avatar.jpg',
+      videos: [],
+      desc: 'Strong, flexible, hard to forget.',
+      bestFor: 'Playful challenges, bold energy, and a spark that doesn\'t quit.' },
+    { id: 'jake', name: 'Jake',
+      avatar: 'https://companion.lockeddoor.ai/img/jake-avatar.jpg',
+      videos: [],
+      desc: 'Rugged, warm, and quietly confident.',
+      bestFor: 'Slow evenings, steady comfort, and feeling looked after.' },
+    { id: 'eli', name: 'Eli',
+      avatar: 'https://companion.lockeddoor.ai/img/eli-avatar.jpg',
+      videos: [],
+      desc: 'Sun-kissed, easygoing, and always mid-laugh.',
+      bestFor: 'Beach-day lightness, music at sunset, and talks that drift past midnight.' },
   ];
   let currentGirl = CHARACTERS[1];
   let avatarCycleTimer = null;
@@ -42,7 +57,14 @@
   function startAvatarCycle() {
     const video = $('chatAvatarVideo');
     const clips = currentGirl.videos || [];
-    if (!clips.length) return;
+    if (!clips.length) {
+      // No cycle clips yet (newer characters): show the avatar as a still poster.
+      clearInterval(avatarCycleTimer);
+      video.removeAttribute('src');
+      video.load();
+      video.poster = currentGirl.avatar;
+      return;
+    }
     let idx = 0;
     const play = () => {
       video.src = clips[idx % clips.length];
