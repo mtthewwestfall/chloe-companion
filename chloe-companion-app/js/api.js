@@ -31,7 +31,7 @@ const ApiClient = (() => {
     return Promise.race([promise, t]);
   }
 
-  async function request(method, path, body) {
+  async function request(method, path, body, timeoutMs) {
     const url = CONFIG.API_BASE_URL + path;
     const token = localStorage.getItem('whispr_token') || '';
     const headers = { 'Content-Type': 'application/json' };
@@ -41,7 +41,8 @@ const ApiClient = (() => {
       headers,
       body: body ? JSON.stringify(body) : undefined,
     };
-    const resp = await withTimeout(fetch(url, opts), CONFIG.REQUEST_TIMEOUT_MS);
+    const resp = await withTimeout(fetch(url, opts),
+                                   timeoutMs || CONFIG.REQUEST_TIMEOUT_MS);
     if (!resp.ok) throw new Error('http ' + resp.status);
     return resp.json();
   }
@@ -60,10 +61,13 @@ const ApiClient = (() => {
   async function chat(message, characterId) {
     // Real chat — requires login token. No demo fallback: if it fails,
     // the caller shows the reconnect message.
+    // Chat generation can take a while when the Gemini key pool is
+    // failing over between keys — give it real room so a slow but
+    // successful reply still reaches him instead of the reconnect line.
     const data = await request('POST', '/api/v1/chat', {
       message,
       character_id: characterId || 'chloe',
-    });
+    }, 120000);
     setConnected(true);
     return data;
   }
