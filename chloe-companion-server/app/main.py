@@ -386,6 +386,10 @@ def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = N
 @app.on_event("startup")
 def _startup():
     db.init_db()
+    # Background Gemini key prober: keeps the believed-healthy pool view
+    # fresh off the request path (see app/gemini_keys.py). Disable with
+    # GEMINI_PROBER=0.
+    gemini_keys.start_prober()
 
 
 @app.get("/health")
