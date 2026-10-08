@@ -1017,6 +1017,13 @@ class ResetCharacterIn(BaseModel):
     character_id: str
 
 
+class SeedMessageIn(BaseModel):
+    """Admin: seed one character turn into a user's chat (e.g. a first
+    message from a character she created). Text lands byte-exact."""
+    character_id: str
+    text: str
+
+
 class PresetVideoIn(BaseModel):
     girl_id: str
     preset: str
@@ -2170,6 +2177,26 @@ def admin_reset_user_character(user_id: str, body: ResetCharacterIn,
         return {"ok": True, "user_id": uid, "character_id": cid,
                 "memories_removed": removed_memories,
                 "digests_removed": cur.rowcount}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/users/{user_id}/seed-message")
+def admin_seed_message(user_id: str, body: SeedMessageIn,
+                       request: Request):
+    """Owner/support tool: place ONE message from a character into a
+    user's chat, the way the verify-time welcome is seeded — it lands
+    as that character's first turn in her history for the character."""
+    _require_admin(request)
+    uid = (user_id or "").strip()
+    cid = (body.character_id or "").strip()
+    if not uid or not cid or not body.text:
+        raise HTTPException(status_code=400,
+                            detail="user_id, character_id and text required")
+    conn = _conn()
+    try:
+        store.log_turn(conn, uid, cid, body.text, cid)
+        return {"ok": True}
     finally:
         conn.close()
 
