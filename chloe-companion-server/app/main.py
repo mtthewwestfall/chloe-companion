@@ -1006,6 +1006,13 @@ PRESET_CLIPS = {
 }
 
 
+
+class ResetCharacterIn(BaseModel):
+    """Admin: wipe one user+character conversation (turns, typed
+    memories, rolling digest) so their next chat starts fresh."""
+    character_id: str
+
+
 class PresetVideoIn(BaseModel):
     girl_id: str
     preset: str
@@ -2130,6 +2137,35 @@ def admin_grant_messages(body: GrantMessagesIn, request: Request):
             (uid,)).fetchone()
         return {"ok": True, "user_id": uid,
                 "messages_remaining": row["messages_remaining"] if row else 0}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/users/{user_id}/reset-character")
+def admin_reset_user_character(user_id: str, body: ResetCharacterIn,
+                               request: Request):
+    """Owner/support tool: reset ONE user's relationship with ONE
+    character — deletes their conversation turns, typed memories and
+    rolling digest for that character only, so the next chat starts
+    from a clean first meeting. Nothing else about the account (other
+    characters, balances, trust with other girls) is touched."""
+    _require_admin(request)
+    uid = (user_id or "").strip()
+    cid = (body.character_id or "").strip().lower()
+    if not uid or not cid:
+        raise HTTPException(status_code=400,
+                            detail="user_id and character_id required")
+    conn = _conn()
+    try:
+        removed_memories = store.delete_all_memories(conn, uid, cid)
+        cur = conn.execute(
+            "DELETE FROM memory_digest WHERE user_id = ? AND character_id = ?",
+            (uid, cid),
+        )
+        conn.commit()
+        return {"ok": True, "user_id": uid, "character_id": cid,
+                "memories_removed": removed_memories,
+                "digests_removed": cur.rowcount}
     finally:
         conn.close()
 
