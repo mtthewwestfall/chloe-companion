@@ -953,104 +953,39 @@
   }
 
   /* ============================================================
-     Her Day stories — public landing page stories bar.
-     Fetches from /api/v1/her-day/public (no auth). Instagram-style:
-     horizontal avatar bar, tap to open fullscreen story viewer.
+     Whispr Feed — public landing page Instagram-style feed.
+     Fetches from /api/v1/her-day/public (no auth). Vertical
+     scrollable posts: avatar + name + time, media, caption,
+     like toggle, chat CTA.
      ============================================================ */
-  const LandingStories = (() => {
+  const WhisprFeed = (() => {
     let posts = [];
-    let currentIdx = 0;
-    let progressTimer = null;
+    let liked = {};
+    try {
+      liked = JSON.parse(localStorage.getItem('whisprFeedLikes') || '{}');
+    } catch (e) { liked = {}; }
 
     function timeAgo(createdAt) {
       const created = new Date((createdAt || '').replace(' ', 'T') + 'Z');
       if (isNaN(created)) return '';
       const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
-      if (mins < 60) return mins + 'm';
+      if (mins < 60) return mins + 'm ago';
       const hrs = Math.round(mins / 60);
-      if (hrs < 24) return hrs + 'h';
-      return Math.round(hrs / 24) + 'd';
+      if (hrs < 24) return hrs + 'h ago';
+      return Math.round(hrs / 24) + 'd ago';
     }
 
-    // Group posts by girl, keeping newest-first order per girl
-    function groupByGirl() {
-      const map = new Map();
-      posts.forEach(p => {
-        const gid = p.girl_id || 'unknown';
-        if (!map.has(gid)) {
-          map.set(gid, {
-            girl_id: gid,
-            girl_name: p.girl_name || gid,
-            girl_avatar_url: p.girl_avatar_url || '',
-            posts: [],
-          });
-        }
-        map.get(gid).posts.push(p);
-      });
-      return [...map.values()];
+    function postKey(p) {
+      return (p.girl_id || '') + '|' + (p.created_at || '') + '|' + (p.caption || '').slice(0, 40);
     }
 
-    async function load() {
-      const wrap = $('herdayStories');
-      if (!wrap) return;
-      try {
-        const data = await ApiClient.publicHerDay();
-        posts = data.posts || [];
-      } catch (e) {
-        posts = [];
-      }
-      renderBar();
+    function toggleLike(key, btn) {
+      if (liked[key]) { delete liked[key]; } else { liked[key] = 1; }
+      try { localStorage.setItem('whisprFeedLikes', JSON.stringify(liked)); } catch (e) {}
+      btn.classList.toggle('liked', !!liked[key]);
     }
 
-    function renderBar() {
-      const wrap = $('herdayStories');
-      wrap.innerHTML = '';
-      const groups = groupByGirl();
-      if (!groups.length) {
-        const empty = document.createElement('div');
-        empty.className = 'herday-empty';
-        empty.textContent = 'New moments drop daily — check back soon.';
-        wrap.appendChild(empty);
-        return;
-      }
-      groups.forEach((g, gi) => {
-        const item = document.createElement('button');
-        item.className = 'herday-story-item';
-        item.setAttribute('aria-label', g.girl_name + "'s day");
-        const ring = document.createElement('span');
-        ring.className = 'herday-ring';
-        const av = document.createElement('img');
-        av.className = 'herday-avatar';
-        av.src = g.girl_avatar_url || '';
-        av.alt = g.girl_name;
-        av.loading = 'lazy';
-        ring.appendChild(av);
-        const label = document.createElement('span');
-        label.className = 'herday-name';
-        label.textContent = g.girl_name;
-        const count = document.createElement('span');
-        count.className = 'herday-count';
-        count.textContent = g.posts.length;
-        item.appendChild(ring);
-        item.appendChild(label);
-        item.appendChild(count);
-        // Open viewer at this girl's first post
-        item.addEventListener('click', () => {
-          const flatIdx = posts.indexOf(g.posts[0]);
-          openViewer(flatIdx >= 0 ? flatIdx : 0);
-        });
-        wrap.appendChild(item);
-      });
-    }
-
-    function renderPost(idx) {
-      const p = posts[idx];
-      if (!p) return;
-      $('herdayViewerAvatar').src = p.girl_avatar_url || '';
-      $('herdayViewerName').textContent = p.girl_name || '';
-      $('herdayViewerTime').textContent = timeAgo(p.created_at);
-      $('herdayViewerCaption').textContent = p.caption || '';
-      const mediaBox = $('herdayViewerMedia');
+    function renderMedia(p, mediaBox) {
       mediaBox.innerHTML = '';
       if (p.post_type === 'video' && p.media_url) {
         const v = document.createElement('video');
@@ -1058,109 +993,128 @@
         v.controls = true;
         v.playsInline = true;
         v.preload = 'metadata';
-        v.className = 'herday-viewer-video';
+        v.className = 'feed-media-video';
         mediaBox.appendChild(v);
       } else if (p.media_url) {
         const img = document.createElement('img');
         img.src = p.media_url;
         img.alt = '';
-        img.className = 'herday-viewer-img';
+        img.loading = 'lazy';
+        img.className = 'feed-media-img';
         mediaBox.appendChild(img);
       } else if (p.post_type === 'voice' && p.voice_url) {
         const a = document.createElement('audio');
         a.src = p.voice_url;
         a.controls = true;
-        a.className = 'herday-viewer-audio';
+        a.className = 'feed-media-audio';
         mediaBox.appendChild(a);
         const note = document.createElement('div');
-        note.className = 'herday-voice-note';
+        note.className = 'feed-voice-note';
         note.textContent = '\u266A voice note';
         mediaBox.appendChild(note);
       } else {
         const txt = document.createElement('div');
-        txt.className = 'herday-viewer-text';
+        txt.className = 'feed-text-post';
         txt.textContent = p.caption || '';
         mediaBox.appendChild(txt);
       }
-      // Progress segments
-      const prog = $('herdayProgress');
-      prog.innerHTML = '';
-      posts.forEach((_, i) => {
-        const seg = document.createElement('span');
-        seg.className = 'herday-seg' + (i === idx ? ' active' : '') + (i < idx ? ' seen' : '');
-        prog.appendChild(seg);
-      });
-      // Chat CTA opens chat with this girl
-      const chatBtn = $('herdayViewerChat');
-      chatBtn.onclick = () => {
-        closeViewer();
-        const girl = CHARACTERS.find(c => c.id === (p.girl_id || '').toLowerCase());
-        openChat(girl ? girl.id : CHARACTERS[1].id);
-      };
     }
 
-    function openViewer(idx) {
-      if (!posts.length) return;
-      currentIdx = Math.max(0, Math.min(idx, posts.length - 1));
-      renderPost(currentIdx);
-      $('herdayViewer').classList.remove('hidden');
-      document.body.style.overflow = 'hidden';
-    }
-
-    function closeViewer() {
-      $('herdayViewer').classList.add('hidden');
-      document.body.style.overflow = '';
-      const mediaBox = $('herdayViewerMedia');
-      mediaBox.querySelectorAll('video, audio').forEach(el => { el.pause(); });
-      mediaBox.innerHTML = '';
-      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-    }
-
-    function step(dir) {
-      const next = currentIdx + dir;
-      if (next < 0 || next >= posts.length) {
-        if (dir > 0) closeViewer();
+    function renderFeed() {
+      const wrap = $('herdayFeed');
+      if (!wrap) return;
+      wrap.innerHTML = '';
+      if (!posts.length) {
+        const empty = document.createElement('div');
+        empty.className = 'feed-empty';
+        empty.textContent = 'New moments drop daily — check back soon.';
+        wrap.appendChild(empty);
         return;
       }
-      currentIdx = next;
-      renderPost(currentIdx);
+      posts.forEach((p) => {
+        const key = postKey(p);
+        const post = document.createElement('article');
+        post.className = 'feed-post';
+
+        // Header: avatar + name + time
+        const header = document.createElement('div');
+        header.className = 'feed-header';
+        const av = document.createElement('img');
+        av.className = 'feed-avatar';
+        av.src = p.girl_avatar_url || '';
+        av.alt = p.girl_name || '';
+        av.loading = 'lazy';
+        const meta = document.createElement('div');
+        meta.className = 'feed-meta';
+        const name = document.createElement('span');
+        name.className = 'feed-name';
+        name.textContent = p.girl_name || '';
+        const time = document.createElement('span');
+        time.className = 'feed-time';
+        time.textContent = timeAgo(p.created_at);
+        meta.appendChild(name);
+        meta.appendChild(time);
+        header.appendChild(av);
+        header.appendChild(meta);
+
+        // Media
+        const mediaBox = document.createElement('div');
+        mediaBox.className = 'feed-media';
+        renderMedia(p, mediaBox);
+
+        // Actions: like + chat
+        const actions = document.createElement('div');
+        actions.className = 'feed-actions';
+        const likeBtn = document.createElement('button');
+        likeBtn.className = 'feed-like' + (liked[key] ? ' liked' : '');
+        likeBtn.setAttribute('aria-label', 'Like');
+        likeBtn.innerHTML = '\u2665';
+        likeBtn.addEventListener('click', () => toggleLike(key, likeBtn));
+        const chatBtn = document.createElement('button');
+        chatBtn.className = 'feed-chat-btn';
+        chatBtn.textContent = 'Chat';
+        chatBtn.addEventListener('click', () => {
+          const girl = CHARACTERS.find(c => c.id === (p.girl_id || '').toLowerCase());
+          openChat(girl ? girl.id : CHARACTERS[1].id);
+        });
+        actions.appendChild(likeBtn);
+        actions.appendChild(chatBtn);
+
+        // Caption
+        const cap = document.createElement('div');
+        cap.className = 'feed-caption';
+        const capName = document.createElement('span');
+        capName.className = 'feed-caption-name';
+        capName.textContent = p.girl_name || '';
+        cap.appendChild(capName);
+        cap.appendChild(document.createTextNode(' ' + (p.caption || '')));
+
+        post.appendChild(header);
+        post.appendChild(mediaBox);
+        post.appendChild(actions);
+        post.appendChild(cap);
+        wrap.appendChild(post);
+      });
+    }
+
+    async function load() {
+      try {
+        const data = await ApiClient.publicHerDay();
+        posts = data.posts || [];
+      } catch (e) {
+        posts = [];
+      }
+      renderFeed();
     }
 
     function init() {
-      if (!$('herdayViewer')) return;
-      $('herdayViewerClose').addEventListener('click', (e) => {
-        e.stopPropagation();
-        closeViewer();
-      });
-      $('herdayNext').addEventListener('click', (e) => {
-        e.stopPropagation();
-        step(1);
-      });
-      $('herdayPrev').addEventListener('click', (e) => {
-        e.stopPropagation();
-        step(-1);
-      });
-      // Tap left/right edges to navigate
-      $('herdayViewerMedia').addEventListener('click', (e) => {
-        const r = e.currentTarget.getBoundingClientRect();
-        const x = (e.clientX - r.left) / r.width;
-        if (x < 0.3) step(-1);
-        else if (x > 0.7) step(1);
-      });
-      document.addEventListener('keydown', (e) => {
-        if ($('herdayViewer').classList.contains('hidden')) return;
-        if (e.key === 'Escape') closeViewer();
-        else if (e.key === 'ArrowRight') step(1);
-        else if (e.key === 'ArrowLeft') step(-1);
-      });
-      // Load stories when landing page shows
       load();
     }
 
     return { load, init };
   })();
 
-  LandingStories.init();
+  WhisprFeed.init();
 
   // Go.
   if (localStorage.getItem('chloe_name')) {
