@@ -628,10 +628,24 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                if admin_persona else "")
         )
     parts = [persona]
-    parts.append(
-        f"\nHis name is {_display_name(context.get('name'))}. "
-        "Call him by name sometimes, naturally."
-    )
+    # Canon guard (2026-10-08): a persona that establishes she does NOT
+    # know him yet (stranger-origin characters like Brooklyn) overrides
+    # the account-name injection — she must never use his name until he
+    # introduces himself in the conversation. Without such a persona the
+    # account name is injected as before.
+    ptxt = (admin_persona or "").lower() if character_id != "chloe" else ""
+    if "does not know him" in ptxt or "don't know him" in ptxt or \
+            "not know his name" in ptxt:
+        parts.append(
+            "\nYou have NOT been told his name yet in this conversation. "
+            "Do not use any name for him until he introduces himself; "
+            "when he does, remember it and use it naturally from then on."
+        )
+    else:
+        parts.append(
+            f"\nHis name is {_display_name(context.get('name'))}. "
+            "Call him by name sometimes, naturally."
+        )
     if context.get("trust_line"):
         parts.append(f"How you hold him tonight: {context['trust_line']}")
     if context.get("trust_stage"):
