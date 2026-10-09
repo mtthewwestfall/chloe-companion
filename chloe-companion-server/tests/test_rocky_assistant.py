@@ -474,5 +474,168 @@ class RockyNoPetNamesTest(RockyBase):
             self.assert_no_pet(row["text"])
 
 
+class CreateProjectTest(RockyBase):
+    """Rocky creates repos end to end (2026-10-09, owner order): a
+    deterministic intake in HIS thread only queues a kind='create'
+    job on the same dev bridge. He names things — no name means the
+    flow asks for the name and nothing else; never a coined name.
+    The girls redirect repo-creation asks to Rocky and queue
+    nothing; their lanes and the build rails are untouched."""
+
+    _COLS = ("SELECT id, repo, task, kind, create_name, create_desc, "
+             "status, character_id FROM dev_jobs ORDER BY id")
+
+    def _jobs(self):
+        return [dict(r) for r in
+                self.conn.execute(self._COLS).fetchall()]
+
+    def test_detect_create_project_shapes(self):
+        hit = assist.detect_create_project(
+            "create a repo for a plant-watering tracker called "
+            "greenalert")
+        self.assertEqual(hit["name"], "greenalert")
+        self.assertIn("plant-watering tracker", hit["desc"])
+        hit = assist.detect_create_project(
+            "start a new project called Stamp Collector")
+        self.assertEqual(hit["name"], "stamp-collector")
+        hit = assist.detect_create_project("spin up a repo")
+        self.assertIsNotNone(hit)
+        self.assertIsNone(hit["name"])
+        self.assertIsNone(
+            assist.detect_create_project("fix the project layout"))
+        self.assertIsNone(assist.detect_create_project(
+            "create a character named Bob"))
+        self.assertIsNone(assist.detect_create_project(
+            "review the roof-scout repo"))
+
+    def test_full_ask_queues_create_job_with_admission_note(self):
+        res = self.say("create a repo for a plant-watering tracker "
+                       "called greenalert")
+        self.assertIn("queued repo-creation job #", res["brief"])
+        self.assertIn("allowlist", res["brief"])
+        jobs = self._jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["kind"], "create")
+        self.assertEqual(jobs[0]["create_name"], "greenalert")
+        self.assertIn("plant-watering tracker",
+                      jobs[0]["create_desc"])
+        self.assertEqual(jobs[0]["repo"],
+                         "mtthewwestfall/greenalert")
+        self.assertEqual(jobs[0]["character_id"], "rocky")
+
+    def test_no_name_asks_for_the_name_only(self):
+        res = self.say("create a repo for a plant-watering tracker")
+        self.assertIn("ONE short question", res["brief"])
+        self.assertIn("called", res["brief"])
+        self.assertEqual(self._jobs(), [])
+        # The description rode along in the first ask, so the name
+        # alone completes it — no redundant second question.
+        res = self.say("greenalert")
+        self.assertIn("queued repo-creation job #", res["brief"])
+        jobs = self._jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["create_name"], "greenalert")
+        self.assertIn("plant-watering tracker",
+                      jobs[0]["create_desc"])
+
+    def test_no_name_no_description_asks_name_then_what(self):
+        res = self.say("spin up a repo")
+        self.assertIn("ONE short question", res["brief"])
+        self.assertIn("called", res["brief"])
+        self.assertEqual(self._jobs(), [])
+        res = self.say("greenalert")
+        self.assertIn("ONE short question", res["brief"])
+        self.assertIn("what is it", res["brief"])
+        self.assertEqual(self._jobs(), [])
+        res = self.say("it texts me when my plants need water")
+        self.assertIn("queued repo-creation job #", res["brief"])
+        jobs = self._jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["create_name"], "greenalert")
+        self.assertIn("texts me when my plants need water",
+                      jobs[0]["create_desc"])
+
+    def test_named_without_description_asks_what_it_is(self):
+        res = self.say("start a new project called egglog")
+        self.assertIn("ONE short question", res["brief"])
+        self.assertEqual(self._jobs(), [])
+        res = self.say("tracks egg prices at farmers markets")
+        self.assertIn("queued repo-creation job #", res["brief"])
+        jobs = self._jobs()
+        self.assertEqual(jobs[0]["create_name"], "egglog")
+        self.assertIn("egg prices", jobs[0]["create_desc"])
+
+    def test_description_skip_still_queues(self):
+        self.say("start a new project called egglog")
+        res = self.say("skip")
+        self.assertIn("queued repo-creation job #", res["brief"])
+        self.assertEqual(len(self._jobs()), 1)
+
+    def test_cancel_kills_the_flow_and_queues_nothing(self):
+        self.say("create a repo for a plant-watering tracker")
+        res = self.say("never mind, cancel that")
+        self.assertIn("nothing was queued", res["brief"])
+        self.assertEqual(self._jobs(), [])
+        # A later fresh ask starts clean instead of waking the flow.
+        res = self.say("create a repo for a plant-watering tracker "
+                       "called greenalert")
+        self.assertIn("queued repo-creation job #", res["brief"])
+
+    def test_open_flow_does_not_swallow_other_rocky_asks(self):
+        self.say("create a repo for a plant-watering tracker")
+        with mock.patch.object(assist, "fetch_app_status",
+                               return_value=dict(FAKE_STATUS)):
+            res = self.say("how's everything doing?")
+        self.assertIn("3 founders", res["brief"])
+        res = self.say("greenalert")
+        self.assertIn("queued repo-creation job #", res["brief"])
+
+    def test_claimed_create_job_carries_the_create_fields(self):
+        self.say("create a repo for a plant-watering tracker "
+                 "called greenalert")
+        claimed = assist.claim_dev_job(self.conn)
+        self.assertEqual(claimed["kind"], "create")
+        self.assertEqual(claimed["create_name"], "greenalert")
+        self.assertIn("plant-watering tracker",
+                      claimed["create_desc"])
+        self.assertFalse(claimed["merge"])
+
+    def test_duplicate_create_is_not_queued_twice(self):
+        ask = ("create a repo for a plant-watering tracker called "
+               "greenalert")
+        self.say(ask)
+        res = self.say(ask)
+        self.assertIn("already queued", res["brief"])
+        self.assertEqual(len(self._jobs()), 1)
+
+    def test_girls_redirect_create_asks_to_rocky(self):
+        for girl in ("hannah", "mia", "jordan"):
+            res = self.say(
+                "create a repo for a plant-watering tracker called "
+                "greenalert", cid=girl)
+            self.assertTrue(
+                res["brief"].startswith(assist.FIXED_REPLY_PREFIX))
+            self.assertIn("rocky", res["brief"])
+        self.assertEqual(self._jobs(), [])
+
+    def test_rocky_create_lines_have_no_pet_names(self):
+        res = self.say("create a repo for a plant-watering tracker "
+                       "called greenalert")
+        self.assertFalse(assist._rocky_pet_name_hit(res["brief"]))
+
+    def test_stranger_gets_nothing(self):
+        self.assertIsNone(self.say(
+            "create a repo for a plant-watering tracker called "
+            "greenalert", user=STRANGER))
+        self.assertEqual(self._jobs(), [])
+
+    def test_build_flow_untouched(self):
+        res = self.say("use your dev bot to fix the login bug in "
+                       "the roof-scout repo")
+        self.assertIn("queued build job #", res["brief"])
+        jobs = self._jobs()
+        self.assertEqual(jobs[0]["kind"], "build")
+
+
 if __name__ == "__main__":
     unittest.main()

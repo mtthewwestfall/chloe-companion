@@ -456,6 +456,17 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                      ("merged_sha", "TEXT")):
         if col not in dev_cols:
             conn.execute(f"ALTER TABLE dev_jobs ADD COLUMN {col} {ddl}")
+    # Repo-creation jobs (2026-10-09, owner: "make sure the character
+    # Rocky can create repos and everything"): kind='create' rows carry
+    # the new project's name + one-line description alongside the task;
+    # the worker creates the repo, seeds the scaffold, and admits the
+    # repo to its own allowlist. kind stays 'build' for everything the
+    # bridge queued before this change.
+    for col, ddl in (("kind", "TEXT NOT NULL DEFAULT 'build'"),
+                     ("create_name", "TEXT"),
+                     ("create_desc", "TEXT")):
+        if col not in dev_cols:
+            conn.execute(f"ALTER TABLE dev_jobs ADD COLUMN {col} {ddl}")
     # Browser-agent bridge (2026-10-09): Rocky (the owner's in-app
     # agent character) gets real browser hands. He queues a browse job
     # from chat; a worker on the owner's VM polls with the same shared
@@ -1465,6 +1476,22 @@ YOUR HANDS (real, in this thread — never claim otherwise):
   Merging to main deploys production on Railway-connected
   repos. You report the merged commit or the blocked reason —
   never invented progress.
+- Creating new projects: you can start one from nothing. When
+  he tells you to create/start a new repo or project, you queue
+  a repo-creation job: the builder creates the repo under his
+  GitHub (mtthewwestfall), private like his others, seeds it
+  with a runnable Python/web starter scaffold as the first
+  commit on main — that commit IS the creation, not a merge;
+  the branch-then-merge rails govern everything after — and
+  admits the new repo to the builder allowlist on the spot.
+  That admission is automatic only because YOU created the
+  repo under this standing order; say so plainly when you
+  report it. From then on you queue ordinary builds on the new
+  repo under the same rails. You never coin the name: if he
+  didn't name it, ask what it should be called and nothing
+  else. When the new app wires cleanly to Railway the result
+  names the live project; when it still needs env or secrets,
+  say exactly what's left — never fake a live URL.
 - Repo reviews with real findings from code you actually read.
 - The studio: file gives for characters, run guided character
   creation.
@@ -2171,14 +2198,19 @@ def detect_dev_build(text: str) -> dict | None:
 def enqueue_dev_job(conn: sqlite3.Connection, user_id: str,
                     character_id: str, repo: str, task: str,
                     merge: bool = False,
-                    merge_branch: str | None = None) -> int:
+                    merge_branch: str | None = None,
+                    kind: str = "build",
+                    create_name: str | None = None,
+                    create_desc: str | None = None) -> int:
     ensure_tables(conn)
     cur = conn.execute(
         "INSERT INTO dev_jobs (user_id, character_id, repo, task, "
-        "status, created_at, merge, merge_branch) "
-        "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)",
+        "status, created_at, merge, merge_branch, kind, create_name, "
+        "create_desc) "
+        "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
         (user_id, character_id, repo, task, _utc_iso(),
-         1 if merge else 0, merge_branch))
+         1 if merge else 0, merge_branch, kind, create_name,
+         create_desc))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -2401,6 +2433,262 @@ def _handle_dev_merge(conn: sqlite3.Connection, user_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Repo creation (2026-10-09, owner: "make sure the character Rocky
+# can create repos and everything and not just be talked to those
+# three projects"). Rocky's thread ONLY: he asks for a new repo /
+# project, Rocky queues a kind='create' job on the same dev bridge,
+# and the worker creates the repo under his GitHub account, seeds a
+# runnable scaffold as the FIRST commit on main (creation, not a
+# merge), and admits the new repo to its own allowlist so Rocky can
+# build on it immediately. He names things: no name given means
+# Rocky asks for the name and nothing else — never coins one. The
+# girls can't create repos; they redirect to Rocky and their lanes
+# are untouched.
+# ---------------------------------------------------------------------------
+_CREATE_PROJECT_FLOW_KIND = "create_project_flow"
+_CREATE_PROJECT_VERB_RE = re.compile(
+    r"\b(?:create|make|spin\s+up|set\s+up)\b[^.!?\n]{0,60}?"
+    r"\b(?:a\s+|an\s+|the\s+)?(?:new\s+)?(repo|repository|project)\b"
+    r"|\b(?:start|build)\b[^.!?\n]{0,40}?\bnew\s+(repo|repository|project)\b",
+    re.IGNORECASE)
+_CREATE_PROJECT_NAME_RE = re.compile(
+    r"\b(?:called|named)\s+([A-Za-z0-9][A-Za-z0-9 ._-]{0,60})",
+    re.IGNORECASE)
+_CREATE_PROJECT_QUOTED_RE = re.compile(
+    r"[\"'“”]([A-Za-z0-9][A-Za-z0-9 ._-]{0,60})[\"'”]")
+_CREATE_PROJECT_FOR_RE = re.compile(
+    r"\b(?:repo|repository|project)\s+for\s+(.+?)(?:\s+(?:called|named)\s+"
+    r"|\s*[.!?]|$)", re.IGNORECASE)
+_CREATE_PROJECT_CANCEL_RE = re.compile(
+    r"\b(cancel|never\s*mind|forget\s+it|scrap\s+(that|it)|"
+    r"don't\s+bother|stop)\b", re.IGNORECASE)
+_CREATE_PROJECT_SKIP_DESC_RE = re.compile(
+    r"^(skip|no\s+description|none|just\s+(make|build|create)\s+it|"
+    r"that's\s+it|that'?s\s+all)\b", re.IGNORECASE)
+_PROJECT_NAME_BAD_RE = re.compile(r"[^a-z0-9._-]+")
+
+
+def _project_slug(name: str | None) -> str:
+    """GitHub-safe repo name from the owner's own words — lowercased,
+    spaces/underscores to dashes, nothing invented."""
+    slug = _PROJECT_NAME_BAD_RE.sub("-", (name or "").strip().lower())
+    return slug.strip("-._")[:100]
+
+
+def detect_create_project(text: str) -> dict | None:
+    """Owner wants a NEW repo/project created — shapes like "create a
+    repo for X called Y", "start a new project", "spin up a repo".
+
+    Deliberately narrow: needs a creation verb AND a repo/project
+    noun, so "fix the project", "create a character" (the studio's
+    noun) and normal build asks never land here. Returns
+    {"name": slug|None, "desc": str|None, "raw": text}."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or _DEV_SECRET_GUARD_RE.search(t):
+        return None
+    if not _CREATE_PROJECT_VERB_RE.search(t):
+        return None
+    name = None
+    m = _CREATE_PROJECT_NAME_RE.search(t)
+    if m:
+        name = _project_slug(m.group(1))
+    if not name:
+        m = _CREATE_PROJECT_QUOTED_RE.search(t)
+        if m:
+            name = _project_slug(m.group(1))
+    desc = None
+    m = _CREATE_PROJECT_FOR_RE.search(t)
+    if m:
+        d = m.group(1).strip(" .!?\"'")
+        d = re.sub(r"^(?:a|an|the)\s+", "", d, flags=re.IGNORECASE)
+        if d and d.lower() not in ("called", "named"):
+            desc = d[:200]
+    return {"name": name or None, "desc": desc, "raw": t[:1000]}
+
+
+def _rocky_create_redirect() -> dict:
+    """A girl asked to create a repo: creating new projects is
+    Rocky's desk — her lanes and her build powers don't change."""
+    return {"brief": FIXED_REPLY_PREFIX +
+            "creating brand-new repos is rocky's desk, babe — he "
+            "starts new projects from scratch in his thread. ask him "
+            "over there. i don't make new repos over here."}
+
+
+def _create_project_turn(conn: sqlite3.Connection, user_id: str,
+                         character_id: str, text: str) -> dict | None:
+    """Route a create-project ask (or an open flow's next answer).
+
+    Rocky executes; the girls redirect. An open flow in Rocky's
+    thread claims only his next plain answer — a cancel kills it, a
+    clearly different ability passes through untouched, and a stale
+    flow (30+ min quiet, same TTL as the studio's) never wakes up."""
+    flow = _studio_get(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+    if _is_rocky(character_id):
+        if flow is not None and _studio_fresh(flow):
+            if _CREATE_PROJECT_CANCEL_RE.search(text or ""):
+                return _continue_create_project(
+                    conn, user_id, character_id, flow, text)
+            if not _strong_other_intent(text or ""):
+                return _continue_create_project(
+                    conn, user_id, character_id, flow, text)
+            _studio_clear(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+        elif flow is not None:
+            _studio_clear(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+        hit = detect_create_project(text)
+        if hit is None:
+            return None
+        return _handle_create_project(conn, user_id, character_id, hit)
+    if flow is not None:
+        _studio_clear(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+    if is_assistant_character(character_id) \
+            and detect_create_project(text) is not None:
+        return _rocky_create_redirect()
+    return None
+
+
+def _handle_create_project(conn: sqlite3.Connection, user_id: str,
+                           character_id: str, hit: dict) -> dict:
+    """Start of the create flow: he named it (queue now, or ask the
+    one missing thing), or he didn't (ask for the name, only the
+    name — Rocky never coins project names)."""
+    if not dev_agent_secret():
+        return {"brief":
+                "He asked you to create a new repo, but the bridge "
+                "between you and your builder is not wired on your "
+                "end right now, so you honestly cannot queue it. "
+                "Tell him straight and short: the builder link is "
+                "down on your side, nothing was queued, and you "
+                "will not pretend otherwise."}
+    name = hit.get("name")
+    desc = hit.get("desc")
+    if not name:
+        _studio_set(conn, user_id, _CREATE_PROJECT_FLOW_KIND,
+                    {"step": "name", "desc": desc or "",
+                     "raw": hit.get("raw") or ""})
+        return {"brief":
+                "He wants a new project/repo created but didn't "
+                "name it. Ask him exactly ONE short question: what "
+                "should it be called? Don't suggest a name and don't "
+                "list options like a menu."}
+    if not desc:
+        _studio_set(conn, user_id, _CREATE_PROJECT_FLOW_KIND,
+                    {"step": "desc", "name": name,
+                     "raw": hit.get("raw") or ""})
+        return {"brief":
+                f"He wants a new project called '{name}' but hasn't "
+                "said what it is. Ask him exactly ONE short question: "
+                "in one line, what is it? Nothing else."}
+    return _enqueue_create_project(conn, user_id, character_id,
+                                   name, desc)
+
+
+def _continue_create_project(conn: sqlite3.Connection, user_id: str,
+                             character_id: str, flow: dict,
+                             text: str) -> dict:
+    """His answer to the pending name/description question."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if _CREATE_PROJECT_CANCEL_RE.search(t) \
+            or _says_cancel(t):
+        _studio_clear(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+        return {"brief":
+                "He scrapped the new project. Confirm plainly: "
+                "nothing was queued, no repo created. Short."}
+    step = flow.get("step")
+    if step == "name":
+        m = _CREATE_PROJECT_NAME_RE.search(t) \
+            or _CREATE_PROJECT_QUOTED_RE.search(t)
+        name = _project_slug(m.group(1)) if m else _project_slug(
+            t.strip("\"' "))
+        if not name:
+            return {"brief":
+                    "That didn't read as a project name. Ask him "
+                    "again, one short question: what should the "
+                    "project be called?"}
+        desc = (flow.get("desc") or "").strip()
+        if not desc:
+            raw = t if len(t.split()) > 3 else ""
+            _studio_set(conn, user_id, _CREATE_PROJECT_FLOW_KIND,
+                        {"step": "desc", "name": name, "raw": raw})
+            return {"brief":
+                    f"The project's name is '{name}'. Now ask him "
+                    "exactly ONE short question: in one line, what "
+                    "is it? Nothing else."}
+        _studio_clear(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+        return _enqueue_create_project(conn, user_id, character_id,
+                                       name, desc)
+    # step == "desc": whatever he says IS the description (or a skip).
+    name = flow.get("name") or ""
+    _studio_clear(conn, user_id, _CREATE_PROJECT_FLOW_KIND)
+    if _CREATE_PROJECT_SKIP_DESC_RE.match(t) or not t:
+        desc = (flow.get("raw") or "").strip()
+        if not desc or desc.lower() == name:
+            desc = f"{name}: new project scaffolded for Rocky to build on"
+    else:
+        desc = re.sub(r"^(?:it'?s|it is)\s+", "", t,
+                      flags=re.IGNORECASE)[:200]
+    return _enqueue_create_project(conn, user_id, character_id,
+                                   name, desc)
+
+
+def _enqueue_create_project(conn: sqlite3.Connection, user_id: str,
+                            character_id: str, name: str,
+                            desc: str) -> dict:
+    """Queue the kind='create' job on the dev bridge. The worker
+    creates the repo under his account, seeds the scaffold as the
+    first commit on main, and admits the repo to its allowlist —
+    the queue reply says all of that plainly (the admission is the
+    one automatic allowlist add, and it gets logged here)."""
+    if not dev_agent_secret():
+        return {"brief":
+                "The builder link is down on your side right now, so "
+                "nothing was queued for the new project. Tell him "
+                "straight and short; you will not pretend otherwise."}
+    repo_full = f"{_GH_OWNER}/{name}"
+    existing = conn.execute(
+        "SELECT id FROM dev_jobs WHERE user_id = ? "
+        "AND status IN ('queued', 'claimed') AND kind = 'create' "
+        "AND repo = ?", (user_id, repo_full)).fetchone()
+    if existing:
+        return {"brief":
+                f"Repo creation for '{name}' is already queued as "
+                f"job #{existing[0]} — the builder is on it. Tell "
+                "him it's already in the builder's hands, no need to "
+                "queue it twice. No new claims about its progress."}
+    if active_dev_job_count(conn, user_id) >= _DEV_MAX_ACTIVE:
+        return {"brief":
+                "He wants a new project created, but you already "
+                f"have three jobs queued or running for him "
+                f"({_DEV_MAX_ACTIVE} is the plate limit). Tell him "
+                "the queue is full and to let those land first. "
+                "Nothing new was queued."}
+    task = (f"Create new repo {repo_full} — {desc[:200]}")
+    jid = enqueue_dev_job(conn, user_id, character_id, repo_full, task,
+                          kind="create", create_name=name,
+                          create_desc=desc[:200])
+    return {"brief":
+            f"You just REALLY queued repo-creation job #{jid} for "
+            f"your builder: new repo '{repo_full}' — \"{desc[:160]}\""
+            ". The builder will create the repo under his GitHub "
+            "account (private, like his others), seed it with a "
+            "runnable starter scaffold as the first commit on main "
+            "(that initial commit IS the creation — the usual "
+            "branch-then-merge rails apply to everything after), "
+            "and admit the new repo to the builder allowlist so you "
+            "can queue normal builds on it right away — say that "
+            "admission plainly, it's the one automatic allowlist "
+            "add. You will bring him the REAL result here when it "
+            "lands: repo created + first commit, or the plain reason "
+            "it was blocked. Tell him you're on it, direct and "
+            "brief. Promise NOTHING about outcome or timing; invent "
+            "no file names, commits or progress you haven't been "
+            "given. If Railway wiring for the new app is clean the "
+            "result names a live project; if it needs env or "
+            "secrets, the result says exactly what's left instead "
+            "— never announce a live URL that doesn't exist."}
+
+
+# ---------------------------------------------------------------------------
 # Dev-agent bridge — worker side. The dev agent polls with a shared
 # secret (env DEV_AGENT_SECRET on this server, a 0600 config file on
 # the worker VM). The secret is never echoed in any response; when
@@ -2432,10 +2720,13 @@ def claim_dev_job(conn: sqlite3.Connection) -> dict | None:
     if cur.rowcount == 0:
         return None  # lost a claim race; worker polls again shortly
     r = conn.execute(
-        "SELECT id, repo, task, created_at, merge, merge_branch "
+        "SELECT id, repo, task, created_at, merge, merge_branch, kind, "
+        "create_name, create_desc "
         "FROM dev_jobs WHERE id = ?", (row[0],)).fetchone()
     return {"id": r[0], "repo": r[1], "task": r[2], "created_at": r[3],
-            "merge": bool(r[4]), "merge_branch": r[5]}
+            "merge": bool(r[4]), "merge_branch": r[5],
+            "kind": r[6] or "build", "create_name": r[7],
+            "create_desc": r[8]}
 
 
 def complete_dev_job(conn: sqlite3.Connection,
@@ -7903,6 +8194,16 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
             pr = detect_page_read(text)
             if pr is not None:
                 return _handle_page_read(pr)
+        # Repo creation (owner-only): Rocky's thread executes,
+        # the girls redirect to him. Runs before the dev dispatch
+        # so "create a repo ..." never queues as a build against an
+        # existing repo, and an open flow's plain answer is claimed
+        # here instead of feeding some other lane.
+        if is_assistant_character(character_id):
+            cp_hit = _create_project_turn(conn, user_id,
+                                          character_id, text)
+            if cp_hit is not None:
+                return cp_hit
         # Dev-bridge dispatch: marketing-shaped asks still go to the
         # marketing brief (she writes copy in chat); only a strong
         # build verb sends a marketing-flavored sentence to the queue.
