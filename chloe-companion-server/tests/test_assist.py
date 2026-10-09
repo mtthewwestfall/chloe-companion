@@ -175,3 +175,67 @@ class CredentialHygieneTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppStatusTest(unittest.TestCase):
+    def test_detect_status_phrases(self):
+        for t in ("how's onefetch doing?", "what's the app status",
+                  "how many founder spots left?", "check my apps",
+                  "how is the gemini pool", "status of my apps"):
+            self.assertTrue(assist.detect_app_status(t), t)
+
+    def test_no_status_in_plain_chat(self):
+        for t in ("hey beautiful", "how's your day", "i love you"):
+            self.assertFalse(assist.detect_app_status(t), t)
+
+    def test_detect_brief_phrases(self):
+        self.assertTrue(assist.detect_owner_brief("catch me up"))
+        self.assertTrue(assist.detect_owner_brief("what are my prices?"))
+        self.assertFalse(assist.detect_owner_brief("hey beautiful"))
+
+    def test_status_lines_real_numbers(self):
+        s = {"onefetch": {"founder_count": 3, "founder_spots_left": 197,
+                          "founder_open": True, "ai_available": True,
+                          "site_status": 200},
+             "roof_rover": {"shelf_leads": 24, "site_status": 200},
+             "gemini": {"believed_healthy": 2,
+                        "pool": {"healthy": 2, "cooling": 14},
+                        "degraded": False}}
+        txt = "\n".join(assist._status_lines(s))
+        self.assertIn("3 founders", txt)
+        self.assertIn("197 of 200", txt)
+        self.assertIn("24 leads", txt)
+        self.assertIn("2 keys believed healthy", txt)
+
+    def test_status_lines_unreachable_honest(self):
+        txt = "\n".join(assist._status_lines(
+            {"onefetch": {}, "roof_rover": {}, "gemini": {}}))
+        self.assertIn("OneFetch: UNREACHABLE", txt)
+        self.assertIn("Roof Rover: UNREACHABLE", txt)
+
+    def test_fetch_app_status_wires_sources(self):
+        def fake_get(url, timeout=6):
+            if url.endswith("/api/pricing"):
+                return 200, {"founder_count": 1,
+                             "founder_spots_left": 199,
+                             "founder_open": True}
+            if url.endswith("/api/ai/status"):
+                return 200, {"available": True}
+            if url.endswith("/api/store/leads"):
+                return 200, [{"id": 1}, {"id": 2}]
+            return None, None
+        orig_get, orig_status = assist._http_get_json, assist._http_status
+        orig_info = assist.gemini_keys.degradation_info
+        try:
+            assist._http_get_json = fake_get
+            assist._http_status = lambda url, timeout=6: 200
+            assist.gemini_keys.degradation_info = lambda: {
+                "believed_healthy_key_ids": [8, 17],
+                "pool": {"healthy": 2}, "degraded": False}
+            s = assist.fetch_app_status()
+        finally:
+            assist._http_get_json, assist._http_status = orig_get, orig_status
+            assist.gemini_keys.degradation_info = orig_info
+        self.assertEqual(s["onefetch"]["founder_count"], 1)
+        self.assertEqual(s["roof_rover"]["shelf_leads"], 2)
+        self.assertEqual(s["gemini"]["believed_healthy"], 2)

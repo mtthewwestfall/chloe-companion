@@ -610,6 +610,196 @@ def detect_github_review(text: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Owner continuity brief + live app status (2026-10-08, user-directed):
+# when Rocky is unavailable, Hannah is his cover. The brief below is
+# standing FACTS (prices, where things live, the rules) — never live
+# numbers. Live numbers come only from fetch_app_status(), fetched at
+# ask-time from his own public endpoints + the in-process Gemini pool.
+# Anything unreachable is reported as unreachable — never invented.
+# ---------------------------------------------------------------------------
+_OWNER_BRIEF = """HIS PRODUCTS — STANDING FACTS (use ONLY these; for
+anything not covered, ask him — never invent):
+- OneFetch (realtor app, houses not roofs): listing-launch kits,
+  open-house sign-ins with follow-ups, FSBO radar. Live at
+  realtor-app-production-825b.up.railway.app (public site /site, app
+  token-gated). Pricing: first 200 Founders $19.99/mo locked for
+  life, then Standard $29.99/mo. Stripe checkout + webhook are live;
+  the tryonefetch.com domain is NOT bought yet. Fetch the golden
+  retriever is the mascot.
+- Roof Rover (tryroofrover.com): aerial roof scans -> graded leads
+  for roofers; public store sells exclusive leads at $4.99 each.
+  Winston (EstimatorPRO) is the partner-API customer: WE charge him
+  $3.00 per billed lead (grades 1-3), first 10 scan jobs free.
+  Bailey is Roof Rover's on-screen assistant; brand wall: no Whispr
+  branding inside Roof Rover.
+- Whispr AI: this companion app, $9.99/mo (see the Whispr brief).
+- His builder: when he asks Hannah to build/fix code, she queues a
+  dev-agent job. The builder works ONLY on agent/* branches, never
+  pushes main (allowlist is empty), never deploys production, and
+  reports back through Hannah in chat.
+- AI: every app shares one free Gemini key pool through the
+  companion proxy (gemini-3.1-flash-lite). If the pool is saturated,
+  apps wait or use honestly-labeled template fallbacks — his cost
+  rule is free-first, always.
+- Rocky is his main Muse agent; Hannah covers for him in chat:
+  builds via the dev agent, code reviews, live app status, and
+  marketing copy. She never claims she did something she didn't."""
+
+_STATUS_RE = re.compile(
+    r"\b(app status|status of (my|the|his) apps?|how('s| is| are) "
+    r"(onefetch|roof rover|whispr|my apps?|everything|things|the "
+    r"(apps?|pool|store|shelf))|check (on )?(my|the) apps?|founder "
+    r"(count|spots)|spots left|key pool|gemini pool|pool health|"
+    r"store shelf|shelf count)\b", re.IGNORECASE)
+
+_BRIEF_RE = re.compile(
+    r"\b(catch me up|brief me|what are (my|the) (prices|products)|"
+    r"what do you know about (my|the|his) (business|products|apps)|"
+    r"remind me what (we|i) (charge|sell|built))\b", re.IGNORECASE)
+
+_ONEFETCH_BASE = "https://realtor-app-production-825b.up.railway.app"
+_ROOFROVER_BASE = "https://tryroofrover.com"
+
+
+def detect_app_status(text: str) -> bool:
+    return bool(_STATUS_RE.search(text or ""))
+
+
+def detect_owner_brief(text: str) -> bool:
+    return bool(_BRIEF_RE.search(text or ""))
+
+
+def _http_get_json(url: str, timeout: int = 6):
+    """(status, json) or (None, None) — status fetches must fail soft."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "hannah-status/1",
+                      "Connection": "keep-alive"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(
+                resp.read().decode("utf-8", "ignore"))
+    except Exception:
+        return None, None
+
+
+def _http_status(url: str, timeout: int = 6):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "hannah-status/1",
+                      "Connection": "keep-alive"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(64)
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return None
+
+
+def fetch_app_status() -> dict:
+    """Live numbers for the owner's apps. Every source is independent:
+    one being down never blocks or poisons the others."""
+    out: dict = {}
+    one: dict = {}
+    _, pricing = _http_get_json(_ONEFETCH_BASE + "/api/pricing")
+    if isinstance(pricing, dict):
+        one["founder_count"] = pricing.get("founder_count")
+        one["founder_spots_left"] = pricing.get("founder_spots_left")
+        one["founder_open"] = pricing.get("founder_open")
+    _, ai = _http_get_json(_ONEFETCH_BASE + "/api/ai/status")
+    if isinstance(ai, dict):
+        one["ai_available"] = ai.get("available")
+    one["site_status"] = _http_status(_ONEFETCH_BASE + "/site")
+    out["onefetch"] = one
+
+    roof: dict = {}
+    _, leads = _http_get_json(_ROOFROVER_BASE + "/api/store/leads")
+    if isinstance(leads, list):
+        roof["shelf_leads"] = len(leads)
+    elif isinstance(leads, dict) and isinstance(leads.get("leads"), list):
+        roof["shelf_leads"] = len(leads["leads"])
+    roof["site_status"] = _http_status(_ROOFROVER_BASE + "/")
+    out["roof_rover"] = roof
+
+    try:
+        info = gemini_keys.degradation_info()
+        pool = info.get("pool") or {}
+        out["gemini"] = {
+            "believed_healthy": len(info.get("believed_healthy_key_ids")
+                                    or []),
+            "pool": pool,
+            "degraded": bool(info.get("degraded")),
+        }
+    except Exception:
+        out["gemini"] = {}
+    return out
+
+
+def _status_lines(s: dict) -> list[str]:
+    lines = []
+    one = s.get("onefetch") or {}
+    if one.get("founder_count") is not None:
+        signup = "open" if one.get("founder_open") else "CLOSED"
+        ai_txt = ("reachable" if one.get("ai_available")
+                  else "NOT reachable (template mode)")
+        site_txt = (f", site HTTP {one['site_status']}"
+                    if one.get("site_status") else ", site UNREACHABLE")
+        lines.append(
+            f"OneFetch: {one['founder_count']} founders, "
+            f"{one.get('founder_spots_left')} of 200 founder spots "
+            f"left, founder signup {signup}, AI writing {ai_txt}"
+            + site_txt)
+    else:
+        lines.append("OneFetch: UNREACHABLE — you could not pull its "
+                     "numbers just now.")
+    roof = s.get("roof_rover") or {}
+    if roof.get("shelf_leads") is not None:
+        lines.append(
+            f"Roof Rover: {roof['shelf_leads']} leads on the $4.99 "
+            f"store shelf"
+            + (f", site HTTP {roof['site_status']}"
+               if roof.get("site_status") else ", site UNREACHABLE"))
+    else:
+        lines.append("Roof Rover: UNREACHABLE — you could not pull "
+                     "its store shelf just now.")
+    gem = s.get("gemini") or {}
+    if gem:
+        pool = gem.get("pool") or {}
+        pool_txt = ", ".join(f"{k}: {v}" for k, v in sorted(
+            pool.items())) or "no key rows reported"
+        lines.append(
+            f"Gemini key pool: {gem.get('believed_healthy', 0)} keys "
+            f"believed healthy ({pool_txt})"
+            + (", pool is DEGRADED (running on reserve keys)"
+               if gem.get("degraded") else ""))
+    else:
+        lines.append("Gemini key pool: you could not read the pool "
+                     "health just now.")
+    return lines
+
+
+def _status_brief() -> str:
+    lines = _status_lines(fetch_app_status())
+    return ("You just checked his live app numbers yourself, right "
+            "now. Report ONLY the numbers in the LIVE block below, "
+            "in your own voice, short and plain. Any line that says "
+            "UNREACHABLE means say exactly that — never guess, round "
+            "or fill in a number you don't have. The standing facts "
+            "after it are context for his follow-up questions, not "
+            "numbers to read out unless he asks.\n\nLIVE NOW:\n"
+            + "\n".join("- " + ln for ln in lines)
+            + "\n\n" + _OWNER_BRIEF)
+
+
+def _owner_brief_reply() -> str:
+    return ("Standing facts he expects you to know cold. Answer his "
+            "question from ONLY these — if it's not covered, ask him "
+            "instead of inventing. For live numbers (counts, spots, "
+            "pool health) he'd ask you for status; these facts don't "
+            "change.\n\n" + _OWNER_BRIEF)
+
+
+# ---------------------------------------------------------------------------
 # Marketing help — static, verified product facts. She produces the copy
 # in chat (that part is real); distribution never happens here.
 # ---------------------------------------------------------------------------
@@ -1551,6 +1741,12 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         gh = detect_github_review(text)
         if gh is not None:
             return _handle_github_review(conn, user_id, character_id, gh)
+        # Live app status + continuity brief (owner-only cover lane):
+        # she fetches real numbers at ask-time; never from memory.
+        if detect_app_status(text):
+            return {"brief": _status_brief()}
+        if detect_owner_brief(text):
+            return {"brief": _owner_brief_reply()}
         # Dev-bridge dispatch: marketing-shaped asks still go to the
         # marketing brief (she writes copy in chat); only a strong
         # build verb sends a marketing-flavored sentence to the queue.
