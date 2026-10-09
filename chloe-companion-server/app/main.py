@@ -2929,8 +2929,13 @@ def proxy_gemini_generate_content(model: str, body: dict, request: Request):
     # Calling app identifies itself via X-Source header (e.g. "gods-greek",
     # "roof-rover", "whispr-telegram"); defaults to "proxy".
     source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
+    # X-Free-Only: partner traffic must run on the free key pool only -
+    # it never falls back to a paid key (see gemini_keys.post_json).
+    free_only = (request.headers.get("x-free-only") or "").strip().lower() \
+        in ("1", "true", "yes")
     _ensure_safety_settings(body)
-    data = gemini_keys.post_json(url, body, timeout=60, source=source)
+    data = gemini_keys.post_json(url, body, timeout=60, source=source,
+                                 free_only=free_only)
     if data is None:
         raise HTTPException(status_code=502, detail="all_keys_failed")
     return data
@@ -2988,7 +2993,10 @@ def proxy_openai_chat_completions(body: dict, request: Request):
     _ensure_safety_settings(payload)
     url = "%s/%s:generateContent" % (_GEMINI_PROXY_BASE, model)
     source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
-    data = gemini_keys.post_json(url, payload, timeout=60, source=source)
+    free_only = (request.headers.get("x-free-only") or "").strip().lower() \
+        in ("1", "true", "yes")
+    data = gemini_keys.post_json(url, payload, timeout=60, source=source,
+                                 free_only=free_only)
     if data is None:
         raise HTTPException(status_code=502, detail="all_keys_failed")
     text, finish = "", "STOP"

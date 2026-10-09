@@ -933,7 +933,7 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
 
 
 def post_json(url: str, payload: dict, timeout: int = 30,
-              source: str = "unknown") -> dict | None:
+              source: str = "unknown", free_only: bool = False) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Fail-fast phases (no sleeping anywhere on the request path):
@@ -959,7 +959,30 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     state = {"n": 0, "deadline": time.monotonic() + _attempt_budget_s()}
     tried: set[int] = set()
 
-    fast = _fast_candidates()
+    if free_only:
+        # Free-only mode (partner traffic, e.g. Roof Rover's Winston API):
+        # restrict every selection phase to keys that are NOT paid. When
+        # no free key can serve, return None so the caller can return a
+        # retryable error - a paid key is never used for this traffic.
+        with _lock:
+            conn = db.connect()
+            try:
+                _ensure_table(conn)
+                _free_ids = {r["id"] for r in conn.execute(
+                    "SELECT id FROM gemini_keys WHERE is_paid = 0"
+                    " AND is_active = 1").fetchall()}
+            finally:
+                conn.close()
+        if not _free_ids:
+            return None
+
+        def _only_free(cands):
+            return [c for c in cands if c[0] in _free_ids]
+    else:
+        def _only_free(cands):
+            return cands
+
+    fast = _only_free(_fast_candidates())
     if fast:
         if _hedge_after_s() > 0 and len(fast) >= 2:
             data = _try_hedged(fast, url, payload, attempt_timeout, source,
@@ -969,11 +992,11 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                                    source, tried, state)
         if data is not None:
             return data
-    data = _try_candidates(get_candidate_keys(), url, payload,
+    data = _try_candidates(_only_free(get_candidate_keys()), url, payload,
                            caller_timeout, source, tried, state)
     if data is not None:
         return data
-    return _try_candidates(_all_active_keys(), url, payload,
+    return _try_candidates(_only_free(_all_active_keys()), url, payload,
                            caller_timeout, source, tried, state)
 
 
