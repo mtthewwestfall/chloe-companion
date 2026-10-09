@@ -787,7 +787,7 @@ async def upload_chat_attachment(request: Request,
     if cid != "hannah" or user_id not in assist._owner_ids():
         raise HTTPException(status_code=403,
                             detail="attachments are owner-only for Hannah")
-    data = await file.read(assist.ATTACHMENT_MAX_BYTES + 1)
+    data = await file.read(assist.ATTACHMENT_READ_LIMIT + 1)
     conn = _conn()
     try:
         store.get_or_create_user(conn, user_id)
