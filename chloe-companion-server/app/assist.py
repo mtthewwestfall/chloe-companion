@@ -3796,9 +3796,9 @@ _STUDIO_YES_RE = re.compile(
 _GIVE_VERBS = r"(?:add|save|file|put|store|drop|attach)"
 _GIVE_TARGET = r"([A-Za-z][A-Za-z0-9'’.\-]*(?:\s+[A-Za-z][A-Za-z0-9'’.\-]*){0,2})"
 _GIVE_ADD_RES = (
-    re.compile(rf"\b{_GIVE_VERBS}\b[^.!?\n]{{0,60}}?\bgives?\b[^.!?\n]{{0,40}}?"
+    re.compile(rf"\b{_GIVE_VERBS}\b[^!?\n]{{0,60}}?\bgives?\b[^!?\n]{{0,40}}?"
                rf"\b(?:for|to)\s+{_GIVE_TARGET}", re.IGNORECASE),
-    re.compile(rf"\b{_GIVE_VERBS}\b[^.!?\n]{{0,40}}?\bfor\s+{_GIVE_TARGET}"
+    re.compile(rf"\b{_GIVE_VERBS}\b[^!?\n]{{0,40}}?\bfor\s+{_GIVE_TARGET}"
                rf"\s+(?:as\s+)?(?:a\s+)?gives?\b", re.IGNORECASE),
     re.compile(rf"\bmake\s+(?:that|this|it)\s+a\s+give\s+(?:for|to)\s+"
                rf"{_GIVE_TARGET}", re.IGNORECASE),
@@ -3812,7 +3812,7 @@ _GIVE_MEDIA_ID_RE = re.compile(r"\bmedia\s*(?:id)?\s*#?(\d{1,9})\b",
 _GIVE_URL_RE = re.compile(r"https?://[^\s\"'<>\)]+", re.IGNORECASE)
 
 _CREATE_RE = re.compile(
-    r"\b(create|make|add|build|design)\b[^.!?\n]{0,40}?"
+    r"\b(create|make|add|build|design)\b[^!?\n]{0,40}?"
     r"\b(character|companion|girlfriend|boyfriend|girl|guy|woman|man|"
     r"person)\b", re.IGNORECASE)
 _CREATE_NAME_RE = re.compile(
@@ -3826,10 +3826,10 @@ _NONCOMPANION_RE = re.compile(
     r"professional\s+only|no\s+girlfriend|not\s+a\s+girlfriend)\b",
     re.IGNORECASE)
 _AVATAR_SET_RE = re.compile(
-    r"\b(?:use|set|make|put)\b[^.!?\n]{0,50}?\b(?:avatar|profile\s+"
+    r"\b(?:use|set|make|put)\b[^!?\n]{0,50}?\b(?:avatar|profile\s+"
     r"(?:pic|picture|photo))\b", re.IGNORECASE)
 _DELETE_CHAR_RE = re.compile(
-    r"\b(delete|remove|get\s+rid\s+of)\b[^.!?\n]{0,50}?\b(character|"
+    r"\b(delete|remove|get\s+rid\s+of)\b[^!?\n]{0,50}?\b(character|"
     r"companion|girl|guy|give|gives)\b", re.IGNORECASE)
 
 

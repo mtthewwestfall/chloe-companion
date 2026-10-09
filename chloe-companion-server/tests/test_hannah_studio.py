@@ -168,6 +168,15 @@ class GiveTest(StudioBase):
         self.assertEqual(self.gives("mara"), 0)
         self.assertNotIn("give", res)
 
+    def test_url_reference(self):
+        det = assist._detect_add_give(
+            "add https://example.com/x.png as a give for Mara")
+        self.assertEqual(det["target"], "mara")
+        self.assertEqual(det["url"], "https://example.com/x.png")
+        res = self.say(
+            "add https://example.com/x.png as a give for Mara")
+        self.assertEqual(res["give"]["count"], 1)
+
     def test_media_id_reference(self):
         cur = self.conn.execute(
             "INSERT INTO girl_media (girl_id, kind, url, preset) "
