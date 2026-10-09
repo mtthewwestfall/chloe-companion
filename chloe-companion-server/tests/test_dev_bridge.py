@@ -207,5 +207,79 @@ class FallbackTextTest(EnvMixin):
         self.assertIn("tests still red", out)
 
 
+class RepoNameCanonicalTest(EnvMixin):
+    """2026-10-08 live block: his storage ask said "roofscout" and the
+    queue took it verbatim -> GitHub 404 -> instant block. Squashed or
+    spaced spoken forms of his real repos canonicalize; hyphenated
+    input survives byte-identical; unknown names pass through as
+    themselves, never as a guessed repo."""
+
+    def test_job5_squashed_text_now_maps(self):
+        dv = assist.detect_dev_build(
+            "Create a storage system for all the scans that railways "
+            "can transfer to the empty it’s bin and get more for "
+            "transfer for my roofscout repo")
+        self.assertIsNotNone(dv)
+        self.assertEqual(dv["repo"], "roof-scout")
+
+    def test_hyphenated_preserved(self):
+        self.assertEqual(assist.detect_dev_build(
+            "build it in my roof-scout repo")["repo"], "roof-scout")
+        self.assertEqual(assist.detect_dev_build(
+            "fix the thing in roof-scout")["repo"], "roof-scout")
+        self.assertEqual(assist.detect_dev_build(
+            "patch the parser in chloe-companion")["repo"],
+            "chloe-companion")
+
+    def test_spaced_and_caps_forms(self):
+        self.assertEqual(assist.detect_dev_build(
+            "fix the thing in my roof scout repo")["repo"], "roof-scout")
+        self.assertEqual(assist.detect_dev_build(
+            "update my RoofScout repo please")["repo"], "roof-scout")
+
+    def test_squashed_dev_agent_and_queue(self):
+        hit = assist.maybe_assist(
+            self.conn, {"user_id": OWNER, "tier": "basic"},
+            "fix the formatter in my devagent repo", "hannah")
+        self.assertIsNotNone(hit)
+        self.assertIn("queued build job", hit["brief"])
+        job = assist.claim_dev_job(self.conn)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["repo"], "mtthewwestfall/dev-agent")
+
+    def test_unknown_name_passes_through(self):
+        dv = assist.detect_dev_build(
+            "fix the thing in my brand-new-repo repo")
+        self.assertIsNotNone(dv)
+        self.assertEqual(dv["repo"], "brand-new-repo")
+
+    def test_canonical_helper(self):
+        self.assertEqual(assist._canonical_repo("roofscout"),
+                         "roof-scout")
+        self.assertEqual(assist._canonical_repo("ROOFSCOUT"),
+                         "roof-scout")
+        self.assertEqual(assist._canonical_repo("roof-scout"),
+                         "roof-scout")
+        self.assertEqual(assist._canonical_repo("not-a-repo"),
+                         "not-a-repo")
+        self.assertIsNone(assist._canonical_repo(None))
+        self.assertEqual(assist._canonical_repo(""), "")
+
+    def test_review_path_canonicalizes(self):
+        gh = assist.detect_github_review("review my roof-scout repo")
+        self.assertEqual(gh, {"repo": "roof-scout"})
+        gh = assist.detect_github_review("review the code in roofscout")
+        self.assertEqual(gh, {"repo": "roof-scout"})
+        gh = assist.detect_github_review(
+            "look at mtthewwestfall/roofscout, what's broken")
+        self.assertEqual(gh, {"repo": "roof-scout"})
+
+    def test_owner_slash_squashed(self):
+        dv = assist.detect_dev_build(
+            "please update mtthewwestfall/roofscout to cache imagery")
+        self.assertIsNotNone(dv)
+        self.assertEqual(dv["repo"], "roof-scout")
+
+
 if __name__ == "__main__":
     unittest.main()
