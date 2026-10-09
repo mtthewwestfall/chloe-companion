@@ -1549,7 +1549,7 @@ class HerDayInjectIn(BaseModel):
     caption: str = ""
     video_b64: str = ""
     filename: str = ""
-    user_id: str = ""  # empty = all users
+    user_id: str = ""  # empty = shared day-set post (all users read it)
 
 
 @app.post("/api/v1/admin/her-day/inject")
@@ -1557,9 +1557,10 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
     """Admin: inject a pre-made video as a Whispr Feed post for today.
 
     Body: girl_id, caption, video_b64 (base64 mp4), filename, user_id
-    (empty = all users). Saves the video under GENERATED_DIR and creates
-    one video post per target user. Used to load hand-made Whispr Feed
-    clips without going through Sogni generation.
+    (empty = one shared day-set post every user reads). Saves the video
+    under GENERATED_DIR and creates one video post for the target. Used
+    to load hand-made Whispr Feed clips without going through Sogni
+    generation.
     """
     _require_admin(request)
     import base64 as _b64
@@ -1587,18 +1588,19 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
     conn = _conn()
     try:
         if body.user_id:
-            user_ids = [body.user_id]
-        else:
-            user_ids = [r[0] for r in conn.execute(
-                "SELECT user_id FROM users").fetchall()]
-        created = 0
-        for uid in user_ids:
             store.save_her_day_post(
-                conn, uid, gid, post_type="video",
+                conn, body.user_id, gid, post_type="video",
                 media_url=media_url, caption=body.caption or "")
-            created += 1
-        return {"ok": True, "created": created, "media_url": media_url,
-                "users": len(user_ids)}
+            return {"ok": True, "created": 1, "media_url": media_url,
+                    "users": 1}
+        # No target user: one shared day-set post that every user's feed
+        # reads (2026-10-09) — never a per-account fan-out, so probe/test
+        # accounts are not written for either.
+        store.save_her_day_post(
+            conn, store.HER_DAY_SHARED_USER, gid, post_type="video",
+            media_url=media_url, caption=body.caption or "")
+        return {"ok": True, "created": 1, "media_url": media_url,
+                "users": "all (shared)", "shared": True}
     finally:
         conn.close()
 

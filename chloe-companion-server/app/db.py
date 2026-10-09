@@ -372,6 +372,19 @@ CREATE TABLE IF NOT EXISTS her_day_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_her_day_user_girl ON her_day_posts(user_id, girl_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_her_day_expires ON her_day_posts(expires_at);
+
+-- Her Day shared day-sets (2026-10-09): the daily set is generated ONCE per
+-- girl and stored under the shared sentinel user (store.HER_DAY_SHARED_USER);
+-- every user's feed reads those rows. The only per-user state is this
+-- lightweight seen overlay — one small row per (user, post) actually viewed,
+-- instead of a full duplicated post row per user.
+CREATE TABLE IF NOT EXISTS her_day_seen (
+    user_id  TEXT NOT NULL,
+    post_id  INTEGER NOT NULL,
+    seen_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, post_id)
+);
+CREATE INDEX IF NOT EXISTS idx_her_day_seen_post ON her_day_seen(post_id);
 """
 
 

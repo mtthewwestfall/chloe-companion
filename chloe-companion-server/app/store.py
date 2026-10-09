@@ -1255,7 +1255,16 @@ def update_custom_request(conn: sqlite3.Connection, request_id: int,
 
 # ---------------------------------------------------------------------------
 # Her Day feed (2026-10-07): Instagram-stories-style daily posts per girl.
+#
+# Shared day-sets (2026-10-09): posts are generated ONCE per girl per day and
+# stored under HER_DAY_SHARED_USER; every user's feed reads those shared rows
+# (lazy attach — reading never writes post rows). Per-user state is only the
+# her_day_seen overlay. Legacy per-user rows (written before the shared
+# engine) still read back for any girl that has no shared set yet; once a
+# shared set exists for a girl it wins, so nobody sees duplicates.
 # ---------------------------------------------------------------------------
+
+HER_DAY_SHARED_USER = "__shared__"
 
 def save_her_day_post(conn: "sqlite3.Connection", user_id: str, girl_id: str,
                       post_type: str = "image", media_url: str = "",
@@ -1282,44 +1291,110 @@ def get_her_day_posts(conn: "sqlite3.Connection", user_id: str,
                       girl_id: str | None = None,
                       include_expired: bool = False) -> list[dict]:
     """Get active Her Day posts for a user (optionally filtered by girl),
-    newest first. Expired posts are excluded unless include_expired."""
-    query = "SELECT * FROM her_day_posts WHERE user_id = ?"
-    params: list = [user_id]
-    if girl_id:
-        query += " AND girl_id = ?"
-        params.append(girl_id.strip().lower())
+    newest first. Expired posts are excluded unless include_expired.
+
+    Reads the shared day-set (posts stored under HER_DAY_SHARED_USER) with
+    this user's seen state overlaid as `viewed`, plus the user's own legacy
+    per-user rows for any girl that has no shared set yet. Reading never
+    writes anything.
+    """
+    gid = girl_id.strip().lower() if girl_id else None
+    fresh = "" if include_expired else " AND expires_at > datetime('now')"
+    shared_girls = {r[0] for r in conn.execute(
+        "SELECT DISTINCT girl_id FROM her_day_posts WHERE user_id = ?"
+        + fresh, (HER_DAY_SHARED_USER,)).fetchall()}
+
+    shared_q = (
+        "SELECT p.id, p.user_id, p.girl_id, p.post_type, p.media_url,"
+        " p.voice_url, p.caption, p.created_at, p.expires_at,"
+        " CASE WHEN s.post_id IS NULL THEN 0 ELSE 1 END AS viewed"
+        " FROM her_day_posts p LEFT JOIN her_day_seen s"
+        " ON s.post_id = p.id AND s.user_id = ?"
+        " WHERE p.user_id = ?"
+        + ("" if include_expired
+           else " AND p.expires_at > datetime('now')"))
+    shared_params: list = [user_id, HER_DAY_SHARED_USER]
+    if gid:
+        shared_q += " AND p.girl_id = ?"
+        shared_params.append(gid)
+    posts = [dict(r) for r in conn.execute(shared_q, shared_params)]
+
+    own_q = "SELECT * FROM her_day_posts WHERE user_id = ?"
+    own_params: list = [user_id]
+    if gid:
+        own_q += " AND girl_id = ?"
+        own_params.append(gid)
+    if shared_girls:
+        own_q += (" AND girl_id NOT IN ("
+                  + ", ".join("?" for _ in shared_girls) + ")")
+        own_params.extend(sorted(shared_girls))
     if not include_expired:
-        query += " AND expires_at > datetime('now')"
-    query += " ORDER BY created_at DESC"
-    return [dict(r) for r in conn.execute(query, params).fetchall()]
+        own_q += " AND expires_at > datetime('now')"
+    posts.extend(dict(r) for r in conn.execute(own_q, own_params))
+
+    posts.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+    return posts
 
 
 def mark_her_day_viewed(conn: "sqlite3.Connection", post_id: int,
                         user_id: str) -> bool:
-    """Mark a Her Day post as viewed. Returns True if a row was updated."""
+    """Mark a Her Day post as viewed for this user.
+
+    Legacy per-user rows flip their own `viewed` flag (as before); shared
+    day-set posts record one lightweight her_day_seen row instead. Returns
+    True when the post exists and is visible to this user.
+    """
     cur = conn.execute(
         "UPDATE her_day_posts SET viewed = 1 WHERE id = ? AND user_id = ?",
         (post_id, user_id),
     )
+    if cur.rowcount:
+        conn.commit()
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM her_day_posts WHERE id = ? AND user_id = ?",
+        (post_id, HER_DAY_SHARED_USER),
+    ).fetchone()
+    if row is None:
+        return False
+    conn.execute(
+        "INSERT OR IGNORE INTO her_day_seen (user_id, post_id)"
+        " VALUES (?, ?)",
+        (user_id, post_id),
+    )
     conn.commit()
-    return cur.rowcount > 0
+    return True
 
 
 def cleanup_expired_her_day(conn: "sqlite3.Connection") -> int:
-    """Delete expired Her Day posts. Returns count deleted."""
+    """Delete expired Her Day posts (and seen rows pointing at posts that
+    no longer exist). Returns count of posts deleted."""
     cur = conn.execute(
         "DELETE FROM her_day_posts WHERE expires_at <= datetime('now')")
+    conn.execute(
+        "DELETE FROM her_day_seen WHERE post_id NOT IN"
+        " (SELECT id FROM her_day_posts)")
     conn.commit()
     return cur.rowcount
 
 
 def get_public_her_day_posts(conn: "sqlite3.Connection",
                              limit: int = 24) -> list[dict]:
-    """Get recent Her Day posts across all users for the public landing page.
+    """Get recent Her Day posts for the public landing page.
 
-    Returns the most recent non-expired posts (no user_id exposed).
-    Used by GET /api/v1/her-day/public — no auth required.
+    Prefers the shared day-set (one copy of each post, no user_id exposed);
+    falls back to the legacy across-all-users query until the first shared
+    set exists. Used by GET /api/v1/her-day/public — no auth required.
     """
+    rows = conn.execute(
+        "SELECT girl_id, post_type, media_url, voice_url, caption,"
+        " created_at FROM her_day_posts"
+        " WHERE user_id = ? AND expires_at > datetime('now')"
+        " ORDER BY created_at DESC LIMIT ?",
+        (HER_DAY_SHARED_USER, limit),
+    ).fetchall()
+    if rows:
+        return [dict(r) for r in rows]
     rows = conn.execute(
         "SELECT girl_id, post_type, media_url, voice_url, caption,"
         " created_at FROM her_day_posts"

@@ -14,7 +14,7 @@ Content plan: deterministic per girl+date (seeded), so each girl gets
 different moments each day, each day differs from the last, and plans are
 pre-determined/reproducible for the next several days.
 
-Generation (6 AM cron or on-demand), per user x per girl:
+Generation (6 AM cron or on-demand), ONCE per girl per day (shared day-set):
   1. Build the day's content plan for every girl (solo + group moments).
   2. Sogni generates an SFW scene image per visual moment (fully clothed,
      everyday activity, non-sexual). Images cached per participants+day+
@@ -24,6 +24,11 @@ Generation (6 AM cron or on-demand), per user x per girl:
      (POST {PUBLIC_APP_URL}/v1/chat/completions, Bearer GEMINI_PROXY_TOKEN)
      — free keys first, never the paid key directly.
   4. One TTS voice note per girl per day.
+
+The finished posts are stored once under store.HER_DAY_SHARED_USER and
+every user's feed reads them from there (lazy attach; per-user state is
+only lightweight seen rows in her_day_seen). The daily run never iterates
+user accounts, so probe/test accounts are never generated or written for.
 
 Posts expire after 24h (expires_at). Old posts are cleaned up on read.
 """
@@ -367,7 +372,12 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                            plan: list[tuple] | None = None,
                            girl_map: dict[str, dict] | None = None,
                            date_str: str | None = None) -> list[dict[str, Any]]:
-    """Generate today's Whispr Feed posts for one user+girl pair.
+    """Generate today's Whispr Feed posts for one target+girl pair.
+
+    The target is normally the shared sentinel (store.HER_DAY_SHARED_USER):
+    the posts are written once and every user reads them. Per-user targets
+    remain supported for compatibility but are no longer written by the
+    daily or on-demand flows.
 
     plan: [(moment_key, is_group, partner_ids, partner_names)] from
     _build_all_plans. If None, builds a solo-only plan for this girl.
@@ -431,46 +441,55 @@ def generate_for_user_girl(user_id: str, girl_id: str,
         conn.close()
 
 
-def generate_for_all_girls(user_id: str) -> int:
-    """Generate today's Whispr Feed for EVERY girl for one user.
+def generate_shared_day(date_str: str | None = None) -> dict[str, Any]:
+    """Build today's shared Her Day set: one generation per girl, stored
+    under the shared sentinel for every user to read.
 
-    Returns the total number of posts created.
+    Idempotent per girl: a girl whose shared set already exists today is
+    skipped. Per-girl failures are collected in `errors`, not fatal.
     """
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
     all_girls = _get_all_girls()
-    date_str = datetime.now().strftime("%Y-%m-%d")
     plans = _build_all_plans(all_girls, date_str)
     girl_map = {g["id"]: g for g in all_girls}
-    total = 0
+    report: dict[str, Any] = {"generated": 0, "skipped": 0, "errors": [],
+                              "girls": len(all_girls), "shared": True}
     for g in all_girls:
-        posts = generate_for_user_girl(
-            user_id, g["id"], g["name"],
-            plan=plans.get(g["id"], []),
-            girl_map=girl_map,
-            date_str=date_str,
-        )
-        total += len(posts)
-    return total
-
-
-def generate_daily() -> dict[str, Any]:
-    """Generate Whispr Feed posts for all users x all girls.
-
-    Called by the 6 AM cron.
-    """
-    conn = db.connect()
-    try:
-        users = [r["user_id"] for r in conn.execute(
-            "SELECT user_id FROM users").fetchall()]
-    finally:
-        conn.close()
-    report: dict[str, Any] = {"generated": 0, "skipped": 0, "errors": []}
-    for uid in users:
         try:
-            n = generate_for_all_girls(uid)
-            if n:
-                report["generated"] += n
+            posts = generate_for_user_girl(
+                store.HER_DAY_SHARED_USER, g["id"], g["name"],
+                plan=plans.get(g["id"], []),
+                girl_map=girl_map,
+                date_str=date_str,
+            )
+            if posts:
+                report["generated"] += len(posts)
             else:
                 report["skipped"] += 1
         except Exception as e:  # noqa: BLE001
-            report["errors"].append(f"{uid}: {e}")
+            report["errors"].append(f"{g['id']}: {e}")
     return report
+
+
+def generate_for_all_girls(user_id: str) -> int:
+    """On-demand Whispr Feed generation (POST /api/v1/her-day/generate).
+
+    The day-set is shared now: this ensures today's shared set exists and
+    returns how many posts THIS call created (0 when the set was already
+    there). `user_id` is kept for the endpoint contract — no per-user
+    post rows are ever written anymore; the caller's feed reads the
+    shared set like everyone else's.
+    """
+    return generate_shared_day()["generated"]
+
+
+def generate_daily() -> dict[str, Any]:
+    """Generate today's shared Whispr Feed set. Called by the 6 AM cron.
+
+    One generation pass total. User accounts are never iterated, so
+    probe/test accounts get nothing generated or written for them.
+    """
+    report = generate_shared_day()
+    return {"generated": report["generated"],
+            "skipped": report["skipped"],
+            "errors": report["errors"]}
