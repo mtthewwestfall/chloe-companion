@@ -402,6 +402,13 @@
           <div class="attachment-meta"><span>${esc(name)}</span><small>${formatBytes(att.size)}</small></div>
         </div>`;
     }
+    if (att.kind === 'audio' && url) {
+      return `
+      <div class="attachment-card audio">
+        <audio src="${escAttr(url)}" controls preload="metadata"></audio>
+        <div class="attachment-meta"><span>${esc(name)}</span><small>${formatBytes(att.size)}</small></div>
+      </div>`;
+    }
     const unreadable = att.extraction_status === 'unsupported'
       ? '<small class="attachment-note">stored — Hannah can’t read this type yet</small>' : '';
     return `

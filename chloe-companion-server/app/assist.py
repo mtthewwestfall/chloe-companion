@@ -385,7 +385,10 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         "PRAGMA table_info(sogni_plan_jobs)")}
     for col, ddl in (("kind", "TEXT NOT NULL DEFAULT 'video'"),
                      ("target_character_id", "TEXT"),
-                     ("media_url", "TEXT")):
+                     ("media_url", "TEXT"),
+                     ("subject_mode", "TEXT"),
+                     ("promo_ref", "TEXT"),
+                     ("promo_voice", "TEXT")):
         if col not in sogni_cols:
             conn.execute(
                 f"ALTER TABLE sogni_plan_jobs ADD COLUMN {col} {ddl}")
@@ -1234,6 +1237,12 @@ invent):
   vague, offer 2-3 concrete situations and let him pick (or pick
   for him when he says so); when it is specific, make it. Never tell him your "systems don't work
   that way" or otherwise deny these abilities.
+- Your promo hands: you also make Roof Rover promos that are
+  not pictures of you at all — Bailey pointing at a damaged
+  roof, the lead-store shelf, the site in action. A promo ask
+  renders on the same plan; it never needs your body in it.
+  Fetch and OneFetch are Jordan's promo subjects, Whispr is
+  Mia's, and pics or videos of other girls are Mia's desk.
 - Rocky is his main Muse agent; you cover Roof Rover for him in
   chat. Never claim you did something you didn't.
 - THE OTHER PROJECTS ARE NOT YOURS: Whispr (the companion app) is
@@ -1284,6 +1293,11 @@ invent):
   vague, offer 2-3 concrete situations and let him pick (or pick
   for him when he says so); when it is specific, make it. Never tell him your "systems don't work
   that way" or otherwise deny these abilities.
+- Your promo hands: you also make Whispr promos that are not
+  pictures of you at all — the roster, the app, the site in
+  action. A promo ask renders on the same plan; it never needs
+  your body in it. Fetch and OneFetch are Jordan's promo
+  subjects; Bailey and Roof Rover are Hannah's.
 - Your media desk: in YOUR thread he can also ask for a video
   or picture of any other roster character by name. Use that
   character's own avatar/reference, render it on the same Sogni
@@ -1345,6 +1359,13 @@ invent):
   vague, offer 2-3 concrete situations and let him pick (or pick
   for him when he says so); when it is specific, make it. Never tell him your "systems don't work
   that way" or otherwise deny these abilities.
+- Your promo hands: you also make OneFetch promos that are not
+  pictures of you at all — Fetch fetching leads, a retriever at
+  an open house, the app in an agent's hand, keys changing
+  hands. A promo ask renders on the same plan; it never needs
+  your body in it. Bailey and Roof Rover are Hannah's promo
+  subjects, Whispr is Mia's, and pics or videos of other girls
+  are Mia's desk.
 - Rocky is his main Muse agent; you cover OneFetch for him in
   chat. Never claim you did something you didn't.
 - THE OTHER PROJECTS ARE NOT YOURS: Roof Rover is Hannah's
@@ -3912,6 +3933,345 @@ def _shape_media_subject(subject: str, intent: str, kind: str) -> str:
     return f"fully clothed promo-style {kind} for the site, {s}"
 
 
+# --- Promo subjects + bare nude asks (owner, 2026-10-09 12:55) -------
+# A promo ask never bounces just because the subject isn't her body:
+# every girl renders her own project's mascot/brand — and plain
+# scenes, products, and places — in promo mode. Another project's
+# mascot or brand goes to that project's girl (brand walls never
+# cross); roster PEOPLE who aren't her stay Mia's desk. Adult intent
+# never touches promo subjects. A bare nude ask ("send me a nude")
+# is an adult plan IMAGE of her (or of the character Mia names).
+
+_PROMO_REF_URLS = {
+    # Canonical approved assets, served by the projects themselves
+    # (Fetch: realtor-app static/retriever.webp, byte-identical to
+    # the repo asset; Bailey: roof-scout static/bailey_3d_hero.webp).
+    "fetch": ("https://realtor-app-production-825b.up.railway.app"
+              "/static/retriever.webp"),
+    "bailey": "https://tryroofrover.com/static/bailey_3d_hero.webp",
+}
+_PROMO_REF_LABELS = {"fetch": "Fetch", "bailey": "Bailey"}
+_PROMO_VOICE_LINES = {
+    "fetch": "OneFetch. We fetch the leads — you close the deals.",
+    "bailey": ("Roof Rover. Every damaged roof, four ninety-nine "
+               "a lead."),
+}
+_LANE_PROMO_VOICE_LINES = {
+    LANE_ONEFETCH: _PROMO_VOICE_LINES["fetch"],
+    LANE_ROOF: _PROMO_VOICE_LINES["bailey"],
+    LANE_WHISPR: "Whispr. Your girl, right in your pocket.",
+}
+_PROMO_NO_VOICE_CLAUSE = (
+    "one honest thing: my renders can't carry a real voice yet, "
+    "so it'll land silent — no fake voice-over from me.")
+
+_MALE_VOICE_RE = re.compile(
+    r"\b(?:male|males|man|guy)(?:'s)?\s+voice\b"
+    r"|\bvoice\s*over\b[^.!?]{0,30}\b(?:male|man)\b"
+    r"|\bnarrat\w+\b[^.!?]{0,30}\b(?:male|man)\b",
+    re.IGNORECASE)
+_MEDIA_FETCH_RE = re.compile(
+    r"\b(?:fetch|retriever)\b|\bgolden\s+retriever\b", re.IGNORECASE)
+_MEDIA_BAILEY_RE = re.compile(r"\bbailey\b", re.IGNORECASE)
+_MEDIA_BRAND_RES = {
+    LANE_ROOF: re.compile(
+        r"\bbailey\b|\broof[\s-]?rover\b|\broofrover\b|"
+        r"\blead\s+store\b|\bstore\s+shelf\b|\bdamaged\s+roof\b|"
+        r"\broof\s+damage\b|\broofing\b|\bshingles?\b",
+        re.IGNORECASE),
+    LANE_ONEFETCH: re.compile(
+        r"\bone[\s-]?fetch\b|\bfetch\b|\bretriever\b|\bfsbo\b|"
+        r"\bopen\s+house\b|\blistings?\b|\brealtor\b|"
+        r"\breal[\s-]estate\b", re.IGNORECASE),
+    LANE_WHISPR: re.compile(
+        r"\bwhispr\b|\bcompanion\s+app\b|companion\.lockeddoor",
+        re.IGNORECASE),
+}
+
+
+def _detect_male_voice(text: str) -> bool:
+    return bool(_MALE_VOICE_RE.search(text or ""))
+
+
+def _promo_voice_line(character_id: str,
+                      promo_ref: str | None) -> str | None:
+    """The short deterministic spoken line for a promo job, when he
+    asked for a male voice: the mascot's line, else the lane's."""
+    if promo_ref and promo_ref in _PROMO_VOICE_LINES:
+        return _PROMO_VOICE_LINES[promo_ref]
+    lane = character_lane(character_id)
+    return _LANE_PROMO_VOICE_LINES.get(lane or "")
+
+
+def _classify_promo_subject(character_id: str,
+                            subject: str) -> dict | None:
+    """Promo-world ruling for a laned girl's media subject.
+
+    Returns None outside the lanes (Rocky keeps his own rules),
+    {"mode": "redirect_lane", "lane", "strong"} when the subject is
+    another project's mascot or brand, and {"mode": "promo_scene",
+    "promo_ref", "strong"} when she renders it herself in promo
+    mode. "strong" means a mascot or brand word was actually
+    named; a plain scene with no brand in it is a weak generic
+    promo scene. A named mascot IS the subject — its lane wins
+    over mere setting words."""
+    lane = character_lane(character_id)
+    if not lane:
+        return None
+    s = subject or ""
+    fetch_hit = bool(_MEDIA_FETCH_RE.search(s))
+    bailey_hit = bool(_MEDIA_BAILEY_RE.search(s))
+    if fetch_hit and not bailey_hit:
+        mascot_lane, ref = LANE_ONEFETCH, "fetch"
+    elif bailey_hit and not fetch_hit:
+        mascot_lane, ref = LANE_ROOF, "bailey"
+    else:
+        mascot_lane, ref = None, None
+    if mascot_lane:
+        if mascot_lane != lane:
+            return {"mode": "redirect_lane", "lane": mascot_lane,
+                    "strong": True}
+        return {"mode": "promo_scene", "promo_ref": ref,
+                "strong": True}
+    hits = [ln for ln in LANES if _MEDIA_BRAND_RES[ln].search(s)]
+    if len(hits) == 1 and hits[0] != lane:
+        return {"mode": "redirect_lane", "lane": hits[0],
+                "strong": True}
+    if hits:
+        return {"mode": "promo_scene", "promo_ref": ref,
+                "strong": True}
+    return {"mode": "promo_scene", "promo_ref": ref, "strong": False}
+
+
+_PROMO_CLEAN_RE = re.compile(
+    r"\b(?:nude|naked|topless|sex|sexual|nsfw|erotic)\b",
+    re.IGNORECASE)
+
+_VOICE_CLAUSE_RE = re.compile(
+    r"[,]?\s*(?:and\s+)?(?:put|with|add|use|using)?\s*(?:a\s+)?"
+    r"(?:male|males|man|guy)(?:'s)?\s+voice(?:over)?\b"
+    r"(?:\s+(?:please|for me|on it|over it))?",
+    re.IGNORECASE)
+
+
+def _shape_promo_subject(subject: str, promo_ref: str | None,
+                         kind: str) -> str:
+    """Final render prompt for a promo scene: the canonical mascot
+    anchor when one is named (so Fetch is always FETCH), his scene
+    words, and a clean family-friendly promo tail. Voice requests
+    ride on the job, never in the render prompt."""
+    s = re.sub(r"\s+", " ", (subject or "").strip())
+    s = _VOICE_CLAUSE_RE.sub("", s)
+    # Promo subjects stay clean by construction (owner rule):
+    # adult words on a mascot/brand/scene are stripped, never
+    # rendered.
+    s = _PROMO_CLEAN_RE.sub("", s)
+    s = re.sub(r"^(?:no[,!]?\s*)?(?:don'?t\s+use\s+you[,.\s]*)?"
+               r"(?:use\s+)?", "", s, flags=re.IGNORECASE)
+    tail = (", clean bright family-friendly promo footage, natural "
+            "light, coherent background, subtle natural motion"
+            if kind == "video" else
+            ", clean bright family-friendly promo photo, natural "
+            "light, coherent background")
+    if promo_ref == "fetch":
+        rest = _MEDIA_FETCH_RE.sub("", s)
+        rest = re.sub(r"\bthe\s+dog\b", "", rest, flags=re.IGNORECASE)
+        rest = re.sub(r"\s+", " ", rest).strip(" ,.!?")
+        rest = re.sub(r"^(?:and|with|have|put)\s+", "", rest,
+                      flags=re.IGNORECASE)
+        rest = re.sub(r"\bthe\s+app\b",
+                      "the OneFetch app on a phone screen", rest,
+                      flags=re.IGNORECASE)
+        scene = rest or ("trotting through a bright real-estate "
+                         "office holding a listings sheet")
+        return (f"Fetch, OneFetch's golden retriever mascot wearing "
+                f"his navy OneFetch bandana, {scene}{tail}")[:1200]
+    if promo_ref == "bailey":
+        rest = _MEDIA_BAILEY_RE.sub("", s)
+        rest = re.sub(r"\s+", " ", rest).strip(" ,.!?")
+        rest = re.sub(r"^(?:and|with|have|put)\s+", "", rest,
+                      flags=re.IGNORECASE)
+        rest = re.sub(r"\bthe\s+app\b",
+                      "the Roof Rover app on a phone screen", rest,
+                      flags=re.IGNORECASE)
+        scene = rest or "pointing at a damaged roof with a bright smile"
+        return (f"Bailey, Roof Rover's 3D assistant in a white polo "
+                f"shirt, {scene}{tail}")[:1200]
+    if not s:
+        s = "a bright product promo scene"
+    return f"{s}{tail}"[:1200]
+
+
+def detect_promo_media_ask(text: str) -> tuple[str, str] | None:
+    """A bare promo ask ("make a promo of the store shelf", "promo of
+    Fetch at an open house") -> (kind, subject), else None. Kind is
+    video unless a picture word is named. A subjectless promo ask
+    ("make me a promo") is hers to offer situations for, not this."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or _VIDEO_CALL_RE.search(t):
+        return None
+    m = re.search(r"\bpromo\b", t, re.IGNORECASE)
+    if not m:
+        return None
+    if not re.match(r"^\s*(?:please\s+)?(?:can\s+you\s+)?"
+                    r"(?:make|create|generate|render|shoot|film|"
+                    r"record|send|give|do)\b", t, re.IGNORECASE) \
+            and not t.lower().startswith("promo"):
+        return None
+    kind = "image" if re.search(
+        r"\b(?:pic|pics|photo|photos|picture|pictures|image|selfie)\b",
+        t, re.IGNORECASE) else "video"
+    after = t[m.end():]
+    after = re.sub(r"^\s*(?:videos?|clips?|vids?|pics?|pictures?|"
+                   r"photos?|images?)\s*", "", after, flags=re.IGNORECASE)
+    after = re.sub(r"^of\s+", "", after.strip(), flags=re.IGNORECASE)
+    subject = re.sub(r"\bsogni\b", "", after, flags=re.IGNORECASE)
+    subject = re.sub(r"\s+", " ", subject).strip(" \t\r\n.!?")
+    if not subject or _is_vague_media_subject(subject):
+        return None
+    return kind, subject[:1000]
+
+
+_NUDE_VIDEO_WORD_RE = re.compile(
+    r"\b(?:video|videos|clip|clips|vid|vids|movie)\b", re.IGNORECASE)
+_NUDE_ASK_RE = re.compile(
+    r"\b(?:send|show|give|make|create|snap|take|get|drop)\b"
+    r"[^.!?\n]{0,50}?\b(?:nude|nudes|naked|topless|tits|boobs)\b"
+    r"|\b(?:nude|naked|topless)\s+"
+    r"(?:pic|pics|photo|photos|picture|pictures|image|selfie|of)\b"
+    r"|\b(?:pic|pics|photo|photos|picture|pictures|image|selfie)"
+    r"\s+of\s+[^.!?]{0,30}?\b(?:naked|nude|topless)\b"
+    r"|\byour\s+(?:tits|boobs|breasts)\b"
+    r"|\bnudes\b", re.IGNORECASE)
+
+
+def detect_nude_media_ask(text: str) -> str | None:
+    """Bare adult picture ask -> the IMAGE subject to render, else
+    None. No picture word is required ("send me a nude", "send
+    nudes", "show me your tits"); a video word sends the ask to the
+    video lane instead. The subject keeps his target ("mara nude")
+    so the media-target parser can resolve who it is of."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or _VIDEO_CALL_RE.search(t):
+        return None
+    if _NUDE_VIDEO_WORD_RE.search(t):
+        return None
+    if not _NUDE_ASK_RE.search(t):
+        return None
+    if not _STRONG_ADULT_MEDIA_RE.search(t) \
+            and not re.search(r"\b(?:tits|boobs|nudes?)\b", t,
+                              re.IGNORECASE):
+        return None
+    rest = re.sub(
+        r"^(?:please\s+)?(?:can\s+you\s+)?"
+        r"(?:send|show|give|make|create|snap|take|get|drop)\s+"
+        r"(?:me\s+)?(?:a\s+|an\s+|some\s+|the\s+)?", "", t,
+        flags=re.IGNORECASE).strip(" .!?")
+    m = re.match(r"^(?:a\s+)?(?:nude|naked|topless)"
+                 r"(?:\s+(?:pic|pics|photo|photos|picture|pictures|"
+                 r"image|selfie))?\s+of\s+(.+)$", rest, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)} nude"
+    m = re.match(r"^(?:pic|pics|photo|photos|picture|pictures|"
+                 r"image|selfie)\s+of\s+(.+)$", rest, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    if re.search(r"\byour\s+(?:tits|boobs|breasts)\b", rest,
+                 re.IGNORECASE):
+        return "you topless, smiling at the camera"
+    return "you nude"
+
+
+def _handle_sogni_promo_request(conn: sqlite3.Connection,
+                                  user_id: str, character_id: str,
+                                  raw_subject: str, *,
+                                  kind: str = "video",
+                                  promo_ref: str | None = None,
+                                  raw_text: str = "",
+                                  preshaped: bool = False,
+                                  voice_line_override: str | None = None
+                                  ) -> dict:
+    """Promo-scene lane: her project's mascot/brand — or any scene,
+    product, or place — rendered on the plan in promo mode. Never
+    face-locked to her, never adult. A named mascot is never faked
+    through the free picture desk: canonical reference on the plan,
+    or the honest sign-in ask."""
+    shaped = raw_subject if preshaped else _shape_promo_subject(
+        raw_subject, promo_ref, kind)
+    if voice_line_override is not None:
+        voice_line = voice_line_override or None
+    elif _detect_male_voice(raw_text or raw_subject):
+        voice_line = _promo_voice_line(character_id, promo_ref)
+    else:
+        voice_line = None
+    _media_topic_touch(conn, user_id, kind=kind, subject=shaped,
+                       target_character_id=None)
+    state = _studio_get(conn, user_id, _SOGNI_TOPIC_KIND) or {}
+    state["last_subject_mode"] = "promo_scene"
+    state["last_promo_ref"] = promo_ref
+    state["last_promo_voice"] = voice_line
+    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, state)
+    if not stored_sogni_session(conn):
+        if kind == "image" and not promo_ref:
+            # No mascot likeness at stake: the generic picture path
+            # (free desk, and it says which path ran) still applies.
+            return _handle_sogni_image_request(
+                conn, user_id, character_id, raw_subject,
+                raw_text=raw_text, target_character_id=None,
+                target_name=None, target_resolved=True)
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_NO_SESSION_REPLY,
+                "sogni_login_box": True,
+                "sogni_subject_mode": "promo_scene",
+                "sogni_media_kind": kind}
+    if _sogni_plan_active_job(conn, user_id):
+        noun = "picture" if kind == "image" else "video"
+        return {"brief": f"He asked for another {noun}, but the last "
+                         "one is still rendering. Tell him it's on "
+                         "its way and will land right here when it's "
+                         "done; one at a time."}
+    if _sogni_plan_today_count(conn, user_id) \
+            >= sogni_plan_daily_cap():
+        if kind == "image":
+            return {"brief": "He asked for another picture, but he's "
+                             "hit today's Sogni plan media limit. "
+                             "Tell him honestly the media desk is "
+                             "closed until tomorrow; do not promise "
+                             "a time you do not know."}
+        return {"brief": "He asked for another video, but he's hit "
+                         "today's video limit. Tell him honestly the "
+                         "video desk is closed until tomorrow; do not "
+                         "promise a time you do not know."}
+    job_id = _sogni_plan_enqueue(
+        conn, user_id, character_id, shaped, kind=kind,
+        target_character_id=None, subject_mode="promo_scene",
+        promo_ref=promo_ref, promo_voice=voice_line)
+    _spawn_sogni_plan_job(job_id)
+    if voice_line:
+        label = _PROMO_REF_LABELS.get(promo_ref or "", "promo")
+        noun = "clip" if kind == "video" else "pic"
+        return {"brief": FIXED_REPLY_PREFIX +
+                f"on it, babe — making that {label} promo on your "
+                f"plan right now. {_PROMO_NO_VOICE_CLAUSE} the "
+                f"finished {noun} lands right here when it's ready.",
+                "sogni_media_kind": kind,
+                "sogni_subject_mode": "promo_scene",
+                "sogni_promo_ref": promo_ref or "",
+                "sogni_promo_voice": True}
+    kind_word = "video" if kind == "video" else "picture"
+    land_word = "clip" if kind == "video" else "picture"
+    return {"brief": "You just started making that promo " + kind_word +
+                     " for him on his Sogni Unlimited plan — it's "
+                     "rendering now, and the finished " + land_word +
+                     " will land right here in this chat when it's "
+                     "ready. Confirm in your own voice, short and "
+                     "warm; do not mention models, queues, or "
+                     "process.",
+            "sogni_media_kind": kind,
+            "sogni_subject_mode": "promo_scene",
+            "sogni_promo_ref": promo_ref or "",
+            "sogni_target_character_id": None}
+
+
 # --- Offer prompts & situations (owner order 2026-10-09 12:33) ---
 # She WANTS to send pics/videos of herself. A vague ask ("make me a
 # video", "send me a pic") gets concrete situations to pick from and
@@ -4751,15 +5111,20 @@ def _sogni_plan_today_count(conn: sqlite3.Connection, user_id: str,
 def _sogni_plan_enqueue(conn: sqlite3.Connection, user_id: str,
                           character_id: str, subject: str, *,
                           kind: str = "video",
-                          target_character_id: str | None = None) -> int:
+                          target_character_id: str | None = None,
+                          subject_mode: str | None = None,
+                          promo_ref: str | None = None,
+                          promo_voice: str | None = None) -> int:
     ensure_tables(conn)
     model = config.SOGNI_IMAGE_MODEL if kind == "image" \
         else config.SOGNI_VIDEO_MODEL
     cur = conn.execute(
         "INSERT INTO sogni_plan_jobs (user_id, character_id, kind, "
-        "target_character_id, prompt, model, billing_mode, status, "
-        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
-        (user_id, character_id, kind, target_character_id, subject,
+        "target_character_id, subject_mode, promo_ref, promo_voice, "
+        "prompt, model, billing_mode, status, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+        (user_id, character_id, kind, target_character_id,
+         subject_mode, promo_ref, promo_voice, subject,
          model, _SOGNI_PLAN_BILLING_MODE, _utc_iso()))
     conn.commit()
     return int(cur.lastrowid)
@@ -4779,8 +5144,8 @@ def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
             size = os.path.getsize(outcome.get("path") or "")
         except OSError:
             size = 0
-        who = job.get("target_character_id") or job.get("character_id") \
-            or "her"
+        who = job.get("promo_ref") or job.get("target_character_id") \
+            or job.get("character_id") or "her"
         if kind == "image":
             attachments = [{"kind": "image", "url": media_url,
                             "name": f"{who}-image.jpg", "size": size}]
@@ -4802,6 +5167,36 @@ def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
             text = (("Here's your video. Made this one for you.")
                     if rocky else
                     "here's your video, babe — made this one just for you.")
+        if job.get("subject_mode") == "promo_scene":
+            # A promo is not a picture of her, and the delivery
+            # never pretends otherwise.
+            text = ("here's your promo pic, babe — made it on your "
+                    "plan." if kind == "image" else
+                    "here's your promo, babe — made it on your plan.")
+            voice_line = job.get("promo_voice") or ""
+            if voice_line:
+                # He asked for a male voice on this one. The render
+                # path carries no speech, so the line rides as a
+                # voice note IF the voice path can really make one
+                # — otherwise the delivery says plainly it landed
+                # silent. Never a promised voice that isn't there.
+                vurl = None
+                try:
+                    from . import voice as _voice
+                    vurl = _voice.maybe_generate_voice_note(
+                        voice_line, job["user_id"], "rex")
+                except Exception:  # noqa: BLE001
+                    vurl = None
+                if vurl and str(vurl).startswith(
+                        ("http://", "https://", "/")):
+                    attachments.append(
+                        {"kind": "audio", "url": str(vurl),
+                         "name": "promo-voice.mp3", "size": 0})
+                    text += " and the voice line's right there with it."
+                else:
+                    text += (" it landed silent, though — real "
+                             "voice-overs on clips aren't wired on "
+                             "my side yet.")
     elif status == "blocked":
         text = (("Sogni's filter stopped that one cold before it "
                  "even rendered. That's their wall. Give me a tamer "
@@ -4864,10 +5259,27 @@ def _run_sogni_plan_job(job_id: int) -> None:
             # Character renders face-lock to the TARGET's own
             # avatar (Mia's desk renders whoever he named); a
             # generic picture (no target) renders unreferenced.
-            is_character_render = kind == "video" \
-                or bool(job.get("target_character_id"))
-            ref_path = _fetch_first_frame(girl.get("avatar_url") or "") \
-                if is_character_render else None
+            # Promo-scene jobs render the scene itself: the
+            # canonical mascot still as the reference when the job
+            # names one, never the girl's face.
+            mode = job.get("subject_mode")
+            if mode == "promo_scene":
+                is_character_render = False
+            elif mode in ("self", "character"):
+                is_character_render = True
+            else:
+                is_character_render = kind == "video" \
+                    or bool(job.get("target_character_id"))
+            if mode == "promo_scene":
+                ref_url = _PROMO_REF_URLS.get(
+                    job.get("promo_ref") or "")
+                ref_path = _fetch_first_frame(ref_url) \
+                    if ref_url else None
+            elif is_character_render:
+                ref_path = _fetch_first_frame(
+                    girl.get("avatar_url") or "")
+            else:
+                ref_path = None
             try:
                 prompt = _sogni_plan_prompt(
                     girl.get("name") or "Hannah", job["prompt"]) \
@@ -4887,7 +5299,10 @@ def _run_sogni_plan_job(job_id: int) -> None:
             # Pictures only: a generic Sogni failure (not a filter
             # stop, not the plan, not a dead session) may fall back
             # to the free picture desk — and the delivery says so.
-            if kind == "image" and outcome.get("status") == "failed":
+            # Never for promo scenes: a mascot is never faked on
+            # the free desk.
+            if kind == "image" and outcome.get("status") == "failed" \
+                    and job.get("subject_mode") != "promo_scene":
                 gem = _generate_gemini_image(prompt)
                 if gem.get("status") == "ok":
                     outcome = {
@@ -5139,11 +5554,47 @@ def _parse_media_target(conn: sqlite3.Connection, user_id: str,
             "target_name": None, "subject": s, "raw_name": ""}
 
 
+def _promo_route(conn: sqlite3.Connection, user_id: str,
+                 character_id: str, parsed: dict, subject: str,
+                 kind: str, raw_text: str) -> dict | None:
+    """Promo-world routing for a parsed media subject, or None when
+    the self/character rules should decide. Another project's named
+    mascot or brand redirects to that project's girl; her own
+    project's mascot/brand — and plain scenes, products, and
+    places — render right here in promo mode."""
+    if parsed["status"] not in ("generic", "unknown"):
+        return None
+    psubj = parsed.get("subject", subject)
+    if _is_vague_media_subject(psubj):
+        return None
+    promo = _classify_promo_subject(character_id, psubj)
+    if promo is None:
+        return None
+    if not promo.get("strong"):
+        # A plain scene is promo territory — unless the ask is
+        # adult-flavored, which only ever means HERSELF (owner
+        # rule: adult intent never lands on promo subjects), so
+        # the self rules decide those.
+        if parsed["status"] != "generic" \
+                or detect_sogni_media_intent(raw_text or psubj) \
+                == "adult":
+            return None
+    if promo["mode"] == "redirect_lane":
+        return _lane_cross_reply(character_id, promo["lane"])
+    return _handle_sogni_promo_request(
+        conn, user_id, character_id, psubj, kind=kind,
+        promo_ref=promo.get("promo_ref"), raw_text=raw_text)
+
+
 def _route_sogni_video(conn: sqlite3.Connection, user_id: str,
                        character_id: str, subject: str,
                        raw_text: str = "") -> dict:
     parsed = _parse_media_target(conn, user_id, character_id, subject,
                                  "video")
+    hit = _promo_route(conn, user_id, character_id, parsed, subject,
+                       "video", raw_text)
+    if hit is not None:
+        return hit
     if (character_id or "").strip().lower() == "mia" \
             and parsed["status"] in ("unknown", "ambiguous"):
         return _media_unknown_reply(parsed)
@@ -5187,6 +5638,15 @@ def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
         return _media_options_reply("image", options, target_name,
                                     character_id)
     if not stored_sogni_session(conn):
+        if detect_sogni_media_intent(raw_text or prompt) == "adult":
+            # An adult picture never routes to the free desk (it
+            # would only refuse there): the honest next step is
+            # the one-time plan sign-in.
+            return {"brief": FIXED_REPLY_PREFIX
+                    + _SOGNI_NO_SESSION_REPLY,
+                    "sogni_login_box": True,
+                    "sogni_media_kind": "image",
+                    "sogni_media_intent": "adult"}
         # Sogni is unavailable (not signed in): the free picture
         # desk is the fallback, and the reply says which path ran.
         fallback_prompt = detect_image_request(raw_text or "") or prompt
@@ -5246,6 +5706,10 @@ def _route_sogni_image(conn: sqlite3.Connection, user_id: str,
                        now_epoch: float | None = None) -> dict:
     parsed = _parse_media_target(conn, user_id, character_id, prompt,
                                  "image")
+    hit = _promo_route(conn, user_id, character_id, parsed, prompt,
+                       "image", raw_text)
+    if hit is not None:
+        return hit
     if (character_id or "").strip().lower() == "mia" \
             and parsed["status"] in ("unknown", "ambiguous"):
         return _media_unknown_reply(parsed)
@@ -5338,6 +5802,11 @@ def _media_topic_touch(conn: sqlite3.Connection, user_id: str, *,
         state["last_subject"] = subject
     if target_character_id is not None:
         state["last_target_character_id"] = target_character_id
+    # A fresh self/character media order ends any promo-scene mode;
+    # the promo lane re-stamps its own state right after this.
+    for key in ("last_subject_mode", "last_promo_ref",
+                "last_promo_voice"):
+        state.pop(key, None)
     _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, state)
 
 
@@ -5401,6 +5870,43 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                 conn, user_id, character_id, chosen,
                 target_character_id=tgt, target_name=tname,
                 raw_text=chosen)
+    # Bare nude asks ("send me a nude", "pic of you naked") are
+    # adult plan images of her (or of Mia's named character) — no
+    # picture word required, no situations menu, no brain refusal.
+    nude_subject = detect_nude_media_ask(t)
+    if nude_subject is not None:
+        return _route_sogni_image(conn, user_id, character_id,
+                                   nude_subject, raw_text=t)
+    # A correction inside an open media topic that names her own
+    # project's mascot ("no, don't use you — use Fetch the dog") is
+    # a promo re-render, not a search for another character.
+    if state0 and not _strong_other_intent(t) \
+            and re.match(r"^\s*(?:no\b|don'?t\b|use\b|instead\b|"
+                         r"actually\b|not\s+you\b)", t,
+                         flags=re.IGNORECASE) \
+            and re.search(r"\b(?:use|put|make|do|film|shoot|video|"
+                          r"clip|pic|promo|fetch|bailey|dog|"
+                          r"retriever)\b", t, re.IGNORECASE):
+        promo = _classify_promo_subject(character_id, t)
+        if promo and promo.get("strong"):
+            if promo["mode"] == "redirect_lane":
+                return _lane_cross_reply(character_id,
+                                         promo["lane"])
+            return _handle_sogni_promo_request(
+                conn, user_id, character_id, t,
+                kind=state0.get("last_kind") or "video",
+                promo_ref=promo.get("promo_ref"), raw_text=t)
+    # Bare promo asks ("make a promo of the store shelf") render
+    # the promo subject in her lane — never bounced for not being
+    # a picture of her.
+    promo_ask = detect_promo_media_ask(t)
+    if promo_ask is not None:
+        pkind, psubject = promo_ask
+        if pkind == "image":
+            return _route_sogni_image(conn, user_id, character_id,
+                                      psubject, raw_text=t)
+        return _route_sogni_video(conn, user_id, character_id,
+                                   psubject, raw_text=t)
     subject = detect_sogni_video_request(t)
     if subject is not None:
         return _route_sogni_video(conn, user_id, character_id, subject,
@@ -5412,6 +5918,14 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
             and not _strong_other_intent(t) \
             and detect_intent(t)[0] not in ("reminder", "email_draft",
                                             "job_search"):
+        if state.get("last_subject_mode") == "promo_scene":
+            return _handle_sogni_promo_request(
+                conn, user_id, character_id,
+                state.get("last_subject") or "",
+                kind=state.get("last_kind") or "video",
+                promo_ref=state.get("last_promo_ref"),
+                raw_text=t, preshaped=True,
+                voice_line_override=state.get("last_promo_voice"))
         last_subject = state.get("last_subject") \
             or "you smiling at the camera"
         last_target = state.get("last_target_character_id")

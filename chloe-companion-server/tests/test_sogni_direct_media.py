@@ -436,5 +436,300 @@ class StudioFlowGuardTest(DirectBase):
             assist._studio_get(self.conn, "owner_1", "last_image"))
 
 
+class PromoSubjectTest(DirectBase):
+    """Owner 2026-10-09 12:55/12:57: promo subjects that aren't her
+    body are IN-LANE — her project's mascot/brand/scenes render in
+    promo mode; another project's mascot goes to that project's
+    girl; roster people stay Mia's desk; bare nude asks are adult
+    plan images."""
+
+    # -- her own project's mascot/scene renders in promo mode --
+    def test_jordan_video_of_fetch_is_promo_job(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("make a video of Fetch", cid="jordan")
+        self.assertIsNotNone(res)
+        (job,) = self.jobs()
+        self.assertEqual(job["kind"], "video")
+        self.assertEqual(job["billing_mode"], "subscription")
+        self.assertIsNone(job["target_character_id"])
+        self.assertEqual(job["subject_mode"], "promo_scene")
+        self.assertEqual(job["promo_ref"], "fetch")
+        self.assertIn("Fetch", job["prompt"])
+        self.assertIn("golden retriever", job["prompt"])
+        self.assertIn("family-friendly", job["prompt"])
+
+    def test_jordan_fetch_correction_with_male_voice(self):
+        # The owner's exact screenshot correction, end to end: a
+        # self video first, then "use Fetch" with a male voice.
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a video of you dancing at a club", cid="jordan")
+        (job1,) = self.jobs()
+        self.assertEqual(job1["target_character_id"], "jordan")
+        self.finish_jobs()
+        res = self.say("No don't use you use Fetch the dog and put "
+                       "males voice have the app jn the background",
+                       cid="jordan")
+        self.assertIsNotNone(res)
+        jobs = self.jobs()
+        self.assertEqual(len(jobs), 2)
+        job = jobs[1]
+        self.assertEqual(job["subject_mode"], "promo_scene")
+        self.assertEqual(job["promo_ref"], "fetch")
+        self.assertIsNone(job["target_character_id"])
+        self.assertIn("Fetch", job["prompt"])
+        self.assertIn("OneFetch app on a phone screen", job["prompt"])
+        self.assertIn("background", job["prompt"])
+        self.assertEqual(job["promo_voice"],
+                         assist._PROMO_VOICE_LINES["fetch"])
+        self.assertIn("Fetch promo", res["brief"])
+        self.assertIn("silent", res["brief"])
+
+    def test_jordan_fetch_at_open_house(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a promo of Fetch at an open house", cid="jordan")
+        (job,) = self.jobs()
+        self.assertEqual(job["subject_mode"], "promo_scene")
+        self.assertEqual(job["promo_ref"], "fetch")
+        self.assertIn("open house", job["prompt"])
+
+    def test_hannah_bailey_pointing_at_roof(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a video of Bailey pointing at a roof",
+                 cid="hannah")
+        (job,) = self.jobs()
+        self.assertEqual(job["subject_mode"], "promo_scene")
+        self.assertEqual(job["promo_ref"], "bailey")
+        self.assertIn("Bailey", job["prompt"])
+        self.assertIn("pointing at a roof", job["prompt"])
+
+    def test_hannah_store_shelf_promo(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a promo of the store shelf", cid="hannah")
+        (job,) = self.jobs()
+        self.assertEqual(job["subject_mode"], "promo_scene")
+        self.assertIsNone(job["promo_ref"])
+        self.assertIn("store shelf", job["prompt"])
+
+    def test_jordan_scene_without_a_character_renders(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a video of an agent handing over keys",
+                 cid="jordan")
+        (job,) = self.jobs()
+        self.assertEqual(job["subject_mode"], "promo_scene")
+
+    # -- another project's mascot/brand goes to that project's girl --
+    def test_jordan_bailey_ask_redirects_to_hannah(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("make a video of Bailey pointing at a roof",
+                       cid="jordan")
+        self.assertEqual(self.jobs(), [])
+        self.assertIn("hannah", res["brief"])
+        self.assertIn("roof rover", res["brief"])
+
+    def test_jordan_roof_rover_store_redirects_to_hannah(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("make a video of the Roof Rover store",
+                       cid="jordan")
+        self.assertEqual(self.jobs(), [])
+        self.assertIn("hannah", res["brief"])
+
+    def test_hannah_fetch_ask_redirects_to_jordan(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("make a video of Fetch", cid="hannah")
+        self.assertEqual(self.jobs(), [])
+        self.assertIn("jordan", res["brief"])
+
+    # -- roster people stay Mia's desk; self stays self --
+    def test_jordan_person_ask_still_mia_desk(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("make a video of mara", cid="jordan")
+        self.assertEqual(self.jobs(), [])
+        self.assertEqual(res.get("sogni_media_redirect"), "mia")
+
+    def test_jordan_video_of_you_still_self(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a video of you waving", cid="jordan")
+        (job,) = self.jobs()
+        self.assertEqual(job["target_character_id"], "jordan")
+        self.assertIsNone(job["subject_mode"])
+
+    def test_fetch_promo_without_session_is_never_faked(self):
+        res = self.say("make a video of Fetch", cid="jordan")
+        self.assertEqual(self.jobs(), [])
+        self.assertTrue(res.get("sogni_login_box"))
+        self.assertIn(assist._SOGNI_NO_SESSION_REPLY, res["brief"])
+
+    # -- bare nude asks are adult plan images --
+    def _assert_adult_self_image(self, text, cid="hannah"):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say(text, cid=cid)
+        (job,) = self.jobs()
+        self.assertEqual(job["kind"], "image")
+        self.assertEqual(job["target_character_id"], cid)
+        self.assertNotIn("fully clothed", job["prompt"])
+
+    def test_send_me_a_nude(self):
+        self._assert_adult_self_image("send me a nude")
+
+    def test_send_nudes(self):
+        self._assert_adult_self_image("send nudes")
+
+    def test_pic_of_you_naked(self):
+        self._assert_adult_self_image("pic of you naked", cid="jordan")
+
+    def test_something_nude_renders_image_no_menu(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("send me something nude")
+        self.assertNotIn("reply_style", res or {})
+        (job,) = self.jobs()
+        self.assertEqual(job["kind"], "image")
+
+    def test_mia_nude_of_mara_targets_mara(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("make a nude of mara", cid="mia")
+        (job,) = self.jobs()
+        self.assertEqual(job["kind"], "image")
+        self.assertEqual(job["target_character_id"], "mara")
+
+    def test_nude_video_words_stay_video(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.say("send me a nude video", cid="hannah")
+        (job,) = self.jobs()
+        self.assertEqual(job["kind"], "video")
+        self.assertEqual(job["target_character_id"], "hannah")
+
+    def test_nude_ask_without_session_asks_login_not_free_desk(self):
+        with mock.patch.object(assist, "_image_post",
+                               return_value=None) as ip:
+            res = self.say("send me a nude")
+        ip.assert_not_called()
+        self.assertEqual(self.jobs(), [])
+        self.assertTrue(res.get("sogni_login_box"))
+
+
+class PromoWorkerTest(unittest.TestCase):
+    """End to end with a mocked render: Jordan's Fetch promo
+    queues, renders with the canonical mascot reference (never her
+    face, never a character prompt wrap), and lands as a promo
+    delivery that honestly says it arrived silent."""
+
+    def setUp(self):
+        import tempfile
+        from app import config, characters as _chars
+        self._config = config
+        self._chars = _chars
+        self.old_env = {k: os.environ.get(k) for k in
+                        ("ASSIST_ROLLOUT", "ASSIST_OWNER_IDS")}
+        os.environ["ASSIST_ROLLOUT"] = "owner"
+        os.environ["ASSIST_OWNER_IDS"] = "owner_1"
+        self._tmpdir = tempfile.mkdtemp(prefix="promo-worker-")
+        self._db_path = os.path.join(self._tmpdir, "test.db")
+        self._old_db_path = config.DB_PATH
+        config.DB_PATH = self._db_path
+        self.conn = sqlite3.connect(self._db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        assist.ensure_tables(self.conn)
+        self.conn.commit()
+        for cid, name in (("hannah", "Hannah"), ("mia", "Mia"),
+                          ("jordan", "Jordan"), ("rocky", "Rocky"),
+                          ("mara", "Mara")):
+            store.upsert_local_character(
+                self.conn, {"id": cid, "name": name,
+                            "owner_user_id": "owner_1",
+                            "avatar_url": f"/generated/{cid}.jpg"})
+        self.conn.commit()
+        self.spawned = []
+        self._patches = [
+            mock.patch.object(_chars, "get_characters",
+                              _fake_roster(self.conn)),
+            mock.patch.object(
+                _chars, "get_character",
+                lambda cid, user_id=None: {
+                    "id": cid, "name": "Jordan",
+                    "avatar_url": "/generated/jordan.jpg"}),
+            mock.patch.object(assist, "_spawn_sogni_plan_job",
+                              lambda job_id: self.spawned.append(
+                                  job_id)),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        import shutil
+        for p in reversed(self._patches):
+            p.stop()
+        self.conn.close()
+        self._config.DB_PATH = self._old_db_path
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_fetch_promo_end_to_end(self):
+        import tempfile
+        assist.store_sogni_session(self.conn, dict(TOKENS))
+        # The owner's real flow: a self video first, then the
+        # correction to Fetch with a male voice.
+        assist.maybe_assist(
+            self.conn, OWNER, "make a video of you dancing at a "
+            "club", "jordan")
+        self.conn.execute(
+            "UPDATE sogni_plan_jobs SET status='done'")
+        self.conn.commit()
+        res = assist.maybe_assist(
+            self.conn, OWNER,
+            "No don't use you use Fetch the dog and put males "
+            "voice have the app jn the background", "jordan")
+        self.assertIsNotNone(res)
+        self.assertEqual(len(self.spawned), 2)
+        job_id = self.spawned[1]
+        fd, path = tempfile.mkstemp(suffix=".mp4")
+        os.write(fd, b"\x00" * 2048)
+        os.close(fd)
+        seen = {}
+
+        def fake_ref(url):
+            seen["ref_url"] = url
+            return path + ".ref"
+
+        def fake_run(session, prompt, ref_path, model=None):
+            seen["prompt"] = prompt
+            seen["ref"] = ref_path
+            return ({"status": "done", "project_id": "promo-1",
+                     "path": path,
+                     "detail": "billingMode=subscription"},
+                    dict(TOKENS))
+
+        try:
+            with mock.patch.object(assist, "_fetch_first_frame",
+                                   fake_ref), \
+                    mock.patch.object(assist, "_sogni_plan_run",
+                                      fake_run):
+                assist._run_sogni_plan_job(job_id)
+        finally:
+            os.unlink(path)
+        self.assertEqual(seen["ref_url"],
+                         assist._PROMO_REF_URLS["fetch"])
+        self.assertIn("Fetch", seen["prompt"])
+        self.assertIn("golden retriever", seen["prompt"])
+        self.assertNotIn("Photorealistic", seen["prompt"])
+        row = self.conn.execute(
+            "SELECT status FROM sogni_plan_jobs WHERE id=?",
+            (job_id,)).fetchone()
+        self.assertEqual(row["status"], "done")
+        turns = self.conn.execute(
+            "SELECT text, attachments FROM conversation "
+            "ORDER BY id").fetchall()
+        self.assertEqual(len(turns), 1)
+        self.assertIn("promo", turns[0]["text"])
+        self.assertIn("silent", turns[0]["text"])
+        atts = __import__("json").loads(turns[0]["attachments"])
+        self.assertEqual(atts[0]["kind"], "video")
+        self.assertEqual(atts[0]["name"], "fetch-video.mp4")
+
+
 if __name__ == "__main__":
     unittest.main()
