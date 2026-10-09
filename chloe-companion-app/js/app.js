@@ -337,11 +337,14 @@
   /* ---------- Hannah attachments ---------- */
 
   const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+  const ATTACHMENT_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
   const ATTACHMENT_MAX_PER_MESSAGE = 4;
   const ATTACHMENT_EXTS = new Set([
     'jpg', 'jpeg', 'png', 'webp', 'gif',
+    'mp4', 'mov', 'webm',
     'txt', 'md', 'csv', 'json', 'pdf', 'docx',
   ]);
+  const ATTACHMENT_VIDEO_EXTS = new Set(['mp4', 'mov', 'webm']);
   let pendingAttachments = [];
   let attachmentUploadsInFlight = 0;
 
@@ -357,6 +360,7 @@
   function attachmentIcon(att) {
     const name = (att.name || att.filename || '').toLowerCase();
     if (att.kind === 'image') return '🖼️';
+    if (att.kind === 'video') return '🎬';
     if (name.endsWith('.pdf')) return '📕';
     if (name.endsWith('.docx')) return '📘';
     if (name.endsWith('.csv')) return '📊';
@@ -378,6 +382,14 @@
       return `
         <div class="attachment-card image">
           <img src="${escAttr(url)}" alt="${escAttr(name)}">
+          <div class="attachment-meta"><span>${esc(name)}</span><small>${formatBytes(att.size)}</small></div>
+        </div>`;
+    }
+    if (att.kind === 'video' && url) {
+      const poster = att.poster_url ? ` poster="${escAttr(att.poster_url)}"` : '';
+      return `
+        <div class="attachment-card video">
+          <video src="${escAttr(url)}"${poster} controls preload="metadata" playsinline></video>
           <div class="attachment-meta"><span>${esc(name)}</span><small>${formatBytes(att.size)}</small></div>
         </div>`;
     }
@@ -485,18 +497,20 @@
       }
       const ext = (file.name.split('.').pop() || '').toLowerCase();
       if (!ATTACHMENT_EXTS.has(ext)) {
-        showToast('Hannah can take images, txt/md/csv/json, pdf, or docx', 3600);
+        showToast('Hannah can take images, videos, txt/md/csv/json, pdf, or docx', 3600);
         continue;
       }
-      if (file.size > ATTACHMENT_MAX_BYTES) {
-        showToast('That file is too big — 10 MB max', 3200);
+      const isVideo = ATTACHMENT_VIDEO_EXTS.has(ext);
+      const cap = isVideo ? ATTACHMENT_VIDEO_MAX_BYTES : ATTACHMENT_MAX_BYTES;
+      if (file.size > cap) {
+        showToast(isVideo ? 'That video is too big — 50 MB max' : 'That file is too big — 10 MB max', 3200);
         continue;
       }
       const entry = {
         localId: 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2),
         file,
-        kind: ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext) ? 'image' : 'file',
-        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : '',
+        kind: ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext) ? 'image' : (isVideo ? 'video' : 'file'),
+        previewUrl: (file.type.startsWith('image/') || file.type.startsWith('video/')) ? URL.createObjectURL(file) : '',
         status: 'uploading',
         extraction_status: '',
       };
