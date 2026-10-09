@@ -781,6 +781,39 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_DEV_FILE_EXT_RE = re.compile(
+    r"\.(py|js|ts|tsx|jsx|html|css|json|md|txt|sh|yml|yaml|toml|lock)$")
+
+
+def _extract_dev_repo(t: str) -> str | None:
+    """Repo for a build ask, or None.
+
+    Deliberately NOT the review extractor: for build asks an
+    "owner/name" slash match is tried last and rejected when its tail
+    looks like a filename — "devagent/report.py" is a file path inside
+    a repo, never a repo (first live probe misqueued exactly that)."""
+    m = _GH_NAME_BEFORE_REPO_RE.search(t)
+    if m:
+        words = [w for w in m.group(1).strip().split()
+                 if w.lower() not in _GH_STOPWORDS]
+        if words:
+            return "-".join(words)
+    m = _GH_AFTER_REPO_RE.search(t)
+    if m and m.group(1).lower() not in _GH_STOPWORDS:
+        return m.group(1)
+    m = _GH_FULLNAME_RE.search(t)
+    if m and "." not in m.group(1) \
+            and not _DEV_FILE_EXT_RE.search(m.group(2).lower()):
+        return m.group(2)
+    for m in _GH_IN_RE.finditer(t):
+        if m.group(1).lower() in _GH_STOPWORDS:
+            continue
+        if m.end() < len(t) and t[m.end()] == "/":
+            continue  # "in devagent/report.py" is a path, not a repo
+        return m.group(1)
+    return None
+
+
 def detect_dev_build(text: str) -> dict | None:
     """Owner wants the dev builder to change one of his repos.
 
@@ -796,7 +829,7 @@ def detect_dev_build(text: str) -> dict | None:
     # Credential-shaped asks belong to the token flow, never the queue.
     if _DEV_SECRET_GUARD_RE.search(t):
         return None
-    repo = _extract_repo(t)
+    repo = _extract_dev_repo(t)
     if repo is not None:
         repo = repo.strip().strip("/").lower()
         if (not re.fullmatch(r"[a-z0-9][\w.-]{0,99}", repo)

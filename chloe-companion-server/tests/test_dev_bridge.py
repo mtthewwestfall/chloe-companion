@@ -48,6 +48,25 @@ class DetectDevBuildTest(EnvMixin):
         self.assertIsNotNone(dv)
         self.assertEqual(dv["repo"], "roof-scout")
 
+    def test_file_path_does_not_shadow_repo_name(self):
+        # First live probe: "devagent/report.py" was grabbed as
+        # owner/repo and misqueued "mtthewwestfall/report.py".
+        dv = assist.detect_dev_build(
+            "please fix the report formatter in the dev-agent repo — "
+            "devagent/report.py's format_job_report needs to pass the "
+            "tests in tests/test_report.py")
+        self.assertIsNotNone(dv)
+        self.assertEqual(dv["repo"], "dev-agent")
+
+    def test_file_path_alone_names_no_repo(self):
+        # No repo named: the intent fires with repo None so the
+        # handler asks its one clarifying question — it never invents
+        # "devagent" or "report.py" as the target repo.
+        dv = assist.detect_dev_build(
+            "update devagent/report.py so it passes its tests")
+        self.assertIsNotNone(dv)
+        self.assertIsNone(dv["repo"])
+
     def test_bot_mention_no_repo(self):
         dv = assist.detect_dev_build("have your dev bot fix the thing")
         self.assertIsNotNone(dv)
