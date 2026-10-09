@@ -325,15 +325,6 @@
     scrollBottom();
   }
 
-  function addGeneratedVideo(url) {
-    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' · ' + timeNow() });
-    const b = wrap.firstChild;
-    b.innerHTML = `
-      <div class="photo-scene" style="height:auto;min-height:200px;"><video src="${escAttr(url)}" controls playsinline preload="metadata" style="width:100%;display:block;"></video></div>
-      <div class="photo-caption">🎬 made this for you</div>`;
-    scrollBottom();
-  }
-
   /* ---------- Hannah attachments ---------- */
 
   const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -371,13 +362,6 @@
   function attachmentCard(att) {
     const name = att.name || att.filename || 'attachment';
     const url = att.url || att.previewUrl || '';
-    if (att.kind === 'video' && url) {
-      return `
-        <div class="attachment-card video">
-          <video src="${escAttr(url)}" controls playsinline preload="metadata" style="width:100%;display:block;border-radius:10px;"></video>
-          <div class="attachment-meta"><span>${esc(name)}</span></div>
-        </div>`;
-    }
     if (att.kind === 'image' && url) {
       return `
         <div class="attachment-card image">
@@ -567,7 +551,6 @@
       }
       if (res.photo_url) addPhotoDrop(res.photo_url, res.reply_text);
       if (res.image_url) addGeneratedImage(res.image_url);
-      if (res.video_url) addGeneratedVideo(res.video_url);
       if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {

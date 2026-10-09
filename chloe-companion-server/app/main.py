@@ -933,9 +933,6 @@ def chat(body: ChatIn, request: Request):
         if assist_hit and assist_hit.get("image_url"):
             resp["image_url"] = assist_hit["image_url"]
             resp["image_prompt"] = assist_hit.get("image_prompt", "")
-        if assist_hit and assist_hit.get("video_url"):
-            resp["video_url"] = assist_hit["video_url"]
-            resp["media_type"] = "video"
         return resp
     finally:
         conn.close()
