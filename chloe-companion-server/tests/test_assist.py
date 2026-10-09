@@ -504,7 +504,34 @@ class AttachmentTest(unittest.TestCase):
         result = assist.analyze_chat_attachments(
             self.conn, self.owner, "what is this?", "hannah", [row])
         self.assertIn("could NOT actually inspect", result["brief"])
+        self.assertIn("image DID reach the server", result["brief"])
+        self.assertIn("Do not call it a blank space", result["brief"])
         self.assertEqual(result["attachment_status"], "unavailable")
+
+    def test_attachment_models_skip_retired_provider_ids(self):
+        os.environ["HANNAH_VISION_MODEL"] = "gemini-2.5-flash"
+        os.environ["HANNAH_VISION_FALLBACK_MODEL"] = "gemini-2.0-flash"
+        self.assertEqual(
+            assist.attachment_models(),
+            ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
+             "gemini-3.8-flash"])
+
+    def test_attachment_post_stays_free_only_single_attempt(self):
+        calls = []
+        old = assist.gemini_keys.post_json
+        try:
+            assist.gemini_keys.post_json = lambda *a, **kw: (
+                calls.append((a, kw)) or {"candidates": []})
+            assist._attachment_post(
+                [{"text": "look"}], "gemini-3.1-flash-lite")
+        finally:
+            assist.gemini_keys.post_json = old
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][1]["free_only"])
+        self.assertEqual(calls[0][1]["max_attempts"], 1)
+        self.assertEqual(calls[0][1]["source"], "hannah-attachments")
+        self.assertIn(
+            "gemini-3.1-flash-lite:generateContent", calls[0][0][0])
 
     @staticmethod
     def _pdf_bytes(text=None):

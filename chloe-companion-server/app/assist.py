@@ -2259,17 +2259,31 @@ _ATTACHMENT_MODEL_URL = ("https://generativelanguage.googleapis.com/"
                          "v1beta/models/{model}:generateContent")
 
 
+_VISION_MODEL_DEFAULTS = (
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+)
+# These IDs now return provider 404s for this app's free-key projects
+# (observed live 2026-10-09), so a stale Railway env must not resurrect
+# them and make every uploaded image look "blank" to Hannah.
+_VISION_MODELS_UNAVAILABLE = frozenset({
+    "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.5-flash",
+})
+
+
 def attachment_models() -> list[str]:
-    """Vision models in probe order (at most two, free pool only)."""
-    models = [os.environ.get("HANNAH_VISION_MODEL", "gemini-2.5-flash"),
-              os.environ.get("HANNAH_VISION_FALLBACK_MODEL",
-                             "gemini-2.0-flash")]
+    """Current vision-capable models in probe order (free pool only)."""
+    models = [os.environ.get("HANNAH_VISION_MODEL", ""),
+              os.environ.get("HANNAH_VISION_FALLBACK_MODEL", ""),
+              *_VISION_MODEL_DEFAULTS]
     out: list[str] = []
     for model in models:
         model = (model or "").strip()
-        if model and model not in out:
+        if (model and model not in _VISION_MODELS_UNAVAILABLE
+                and model not in out):
             out.append(model)
-    return out[:2]
+    return out[:3]
 
 
 def _sanitize_attachment_name(filename: str) -> str:
@@ -2672,10 +2686,12 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             "what it shows.")
     elif has_image and analysis_status != "ok":
         brief_parts.append(
-            "The free vision keys are resting or unavailable, so you "
-            "could NOT actually inspect the image this time. Tell him "
-            "honestly and ask him to send it again shortly; never claim "
-            "you saw it.")
+            "The image DID reach the server, but the vision reader "
+            "returned no readable result, so you could NOT actually "
+            "inspect it this time. Do not call it a blank space and do "
+            "not say the upload vanished. Tell him honestly that the "
+            "reader is unavailable right now and ask him to send it "
+            "again shortly; never claim you saw it.")
     for bad_name, bad_status in unreadable:
         if bad_status == "encrypted":
             brief_parts.append(
