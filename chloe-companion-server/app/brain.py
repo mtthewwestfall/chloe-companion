@@ -768,6 +768,14 @@ def audit_reply(reply_text: str, context: dict[str, Any]) -> str:
     return reply_text
 
 
+# Must stay byte-identical with assist.FIXED_REPLY_PREFIX: an
+# assist_result starting with this prefix is spoken verbatim, with NO
+# model call at all. Used for the owner's GitHub-token confirmation —
+# the one reply that must be impossible for a model to embellish,
+# because the message it answers contained a live credential.
+FIXED_REPLY_PREFIX = "FIXED_REPLY:: "
+
+
 def compose_reply(user_text: str, context: dict[str, Any],
                   character_id: str = "chloe") -> str:
     """Full brain pipeline: mouth -> auditor. Call this, not the pieces.
@@ -778,6 +786,10 @@ def compose_reply(user_text: str, context: dict[str, Any],
     uses the persona-driven generic engine. The auditor hook always runs.
     """
     cid = (character_id or "").strip().lower() or "chloe"
+    assist_result = (context.get("assist_result") or "").strip()
+    if assist_result.startswith(FIXED_REPLY_PREFIX):
+        return audit_reply(
+            assist_result[len(FIXED_REPLY_PREFIX):].strip(), context)
     draft = gemini_generate(user_text, context, cid)
     if not draft:
         if cid == "chloe":
@@ -810,6 +822,13 @@ def compose_reply(user_text: str, context: dict[str, Any],
 # facts about her (trust-gated reveal) + relevant typed memories.
 # ---------------------------------------------------------------------------
 
+# Token-shaped strings are masked EVERYWHERE this module persists text
+# derived from his messages (typed memories, quiet-to-regroup clips):
+# her long-term memory must never become a place a credential lives.
+_TOKEN_SHAPE_RE = re.compile(
+    r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"
+    r"|\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_TOKEN_PLACEHOLDER = "[github token]"
 _NAME_EXPLICIT_RE = re.compile(
     r"\bmy name is\s+([A-Za-z][\w\-']{1,24})", re.IGNORECASE
 )
@@ -887,7 +906,9 @@ def extract_memories(user_text: str) -> list[tuple[str, str]]:
         # Only as a fallback when nothing stronger matched, to avoid noise.
         found.append(("fact", f"He shared: {m.group(0).strip()}."))
 
-    return found
+    # Last thing before anything is persisted: mask token-shaped text.
+    return [(kind, _TOKEN_SHAPE_RE.sub(_TOKEN_PLACEHOLDER, text))
+            for kind, text in found]
 
 
 _MEM_PREFIXES = ("he shared: ", "he doesn't like ", "he loves ",
@@ -933,7 +954,8 @@ def learn_from_turn(conn: sqlite3.Connection, user_id: str, user_text: str,
     # trigger is written down as a boundary memory. Never termination.
     intent = _detect_intent(user_text or "")
     if intent in ("disrespect", "predator"):
-        clip = (user_text or "").strip()[:80]
+        clip = _TOKEN_SHAPE_RE.sub(
+            _TOKEN_PLACEHOLDER, (user_text or "").strip())[:80]
         kind = ("was disrespectful" if intent == "disrespect"
                 else "pushed for something off-card")
         text = (f"He {kind} ({clip}). I went quiet to regroup instead of "

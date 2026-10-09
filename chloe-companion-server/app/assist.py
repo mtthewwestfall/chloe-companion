@@ -12,6 +12,14 @@ SECURITY — the credential rule, non-negotiable:
     - stores reminders (plain text + time — not credentials),
     - composes email draft text (the CLIENT creates the Gmail draft).
   No credential values are accepted, logged, or persisted anywhere here.
+
+  ONE NAMED EXCEPTION (2026-10-08, user-directed): the OWNER's own GitHub
+  token for his repo reviews. When the owner pastes one in chat, it is
+  stored raw server-side (assist_secrets row "github_token") so her
+  review job can read his repos, and it is scrubbed out of the persisted
+  chat history. The raw value is NEVER echoed in any reply, prompt,
+  endpoint response or log line — no fragments, not even the last 4.
+  Everything else credential-shaped stays refused, exactly as above.
 """
 
 from __future__ import annotations
@@ -116,6 +124,12 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reminders_due "
         "ON reminders (delivered, remind_at)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS assist_secrets (
+               name TEXT PRIMARY KEY,
+               value TEXT NOT NULL,
+               updated_at TEXT)"""
     )
     conn.commit()
 
@@ -586,6 +600,132 @@ def _marketing_brief(product: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Owner GitHub token intake (2026-10-08, user-directed): the owner can
+# hand Hannah a GitHub token right in chat. She stores it server-side
+# (assist_secrets) and her review job reads it from there; the env var
+# GITHUB_TOKEN stays as the fallback. The turn he pasted it in is
+# scrubbed in the persisted history, and the confirmation is FIXED text
+# the model never rephrases (see FIXED_REPLY_PREFIX in brain.py), so no
+# model output can ever quote the key back at him.
+# ---------------------------------------------------------------------------
+_GH_TOKEN_RE = re.compile(
+    r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b"
+    r"|\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_GH_TOKEN_PLACEHOLDER = "[github token]"
+_TOKEN_REVOKE_RE = re.compile(
+    r"\b(forget|delete|remove|revoke|wipe|drop)\b[^.!?]{0,20}"
+    r"\b(the\s+|my\s+)?(github\s+)?(token|key)\b"
+    r"|\b(forget|revoke)\s+(the\s+|my\s+)?(github\s+)?(token|key)\b",
+    re.IGNORECASE)
+# Must stay byte-identical with brain.FIXED_REPLY_PREFIX — the chat path
+# copies maybe_assist's "brief" into context["assist_result"], and
+# brain.compose_reply speaks a brief starting with this prefix verbatim
+# instead of calling the model.
+FIXED_REPLY_PREFIX = "FIXED_REPLY:: "
+_TOKEN_SAVED_REPLY = (
+    "saved, babe — I put that key away safe on my end. next time you "
+    "ask me to dig through one of your repos, that’s the one I’ll "
+    "read with.")
+_TOKEN_REVOKED_REPLY = (
+    "done — wiped that key clean off my side. next repo you have me "
+    "read, I’ll use the server’s own key again.")
+_TOKEN_NOTHING_REPLY = (
+    "nothing to wipe, babe — there’s no key saved on my end right "
+    "now.")
+
+
+def extract_github_token(text: str) -> str | None:
+    """The GitHub-token-shaped string in a message, else None."""
+    m = _GH_TOKEN_RE.search(text or "")
+    return m.group(0) if m else None
+
+
+def sanitize_token_text(text: str) -> str:
+    """Message text with any token-shaped string masked out."""
+    return _GH_TOKEN_RE.sub(_GH_TOKEN_PLACEHOLDER, text or "")
+
+
+def store_github_token(conn: sqlite3.Connection, value: str) -> None:
+    """Save (or rotate) the owner's GitHub token. Value never logged."""
+    ensure_tables(conn)
+    conn.execute(
+        "INSERT INTO assist_secrets (name, value, updated_at) "
+        "VALUES ('github_token', ?, ?) "
+        "ON CONFLICT (name) DO UPDATE SET value = excluded.value, "
+        "updated_at = excluded.updated_at",
+        (value,
+         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    conn.commit()
+
+
+def stored_github_token(conn: sqlite3.Connection) -> str:
+    """The stored token, or \"\" when none is saved."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT value FROM assist_secrets WHERE name = 'github_token'"
+    ).fetchone()
+    return (row[0] or "").strip() if row else ""
+
+
+def clear_github_token(conn: sqlite3.Connection) -> bool:
+    """Delete the stored token. True when one was actually there."""
+    ensure_tables(conn)
+    cur = conn.execute(
+        "DELETE FROM assist_secrets WHERE name = 'github_token'")
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def resolve_github_token(conn: sqlite3.Connection) -> str:
+    """Her review key: the stored one wins; else the server env var."""
+    stored = stored_github_token(conn)
+    if stored:
+        return stored
+    return (os.environ.get("GITHUB_TOKEN") or "").strip()
+
+
+def scrub_token_from_history(conn: sqlite3.Connection, user_id: str,
+                             character_id: str, token: str) -> None:
+    """Mask the token out of his just-saved chat turn.
+
+    The chat path logs his raw message before maybe_assist runs, so the
+    row already exists — rewrite it (and only it) in place. A no-op
+    when the caller already persisted sanitized text.
+    """
+    if not token:
+        return
+    row = conn.execute(
+        "SELECT id, text FROM conversation WHERE user_id = ? "
+        "AND character_id = ? AND role = 'user' AND instr(text, ?) > 0 "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, character_id, token)).fetchone()
+    if not row:
+        return
+    conn.execute(
+        "UPDATE conversation SET text = ? WHERE id = ?",
+        (sanitize_token_text(row[1]), row[0]))
+    conn.commit()
+
+
+def _handle_github_token_intake(conn: sqlite3.Connection, user_id: str,
+                                character_id: str, token: str) -> dict:
+    store_github_token(conn, token)
+    scrub_token_from_history(conn, user_id, character_id, token)
+    return {"brief": FIXED_REPLY_PREFIX + _TOKEN_SAVED_REPLY}
+
+
+def _handle_github_token_revoke(conn: sqlite3.Connection, user_id: str,
+                                character_id: str,
+                                token: str | None) -> dict:
+    had = clear_github_token(conn)
+    if token:
+        # "forget this token ghp_…" — scrub the paste too; store nothing.
+        scrub_token_from_history(conn, user_id, character_id, token)
+    reply = _TOKEN_REVOKED_REPLY if had else _TOKEN_NOTHING_REPLY
+    return {"brief": FIXED_REPLY_PREFIX + reply}
+
+
+# ---------------------------------------------------------------------------
 # GitHub review job — fetch (Contents/trees API, no clone), real static
 # checks, a Gemini review pass over the actual code, then the findings
 # land in the owner's conversation as her follow-up message (store.
@@ -830,7 +970,11 @@ def _run_review_job(user_id: str, character_id: str, repo: str) -> None:
     Job state only is printed (no findings/repo contents to logs)."""
     key = f"{user_id}:{repo}"
     try:
-        token = (os.environ.get("GITHUB_TOKEN") or "").strip()
+        conn0 = db.connect()
+        try:
+            token = resolve_github_token(conn0)
+        finally:
+            conn0.close()
         try:
             findings = _do_review(repo, token)
         except _ReviewError as e:
@@ -857,8 +1001,8 @@ def _run_review_job(user_id: str, character_id: str, repo: str) -> None:
               f"{user_id[:8]}…", flush=True)
 
 
-def _handle_github_review(user_id: str, character_id: str,
-                          gh: dict) -> dict:
+def _handle_github_review(conn: sqlite3.Connection, user_id: str,
+                          character_id: str, gh: dict) -> dict:
     repo = gh.get("repo")
     if not repo:
         return {"brief":
@@ -866,14 +1010,16 @@ def _handle_github_review(user_id: str, character_id: str,
                 "repo (his GitHub is mtthewwestfall). Ask him which one "
                 "to dig into. Don't guess a repo and don't invent "
                 "findings."}
-    if not (os.environ.get("GITHUB_TOKEN") or "").strip():
+    if not resolve_github_token(conn):
         return {"brief":
                 f"He asked you to really review his repo '{repo}', but "
-                "your GitHub access isn't wired up yet — you can't "
-                "actually see his code right now. Tell him straight, "
-                "warm and short: the repo link isn't connected on your "
-                "end yet, so no, you haven't looked, and you won't make "
-                "anything up. No invented files, findings or issues."}
+                "you don't have a GitHub key on your end yet — you "
+                "can't actually see his code right now. Tell him "
+                "straight, warm and short: no key, no looking, and you "
+                "won't make anything up. He can hand you a GitHub "
+                "token right here in chat (a read-only one is "
+                "perfect); you'll keep it safe on your end and read "
+                "with it. No invented files, findings or issues."}
     key = f"{user_id}:{repo}"
     with _REVIEW_LOCK:
         if key in _REVIEW_RUNNING:
@@ -946,9 +1092,18 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
     # general rollout above — these never open to customers and are
     # never mentioned to them (a non-owner just gets normal chat).
     if user_id in _owner_ids():
+        # Token intake FIRST, before any intent or model path: a pasted
+        # key must never ride along into a brief or the model's context.
+        token = extract_github_token(text)
+        if _TOKEN_REVOKE_RE.search(text or ""):
+            return _handle_github_token_revoke(conn, user_id,
+                                               character_id, token)
+        if token:
+            return _handle_github_token_intake(conn, user_id,
+                                               character_id, token)
         gh = detect_github_review(text)
         if gh is not None:
-            return _handle_github_review(user_id, character_id, gh)
+            return _handle_github_review(conn, user_id, character_id, gh)
         mk = detect_marketing(text)
         if mk is not None:
             return {"brief": _marketing_brief(mk["product"])}
