@@ -4,3 +4,7 @@ pydantic>=2
 python-multipart>=0.0.9
 pypdf>=5.0
 python-docx>=1.1
+# Video attachments (2026-10-09): bundles a static ffmpeg binary so
+# Hannah can sample frames from clips in the Nixpacks image (no
+# system ffmpeg there).
+imageio-ffmpeg>=0.5
