@@ -1974,7 +1974,7 @@ def image_models() -> list[str]:
     """Supported models in probe order (at most two, deduped)."""
     models = [os.environ.get("HANNAH_IMAGE_MODEL", "gemini-2.5-flash-image"),
               os.environ.get("HANNAH_IMAGE_FALLBACK_MODEL",
-                             "gemini-2.0-flash-preview-image-generation")]
+                             "gemini-3.1-flash-image-preview")]
     out: list[str] = []
     for model in models:
         model = (model or "").strip()
