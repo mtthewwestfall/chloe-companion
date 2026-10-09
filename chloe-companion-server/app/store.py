@@ -1385,6 +1385,10 @@ def get_public_her_day_posts(conn: "sqlite3.Connection",
     Prefers the shared day-set (one copy of each post, no user_id exposed);
     falls back to the legacy across-all-users query until the first shared
     set exists. Used by GET /api/v1/her-day/public — no auth required.
+
+    Owner-scoped (user-created) characters are NEVER public: the fallback
+    filters their posts out even in the window before the first shared
+    set exists, so a personal day-set can never land on the landing page.
     """
     rows = conn.execute(
         "SELECT girl_id, post_type, media_url, voice_url, caption,"
@@ -1402,7 +1406,16 @@ def get_public_her_day_posts(conn: "sqlite3.Connection",
         " ORDER BY created_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    private_girl_ids: set = set()
+    try:
+        from . import characters as _characters
+        private_girl_ids = {
+            c["id"] for c in _characters._local_characters()
+            if c.get("owner_user_id")}
+    except Exception:  # noqa: BLE001 — public feed must survive this
+        private_girl_ids = set()
+    return [dict(r) for r in rows
+            if r["girl_id"] not in private_girl_ids]
 
 
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,

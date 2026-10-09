@@ -1317,8 +1317,10 @@
   }
 
   /* ============================================================
-     Whispr Feed — public landing page Instagram-style feed.
-     Fetches from /api/v1/her-day/public (no auth). Vertical
+     Whispr Feed — Instagram-style daily feed. Signed-in users fetch
+     /api/v1/feed (shared roster sets + their own characters' moments,
+     owner-scoped server-side); logged-out visitors fetch the public
+     /api/v1/her-day/public. Vertical
      scrollable posts: avatar + name + time, media, caption,
      like toggle, chat CTA.
      ============================================================ */
@@ -1462,6 +1464,24 @@
     }
 
     async function load() {
+      // Signed-in users read the authenticated feed: the shared roster
+      // day-sets PLUS moments from their own created characters. Those
+      // personal sets are owner-scoped on the server, so nobody else
+      // ever sees them. Logged-out visitors keep the public feed.
+      try {
+        const tok = (typeof getToken === 'function') ? getToken() : '';
+        if (tok) {
+          const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/feed', {
+            headers: { Authorization: 'Bearer ' + tok },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            posts = data.posts || [];
+            renderFeed();
+            return;
+          }
+        }
+      } catch (e) { /* fall through to the public feed */ }
       try {
         const data = await ApiClient.publicHerDay();
         posts = data.posts || [];

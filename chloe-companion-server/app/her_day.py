@@ -30,6 +30,21 @@ every user's feed reads them from there (lazy attach; per-user state is
 only lightweight seen rows in her_day_seen). The daily run never iterates
 user accounts, so probe/test accounts are never generated or written for.
 
+Owner-scoped personal sets (2026-10-09): user-created characters (enabled
+companion-local characters with an owner_user_id) get a day-set too —
+stored under their OWNER's user_id, never under the shared sentinel, so
+they surface only in that owner's feed. Their moments are picked from a
+profile palette derived from the character's persona text (a CEO's day is
+meetings and city light; a farm character's is porches and fence lines),
+captions are written in the character's own voice from that same persona,
+and group moments never apply (a personal character's day is solo).
+
+COST NOTE: Her Day images (roster and personal alike) are generated via
+the Sogni API-key client (config.SOGNI_API_KEY, _generate_sfw_image_async)
+— that is the credits-based API route, NOT the owner's $20 Unlimited web
+plan. Every personal character adds roughly one day-set of image
+generations per day to that route; the caps below bound the fan-out.
+
 Posts expire after 24h (expires_at). Old posts are cleaned up on read.
 """
 from __future__ import annotations
@@ -38,6 +53,7 @@ import asyncio
 import hashlib
 import os
 import random
+import re
 from datetime import datetime
 from typing import Any
 
@@ -266,6 +282,37 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
         return ""
 
 
+def _caption_via_proxy(prompt: str) -> str:
+    """One caption completion via the centralized Gemini key manager PROXY
+    (free keys first). Returns "" on any failure — callers fall back."""
+    import json as _json
+    import urllib.request
+
+    token = os.environ.get("GEMINI_PROXY_TOKEN", "")
+    if not token:
+        return ""
+    payload = _json.dumps({
+        "model": "gemini-3.1-flash-lite",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.9,
+        "max_tokens": 100,
+    }).encode()
+    url = config.PUBLIC_APP_URL.rstrip("/") + "/v1/chat/completions"
+    try:
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read())
+        return (data.get("choices", [{}])[0]
+                .get("message", {}).get("content", "").strip())[:500]
+    except Exception as e:  # noqa: BLE001
+        print(f"[her_day] proxy caption failed: {e}", flush=True)
+        return ""
+
+
 def _generate_caption(girl_name: str, moment_key: str, desc: str,
                       partner_names: list[str],
                       cache_key: tuple | None = None) -> str:
@@ -276,46 +323,22 @@ def _generate_caption(girl_name: str, moment_key: str, desc: str,
     if cache_key and cache_key in _caption_cache:
         return _caption_cache[cache_key]
 
-    import json as _json
-    import urllib.request
-
-    token = os.environ.get("GEMINI_PROXY_TOKEN", "")
-    text = ""
-    if token:
-        if partner_names:
-            prompt = (
-                f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
-                f"Write a short Instagram-story caption (1-2 sentences, casual, "
-                f"flirty, no hashtags) for this moment: {desc}. "
-                f"You're hanging out with {', '.join(partner_names)} — mention them "
-                f"naturally. Sound like a real girl, not a bot. No emoji spam (max 1)."
-            )
-        else:
-            prompt = (
-                f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
-                f"Write a short Instagram-story caption (1-2 sentences, casual, "
-                f"flirty, no hashtags) for this moment: {desc}. "
-                f"Sound like a real girl, not a bot. No emoji spam (max 1)."
-            )
-        payload = _json.dumps({
-            "model": "gemini-3.1-flash-lite",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.9,
-            "max_tokens": 100,
-        }).encode()
-        url = config.PUBLIC_APP_URL.rstrip("/") + "/v1/chat/completions"
-        try:
-            req = urllib.request.Request(
-                url, data=payload,
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {token}"},
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = _json.loads(resp.read())
-            text = (data.get("choices", [{}])[0]
-                    .get("message", {}).get("content", "").strip())[:500]
-        except Exception as e:  # noqa: BLE001
-            print(f"[her_day] proxy caption failed: {e}", flush=True)
+    if partner_names:
+        prompt = (
+            f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
+            f"Write a short Instagram-story caption (1-2 sentences, casual, "
+            f"flirty, no hashtags) for this moment: {desc}. "
+            f"You're hanging out with {', '.join(partner_names)} — mention them "
+            f"naturally. Sound like a real girl, not a bot. No emoji spam (max 1)."
+        )
+    else:
+        prompt = (
+            f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
+            f"Write a short Instagram-story caption (1-2 sentences, casual, "
+            f"flirty, no hashtags) for this moment: {desc}. "
+            f"Sound like a real girl, not a bot. No emoji spam (max 1)."
+        )
+    text = _caption_via_proxy(prompt)
     if not text:
         text = _fallback_caption(girl_name, moment_key, partner_names)
     if cache_key:
@@ -367,11 +390,313 @@ def _moment_def(moment_key: str):
     return (post_type, None, desc)
 
 
+# ---------------------------------------------------------------------------
+# Owner-scoped personal day-sets for user-created characters.
+#
+# A user-created character is an enabled companion-local character with an
+# owner_user_id (local_characters). Their day-set is stored under the
+# owner's user_id — never under HER_DAY_SHARED_USER — so the existing feed
+# read path returns it only to that owner. Moments come from a profile
+# palette scored against the character's persona text; scenes stay inside
+# the SFW moment families (the SFW tail is appended at prompt build, as
+# always) but say what THAT character's day actually looks like.
+# ---------------------------------------------------------------------------
+
+# Deterministic scoring wins; earlier palettes break ties. "pool" orders
+# the solo moment keys the day planner prefers for this kind of life.
+PROFILE_PALETTES: list[dict[str, Any]] = [
+    {
+        "key": "executive",
+        "keywords": ("ceo", "executive", "business", "corporate", "office",
+                     "boardroom", "meeting", "lawyer", "banker", "investor",
+                     "entrepreneur", "founder", "boss", "suit", "agency",
+                     "marketing", "sales director", "realtor", "broker"),
+        "pool": ["out_and_about", "getting_ready", "gym", "cooking"],
+        "moments": {
+            "morning_coffee": (
+                "early coffee in a bright high-rise apartment before work, "
+                "smart blazer, laptop open on the counter",
+                "coffee before the first meeting, already in work mode"),
+            "out_and_about": (
+                "walking between meetings downtown, tailored coat, phone "
+                "in hand, city towers behind",
+                "between meetings downtown, city moving fast around me"),
+            "getting_ready": (
+                "mirror check in a tailored outfit before heading out, "
+                "confident and put-together",
+                "last mirror check before I run the day"),
+            "bedtime": (
+                "winding down in a high-rise apartment at night, city "
+                "lights through the window, cozy sweater",
+                "city lights, work brain finally switching off"),
+        },
+        "fallback": "long day, my kind of day",
+    },
+    {
+        "key": "farm",
+        "keywords": ("farm", "ranch", "barn", "horse", "field", "crops",
+                     "harvest", "cowboy", "cowgirl", "country", "homestead",
+                     "tractor", "livestock", "garden", "ranch hand"),
+        "pool": ["out_and_about", "cooking", "gym", "getting_ready"],
+        "moments": {
+            "morning_coffee": (
+                "coffee on a farmhouse porch at sunrise, flannel shirt "
+                "and jeans, fields stretching out behind",
+                "sunrise coffee on the porch before chores"),
+            "out_and_about": (
+                "walking a fence line in golden light, boots and a worn "
+                "jacket, horses grazing nearby",
+                "checking the fence line, horses keeping me company"),
+            "gym": (
+                "hauling hay bales by the barn, strong and sunlit, work "
+                "gloves on",
+                "who needs a gym when there's hay to haul"),
+            "cooking": (
+                "cooking in a farmhouse kitchen, sleeves rolled up, "
+                "garden vegetables on the counter",
+                "supper from the garden tonight"),
+            "bedtime": (
+                "porch swing at dusk, wrapped in a blanket, last light "
+                "over the fields",
+                "porch swing, day's done, sky doing its thing"),
+        },
+        "fallback": "honest work, good tired",
+    },
+    {
+        "key": "coastal",
+        "keywords": ("surf", "beach", "ocean", "sea", "sailor", "coast",
+                     "boardwalk", "lifeguard", "swimmer", "island",
+                     "harbor", "waves"),
+        "pool": ["out_and_about", "gym", "cooking", "getting_ready"],
+        "moments": {
+            "morning_coffee": (
+                "coffee on a boardwalk at sunrise, hoodie and salty "
+                "hair, waves behind",
+                "sunrise coffee, waves already calling"),
+            "out_and_about": (
+                "walking the boardwalk in afternoon sun, light summer "
+                "outfit, the ocean right there",
+                "boardwalk hours, nowhere to be but here"),
+            "gym": (
+                "morning run along the shoreline, athletic wear, sand "
+                "and surf in the background",
+                "shoreline miles before the crowds"),
+            "bedtime": (
+                "sitting on the sand at dusk watching the light go, "
+                "cozy hoodie",
+                "stayed for the whole sunset, worth it"),
+        },
+        "fallback": "salt air fixes most things",
+    },
+    {
+        "key": "creative",
+        "keywords": ("artist", "painter", "paint", "musician", "singer",
+                     "songwriter", "writer", "author", "photographer",
+                     "gallery", "studio", "poet", "dancer", "designer"),
+        "pool": ["getting_ready", "out_and_about", "cooking", "gym"],
+        "moments": {
+            "morning_coffee": (
+                "coffee in a sunlit studio apartment, sketches and "
+                "notebooks spread around",
+                "coffee first, then the work takes over"),
+            "out_and_about": (
+                "wandering a gallery district with a sketchbook, "
+                "stylish casual outfit, street art behind",
+                "out collecting things to steal for the work"),
+            "getting_ready": (
+                "trying on outfits in a cluttered, art-covered room, "
+                "mirror selfie",
+                "studio mess, outfit check"),
+            "bedtime": (
+                "curled up with a notebook in warm lamplight, ideas "
+                "still coming",
+                "one more idea before sleep, always one more"),
+        },
+        "fallback": "made something today, that's enough",
+    },
+    {
+        "key": "fitness",
+        "keywords": ("trainer", "athlete", "fitness", "yoga", "runner",
+                     "running", "workout", "coach", "boxer", "gym",
+                     "bodybuilder", "martial"),
+        "pool": ["gym", "out_and_about", "cooking", "getting_ready"],
+        "moments": {
+            "morning_coffee": (
+                "pre-workout coffee in bright athletic wear, gym bag "
+                "by the door",
+                "coffee, then we earn the day"),
+            "out_and_about": (
+                "cooling down after a run in the park, athletic wear, "
+                "earbuds in",
+                "park miles, head clear"),
+            "cooking": (
+                "meal-prepping in a bright kitchen, protein and greens "
+                "lined up on the counter",
+                "fuel first, everything else after"),
+        },
+        "fallback": "strong day, stronger tomorrow",
+    },
+]
+
+
+def _profile_palette(character: dict[str, Any]) -> dict[str, Any] | None:
+    """Pick the profile palette for a user-created character by keyword
+    scoring over persona + blurb. None = the everyday default (stock
+    moments, no overrides). Deterministic; ties go to the earlier
+    palette in PROFILE_PALETTES."""
+    text = ((character.get("persona") or "") + " "
+            + (character.get("blurb") or "")).lower()
+    best: dict[str, Any] | None = None
+    best_score = 0
+    for palette in PROFILE_PALETTES:
+        score = sum(1 for kw in palette["keywords"] if kw in text)
+        if score > best_score:
+            best, best_score = palette, score
+    return best
+
+
+def _personal_moment_def(palette: dict[str, Any] | None, moment_key: str):
+    """(post_type, sfw_scene, caption_desc) for a personal-set moment:
+    palette override when the palette has one for this key, else the
+    stock moment definition."""
+    post_type, scene, desc = _moment_def(moment_key)
+    if palette:
+        override = (palette.get("moments") or {}).get(moment_key)
+        if override:
+            scene, desc = override
+    return (post_type, scene, desc)
+
+
+def _plan_personal_day(character: dict[str, Any], date_str: str,
+                       palette: dict[str, Any] | None) -> list[tuple]:
+    """Deterministic solo day plan for a user-created character.
+
+    Same tuple shape as _plan_day — (moment_key, is_group, partner_ids,
+    partner_names) — but always solo: a personal character's day never
+    pulls roster girls into an owner-only set (and never vice versa).
+    Seeded by character id + date, so it is reproducible per day.
+    """
+    seed = int(hashlib.md5(
+        f"{character['id']}|{date_str}|herday-personal-v1".encode()
+    ).hexdigest()[:8], 16)
+    rng = random.Random(seed)
+    pool = (palette or {}).get("pool") or ["gym", "cooking",
+                                           "out_and_about", "getting_ready"]
+    plan: list[tuple] = [("morning_coffee", False, [], [])]
+    for _ in range(rng.randint(1, 3)):
+        plan.append((rng.choice(pool), False, [], []))
+    plan.append(("bedtime", False, [], []))
+    if rng.random() < 0.7:
+        plan.insert(-1, ("voice_rant", False, [], []))
+    if rng.random() < 0.4:
+        plan.insert(-1, (rng.choice(["shower_thought", "craving"]),
+                         False, [], []))
+    return plan
+
+
+def _generate_personal_caption(char_name: str, persona: str, desc: str,
+                               palette: dict[str, Any] | None = None,
+                               cache_key: tuple | None = None) -> str:
+    """Caption in the character's own voice, from their persona text —
+    never the roster's girlfriend template (a user's character speaks
+    as whoever they were written to be)."""
+    if cache_key and cache_key in _caption_cache:
+        return _caption_cache[cache_key]
+    excerpt = re.sub(r"\s+", " ", (persona or "")).strip()[:500]
+    who = f"You are {char_name}."
+    if excerpt:
+        who += f" This is who you are: {excerpt}"
+    prompt = (
+        f"{who} Write a short Instagram-story caption (1-2 sentences) "
+        f"in your own voice for this moment: {desc}. Casual and real, "
+        f"no hashtags, no emoji spam (max 1)."
+    )
+    text = _caption_via_proxy(prompt)
+    if not text:
+        text = (palette or {}).get("fallback") or "a little moment from today"
+    if cache_key:
+        _caption_cache[cache_key] = text
+    return text
+
+
+def _get_personal_characters() -> list[dict[str, Any]]:
+    """Enabled user-created characters: companion-local rows carrying an
+    owner_user_id. House roster rows (owner NULL) never appear here.
+    Returns [{id, name, avatar_url, persona, blurb, owner_user_id}]
+    sorted by owner then roster order, for deterministic caps."""
+    try:
+        from . import characters
+        rows = characters._local_characters()
+    except Exception:  # noqa: BLE001 — feed generation must survive this
+        return []
+    out: list[dict[str, Any]] = []
+    for c in rows:
+        owner = (c.get("owner_user_id") or "").strip()
+        if not owner:
+            continue
+        out.append({
+            "id": c["id"],
+            "name": c.get("name") or c["id"],
+            "avatar_url": c.get("avatar_url") or "",
+            "persona": c.get("persona") or "",
+            "blurb": c.get("blurb") or "",
+            "owner_user_id": owner,
+            "sort_order": c.get("sort_order") or 0,
+        })
+    out.sort(key=lambda c: (c["owner_user_id"], c["sort_order"], c["id"]))
+    return out
+
+
+_PERSONAL_SKIP_MARKERS = ("probe", "test")
+
+
+def _eligible_owner(conn, owner_id: str) -> bool:
+    """Whether personal sets may be generated for this owner: the
+    account must exist and must not look like a probe/test account
+    (owners are derived from character ownership, never by iterating
+    accounts, so ordinary probes are excluded by construction)."""
+    oid = (owner_id or "").strip()
+    if not oid:
+        return False
+    if any(m in oid.lower() for m in _PERSONAL_SKIP_MARKERS):
+        return False
+    row = conn.execute(
+        "SELECT email FROM users WHERE user_id = ?", (oid,)).fetchone()
+    if row is None:
+        return False
+    local = (row[0] or "").split("@")[0].lower()
+    if local.startswith(_PERSONAL_SKIP_MARKERS) or "probe" in local:
+        return False
+    return True
+
+
+def personal_char_cap() -> int:
+    """Max user-created characters per owner per day (env
+    HER_DAY_PERSONAL_CHAR_CAP, default 3)."""
+    try:
+        return max(1, int(os.environ.get("HER_DAY_PERSONAL_CHAR_CAP", "3")))
+    except ValueError:
+        return 3
+
+
+def personal_run_cap() -> int:
+    """Max personal day-sets across one whole run (env
+    HER_DAY_PERSONAL_MAX_SETS_PER_RUN, default 25) — a hard bound on
+    the credits-billed image generations one run can add."""
+    try:
+        return max(1, int(os.environ.get(
+            "HER_DAY_PERSONAL_MAX_SETS_PER_RUN", "25")))
+    except ValueError:
+        return 25
+
+
 def generate_for_user_girl(user_id: str, girl_id: str,
                            girl_name: str = "Chloe",
                            plan: list[tuple] | None = None,
                            girl_map: dict[str, dict] | None = None,
-                           date_str: str | None = None) -> list[dict[str, Any]]:
+                           date_str: str | None = None,
+                           personal: dict[str, Any] | None = None
+                           ) -> list[dict[str, Any]]:
     """Generate today's Whispr Feed posts for one target+girl pair.
 
     The target is normally the shared sentinel (store.HER_DAY_SHARED_USER):
@@ -381,6 +706,11 @@ def generate_for_user_girl(user_id: str, girl_id: str,
 
     plan: [(moment_key, is_group, partner_ids, partner_names)] from
     _build_all_plans. If None, builds a solo-only plan for this girl.
+
+    personal: for a user-created character's owner-scoped set, pass
+    {"persona": ..., "palette": ...} — moment scenes/captions then come
+    from the character's profile palette and own voice instead of the
+    roster's stock moments and girlfriend caption template.
     """
     conn = db.connect()
     try:
@@ -403,7 +733,11 @@ def generate_for_user_girl(user_id: str, girl_id: str,
 
         posts = []
         for (moment_key, is_group, pids, pnames) in plan:
-            post_type, sfw_scene, desc_tpl = _moment_def(moment_key)
+            if personal is not None:
+                post_type, sfw_scene, desc_tpl = _personal_moment_def(
+                    personal.get("palette"), moment_key)
+            else:
+                post_type, sfw_scene, desc_tpl = _moment_def(moment_key)
             desc = (desc_tpl.format(partners=", ".join(pnames))
                     if is_group and "{partners}" in desc_tpl else desc_tpl)
             media_url = ""
@@ -422,8 +756,14 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                 # Empty media_url -> frontend renders a styled text card.
 
             cache_key = (gid, date_str, moment_key, tuple(sorted(pids)))
-            caption = _generate_caption(girl_name, moment_key, desc,
-                                        pnames, cache_key)
+            if personal is not None:
+                caption = _generate_personal_caption(
+                    girl_name, personal.get("persona") or "", desc,
+                    personal.get("palette"),
+                    ("personal",) + cache_key)
+            else:
+                caption = _generate_caption(girl_name, moment_key, desc,
+                                            pnames, cache_key)
             if post_type == "voice":
                 try:
                     from . import voice as _voice
@@ -471,25 +811,98 @@ def generate_shared_day(date_str: str | None = None) -> dict[str, Any]:
     return report
 
 
+def generate_personal_days(date_str: str | None = None,
+                           only_owner: str | None = None) -> dict[str, Any]:
+    """Generate today's day-set for every eligible user-created character.
+
+    One set per character per day, stored under the owner's user_id —
+    only that owner's feed ever reads it back. Owners are derived from
+    character ownership (never by iterating accounts); probe/test
+    accounts are skipped. Bounded by personal_char_cap() per owner and
+    personal_run_cap() per run. Idempotent per character: a character
+    whose set already exists today is skipped.
+    """
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+    report: dict[str, Any] = {"generated": 0, "sets": 0, "skipped": 0,
+                              "errors": [], "owners": 0}
+    by_owner: dict[str, list[dict[str, Any]]] = {}
+    for c in _get_personal_characters():
+        by_owner.setdefault(c["owner_user_id"], []).append(c)
+    if not by_owner:
+        return report
+
+    conn = db.connect()
+    try:
+        eligible = {oid: _eligible_owner(conn, oid) for oid in by_owner}
+    finally:
+        conn.close()
+
+    cap = personal_char_cap()
+    run_cap = personal_run_cap()
+    for oid in sorted(by_owner):
+        if only_owner and oid != only_owner:
+            continue
+        owned = by_owner[oid]
+        if not eligible.get(oid):
+            report["skipped"] += len(owned)
+            continue
+        report["owners"] += 1
+        for char in owned[:cap]:
+            if report["sets"] >= run_cap:
+                report["skipped"] += 1
+                continue
+            palette = _profile_palette(char)
+            try:
+                posts = generate_for_user_girl(
+                    oid, char["id"], char["name"],
+                    plan=_plan_personal_day(char, date_str, palette),
+                    girl_map={char["id"]: char},
+                    date_str=date_str,
+                    personal={"persona": char.get("persona") or "",
+                              "palette": palette},
+                )
+            except Exception as e:  # noqa: BLE001 — one char never sinks the run
+                report["errors"].append(f"{char['id']}: {e}")
+                continue
+            if posts:
+                report["generated"] += len(posts)
+                report["sets"] += 1
+            else:
+                report["skipped"] += 1
+    return report
+
+
 def generate_for_all_girls(user_id: str) -> int:
     """On-demand Whispr Feed generation (POST /api/v1/her-day/generate).
 
-    The day-set is shared now: this ensures today's shared set exists and
-    returns how many posts THIS call created (0 when the set was already
-    there). `user_id` is kept for the endpoint contract — no per-user
-    post rows are ever written anymore; the caller's feed reads the
-    shared set like everyone else's.
+    The roster day-set is shared now: this ensures today's shared set
+    exists, plus today's day-sets for the CALLER's own user-created
+    characters. Returns how many posts THIS call created (0 when the
+    sets were already there). Other users' characters are never touched
+    by someone else's generate call.
     """
-    return generate_shared_day()["generated"]
+    created = generate_shared_day()["generated"]
+    created += generate_personal_days(only_owner=user_id)["generated"]
+    return created
 
 
 def generate_daily() -> dict[str, Any]:
-    """Generate today's shared Whispr Feed set. Called by the 6 AM cron.
+    """Generate today's Whispr Feed sets. Called by the 6 AM cron.
 
-    One generation pass total. User accounts are never iterated, so
-    probe/test accounts get nothing generated or written for them.
+    The shared roster pass runs first (one generation total; user
+    accounts are never iterated, so probe/test accounts get nothing
+    generated or written for them), then owner-scoped personal sets
+    for user-created characters. The top-level "generated"/"skipped"/
+    "errors" keys remain the shared-pass numbers, exactly as before;
+    personal counts ride along under personal_* keys.
     """
     report = generate_shared_day()
+    personal = generate_personal_days()
     return {"generated": report["generated"],
             "skipped": report["skipped"],
-            "errors": report["errors"]}
+            "errors": report["errors"],
+            "personal_generated": personal["generated"],
+            "personal_sets": personal["sets"],
+            "personal_skipped": personal["skipped"],
+            "personal_owners": personal["owners"],
+            "personal_errors": personal["errors"]}
