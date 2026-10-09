@@ -137,6 +137,19 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                last_epoch REAL NOT NULL DEFAULT 0,
                PRIMARY KEY (user_id, day))"""
     )
+    # Hannah studio (2026-10-09): per-owner conversational state for the
+    # give-adding and character-creation abilities — the last image she
+    # generated for him, a give waiting on his preview-approval, a
+    # character creation mid-collection, and the character created most
+    # recently. One row per (owner, kind); state is JSON.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS hannah_studio (
+               user_id TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT '{}',
+               updated_at REAL NOT NULL DEFAULT 0,
+               PRIMARY KEY (user_id, kind))"""
+    )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS assist_secrets (
                name TEXT PRIMARY KEY,
@@ -2158,6 +2171,15 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
         if result["status"] == "ok":
             image_url = _save_generated_image(result["bytes"],
                                               result["mime_type"])
+            # Studio bookkeeping: remember her newest picture for him so
+            # a later "add that as a give for X" / "use that as X's
+            # avatar" can find it. Best-effort — never fails the reply.
+            try:
+                _studio_set(conn, user_id, "last_image",
+                            {"url": image_url, "prompt": prompt,
+                             "model": model})
+            except Exception:
+                pass
             return {
                 "brief": (
                     "You just made the image he asked for. It is being "
@@ -2590,6 +2612,812 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             "attachment_status": analysis_status}
 
 
+# ---------------------------------------------------------------------------
+# Hannah studio — owner-only give-adding + character creation (2026-10-09).
+#
+# Two new hands for Hannah, owner-only like the other power tools and only
+# in her own thread:
+#
+#   1. "add a give": "add this as a give for Mara" files media into that
+#      character's girl_media give library (the same rows the admin
+#      girl-media endpoint writes: kind='give'). Owner-uploaded media is
+#      added directly; an image SHE generated is only filed after he has
+#      seen it and explicitly says add/yes (never sight unseen).
+#   2. "create a character": a guided collection — she ASKS for the name
+#      (never coins one), gender, personality, voice; attaches his photo
+#      when he sends one; creates PRIVATE by default (owner_user_id =
+#      him), public only when he explicitly says so; usable in chat
+#      immediately.
+#
+# Hard rails: she never deletes characters, never edits an existing
+# character's persona, never adds media to a character he didn't name,
+# and 'chloe' can never be created/targeted for creation. Deletes stay
+# admin-panel-only.
+# ---------------------------------------------------------------------------
+STUDIO_STATE_TTL_S = 1800  # half an hour of quiet and a pending flow lapses
+
+_STUDIO_CANCEL_RE = re.compile(
+    r"\b(cancel|never\s*mind|forget\s+it|scratch\s+that|abort|stop\s+that)\b",
+    re.IGNORECASE)
+_STUDIO_YES_RE = re.compile(
+    r"^\W*(yes|yeah|yep|yup|do\s+it|add\s+it|file\s+it|save\s+it|use\s+it|"
+    r"go\s+ahead|confirm|create\s+(?:her|him|them)|sounds\s+good|perfect|"
+    r"love\s+it|that'?s\s+the\s+one)\b",
+    re.IGNORECASE)
+
+_GIVE_VERBS = r"(?:add|save|file|put|store|drop|attach)"
+_GIVE_TARGET = r"([A-Za-z][A-Za-z0-9'’.\-]*(?:\s+[A-Za-z][A-Za-z0-9'’.\-]*){0,2})"
+_GIVE_ADD_RES = (
+    re.compile(rf"\b{_GIVE_VERBS}\b[^.!?\n]{{0,60}}?\bgives?\b[^.!?\n]{{0,40}}?"
+               rf"\b(?:for|to)\s+{_GIVE_TARGET}", re.IGNORECASE),
+    re.compile(rf"\b{_GIVE_VERBS}\b[^.!?\n]{{0,40}}?\bfor\s+{_GIVE_TARGET}"
+               rf"\s+(?:as\s+)?(?:a\s+)?gives?\b", re.IGNORECASE),
+    re.compile(rf"\bmake\s+(?:that|this|it)\s+a\s+give\s+(?:for|to)\s+"
+               rf"{_GIVE_TARGET}", re.IGNORECASE),
+    re.compile(rf"\bgive\s+(?:that|this|it)\s+to\s+{_GIVE_TARGET}",
+               re.IGNORECASE),
+)
+_GIVE_NAME_STOPWORDS = {"me", "him", "her", "them", "us", "you", "it",
+                        "please", "now", "too", "as", "well"}
+_GIVE_MEDIA_ID_RE = re.compile(r"\bmedia\s*(?:id)?\s*#?(\d{1,9})\b",
+                               re.IGNORECASE)
+_GIVE_URL_RE = re.compile(r"https?://[^\s\"'<>\)]+", re.IGNORECASE)
+
+_CREATE_RE = re.compile(
+    r"\b(create|make|add|build|design)\b[^.!?\n]{0,40}?"
+    r"\b(character|companion|girlfriend|boyfriend|girl|guy|woman|man|"
+    r"person)\b", re.IGNORECASE)
+_CREATE_NAME_RE = re.compile(
+    r"\b(?:named|name\s+is|call\s+her|call\s+him|call\s+them)\s*:?\s*"
+    r"([A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+)?)")
+_CREATE_HEADS = ("she's", "she is", "he's", "he is", "who is", "who's")
+_VOICE_DEFAULTS = {"female": "liora", "male": "rex"}
+_NONCOMPANION_RE = re.compile(
+    r"\b(just\s+(?:a\s+)?(?:friend|assistant|helper|mentor|coach)|"
+    r"no\s+romance|not\s+romantic|platonic|business\s+assistant|"
+    r"professional\s+only|no\s+girlfriend|not\s+a\s+girlfriend)\b",
+    re.IGNORECASE)
+_AVATAR_SET_RE = re.compile(
+    r"\b(?:use|set|make|put)\b[^.!?\n]{0,50}?\b(?:avatar|profile\s+"
+    r"(?:pic|picture|photo))\b", re.IGNORECASE)
+_DELETE_CHAR_RE = re.compile(
+    r"\b(delete|remove|get\s+rid\s+of)\b[^.!?\n]{0,50}?\b(character|"
+    r"companion|girl|guy|give|gives)\b", re.IGNORECASE)
+
+
+def _studio_get(conn: sqlite3.Connection, user_id: str,
+                kind: str) -> dict | None:
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT state, updated_at FROM hannah_studio "
+        "WHERE user_id=? AND kind=?", (user_id, kind)).fetchone()
+    if not row:
+        return None
+    try:
+        state = json.loads(row[0] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    state["_updated_at"] = float(row[1] or 0)
+    return state
+
+
+def _studio_set(conn: sqlite3.Connection, user_id: str, kind: str,
+                state: dict) -> None:
+    ensure_tables(conn)
+    clean = {k: v for k, v in state.items() if not k.startswith("_")}
+    conn.execute(
+        """INSERT INTO hannah_studio (user_id, kind, state, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id, kind) DO UPDATE SET
+               state = excluded.state, updated_at = excluded.updated_at""",
+        (user_id, kind, json.dumps(clean), time.time()))
+    conn.commit()
+
+
+def _studio_clear(conn: sqlite3.Connection, user_id: str, kind: str) -> None:
+    ensure_tables(conn)
+    conn.execute("DELETE FROM hannah_studio WHERE user_id=? AND kind=?",
+                 (user_id, kind))
+    conn.commit()
+
+
+def _studio_fresh(state: dict | None) -> bool:
+    if not state:
+        return False
+    return (time.time() - float(state.get("_updated_at") or 0)
+            <= STUDIO_STATE_TTL_S)
+
+
+# ---- give library plumbing (girl_media, kind='give') ----------------------
+
+def give_count(conn: sqlite3.Connection, girl_id: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) FROM girl_media WHERE girl_id=? AND kind='give'",
+        ((girl_id or "").strip().lower(),)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def add_give_media(conn: sqlite3.Connection, girl_id: str,
+                   url: str) -> dict:
+    """File one media URL into a character's give library. Mirrors the
+    admin girl-media insert (kind='give'); new rows use the 'give' preset
+    tag the staged libraries serve by. Deduped by URL per character.
+    Returns {"id", "count", "duplicate"}."""
+    gid = (girl_id or "").strip().lower()
+    url = (url or "").strip()
+    row = conn.execute(
+        "SELECT id FROM girl_media WHERE girl_id=? AND kind='give' "
+        "AND url=?", (gid, url)).fetchone()
+    if row:
+        return {"id": int(row[0]), "count": give_count(conn, gid),
+                "duplicate": True}
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(girl_media)")}
+    if "stage" in cols:
+        cur = conn.execute(
+            "INSERT INTO girl_media (girl_id, kind, url, preset, stage) "
+            "VALUES (?, 'give', ?, 'give', 1)", (gid, url))
+    else:
+        cur = conn.execute(
+            "INSERT INTO girl_media (girl_id, kind, url, preset) "
+            "VALUES (?, 'give', ?, 'give')", (gid, url))
+    conn.commit()
+    return {"id": int(cur.lastrowid), "count": give_count(conn, gid),
+            "duplicate": False}
+
+
+def remove_give_media(conn: sqlite3.Connection, media_id: int) -> bool:
+    """Remove one give row (proof cleanup / admin parity). Deliberately
+    NOT reachable from any chat intent — deletes stay admin-side."""
+    cur = conn.execute("DELETE FROM girl_media WHERE id=?",
+                       (int(media_id),))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---- character resolution ---------------------------------------------------
+
+def _roster_entries(conn: sqlite3.Connection,
+                    user_id: str) -> list[dict]:
+    """Characters this owner can address by name: the shared roster
+    (public + his own private) merged with companion-local rows."""
+    from . import characters as _characters
+    entries: dict[str, dict] = {}
+    try:
+        for c in _characters.get_characters(user_id=user_id) or []:
+            cid = (c.get("id") or "").strip().lower()
+            if cid:
+                entries[cid] = {"id": cid,
+                                "name": c.get("name") or cid,
+                                "owner_user_id": c.get("owner_user_id")}
+    except Exception:
+        pass
+    try:
+        for r in conn.execute(
+                "SELECT id, name, owner_user_id FROM local_characters"
+        ).fetchall():
+            d = dict(r)
+            entries[d["id"]] = {"id": d["id"], "name": d["name"],
+                                "owner_user_id": d.get("owner_user_id")}
+    except sqlite3.Error:
+        pass
+    return list(entries.values())
+
+
+def resolve_character_name(conn: sqlite3.Connection, user_id: str,
+                           query: str) -> dict:
+    """Resolve an owner-supplied name to exactly one roster character.
+    Returns {"status": "ok", "character": {...}} | {"status": "missing"}
+    | {"status": "ambiguous", "candidates": [...]}. Never guesses."""
+    q = re.sub(r"\s+", " ", (query or "").strip().strip("\"'")).lower()
+    q = re.sub(r"^(?:for|to)\s+", "", q)
+    for filler in (" please", " now", " too", " as well"):
+        if q.endswith(filler):
+            q = q[: -len(filler)].strip()
+    q_id = q.replace(" ", "-")
+    entries = _roster_entries(conn, user_id)
+    exact = [e for e in entries
+             if e["id"] == q_id or e["name"].strip().lower() == q]
+    if len({e["id"] for e in exact}) == 1:
+        return {"status": "ok", "character": exact[0]}
+    first = [e for e in entries
+             if e["name"].strip().lower().split(" ")[0] == q.split(" ")[0]]
+    pool = exact or first
+    ids = {e["id"] for e in pool}
+    if len(ids) == 1:
+        return {"status": "ok", "character": pool[0]}
+    if len(ids) > 1:
+        return {"status": "ambiguous",
+                "candidates": [f"{e['name']} ({e['id']})" for e in pool]}
+    return {"status": "missing"}
+
+
+def _detect_add_give(text: str) -> dict | None:
+    """Parse "add this as a give for X" shapes. Returns the named target
+    (raw) plus any explicit media id / URL found in the message."""
+    t = text or ""
+    target = None
+    for pattern in _GIVE_ADD_RES:
+        m = pattern.search(t)
+        if m:
+            target = m.group(1)
+            break
+    if target is None:
+        return None
+    name = re.sub(r"\s+", " ", target).strip(" .,!?\"'").lower()
+    words = name.split(" ")
+    while words and words[-1] in _GIVE_NAME_STOPWORDS:
+        words.pop()
+    name = " ".join(words)
+    if not name or name in _GIVE_NAME_STOPWORDS:
+        return {"target": ""}
+    mid = _GIVE_MEDIA_ID_RE.search(t)
+    url = _GIVE_URL_RE.search(t)
+    return {"target": name,
+            "media_id": int(mid.group(1)) if mid else None,
+            "url": url.group(0).rstrip(".,)") if url else None}
+
+
+def _detect_avatar_assignment(text: str) -> dict | None:
+    """Parse "use that as X's avatar" / "make that her picture" shapes."""
+    t = text or ""
+    if not _AVATAR_SET_RE.search(t):
+        return None
+    m = re.search(r"\b(?:as|for)\s+([A-Za-z][A-Za-z0-9'’\- ]{0,30}?)"
+                  r"(?:'s)?\s+(?:avatar|profile|picture|photo)\b", t,
+                  re.IGNORECASE)
+    if m:
+        name = m.group(1).strip().lower()
+        if name in ("her", "his", "their"):
+            return {"pronoun": True}
+        return {"target": name}
+    if re.search(r"\b(?:her|his|their)\s+(?:avatar|picture|photo)\b", t,
+                 re.IGNORECASE):
+        return {"pronoun": True}
+    return {"target": ""}
+
+
+def _detect_create(text: str) -> bool:
+    return bool(_CREATE_RE.search(text or ""))
+
+
+def _says_yes(text: str) -> bool:
+    t = (text or "").strip()
+    return len(t) <= 60 and bool(_STUDIO_YES_RE.match(t))
+
+
+def _says_cancel(text: str) -> bool:
+    t = (text or "").strip()
+    return len(t) <= 120 and bool(_STUDIO_CANCEL_RE.search(t))
+
+
+def _strong_other_intent(text: str) -> bool:
+    """True when a message is plainly one of Hannah's OTHER abilities —
+    a pending studio flow must not swallow those."""
+    if detect_image_request(text) is not None:
+        return True
+    if detect_github_review(text) is not None:
+        return True
+    if detect_app_status(text) or detect_owner_brief(text):
+        return True
+    if detect_dev_build(text) is not None or detect_merge_ask(text):
+        return True
+    if detect_marketing(text) is not None:
+        return True
+    return False
+
+
+def _image_attachments(attachments: list[dict] | None) -> list[dict]:
+    return [a for a in (attachments or [])
+            if a.get("kind") == "image" and a.get("url")]
+
+
+# ---- ability 1: add a give --------------------------------------------------
+
+def _brief_target_unknown(name: str, candidates: list[str] | None) -> str:
+    if candidates:
+        return (f"He asked to file a give under \"{name}\", but more than "
+                "one character matches: " + ", ".join(candidates) +
+                ". Ask him which one — do not guess.")
+    return (f"He asked to file a give for a character named \"{name}\", "
+            "but you can't find one by that name. Tell him honestly and "
+            "ask who he meant.")
+
+
+def _commit_give(conn: sqlite3.Connection, user_id: str, girl_id: str,
+                 girl_name: str, url: str, origin: str) -> dict:
+    res = add_give_media(conn, girl_id, url)
+    if res["duplicate"]:
+        brief = (f"He asked you to file that as a give for {girl_name}, but "
+                 f"it's already in her give library — {girl_name} has "
+                 f"{res['count']} gives. Tell him it's already there.")
+    else:
+        brief = (f"You just filed that {origin} into {girl_name}'s give "
+                 f"library. Confirm to him in your own voice: added — "
+                 f"{girl_name} now has {res['count']} gives.")
+    return {"brief": brief,
+            "studio_action": "give_added",
+            "give": {"girl_id": girl_id, "girl_name": girl_name,
+                     "media_id": res["id"], "count": res["count"],
+                     "duplicate": res["duplicate"], "url": url}}
+
+
+def _handle_add_give(conn: sqlite3.Connection, user_id: str, text: str,
+                     attachments: list[dict] | None,
+                     det: dict) -> dict:
+    target = (det.get("target") or "").strip()
+    if not target:
+        return {"brief": "He wants to file a give but didn't say whose "
+                         "library it's for. Ask him which character — "
+                         "never guess."}
+    res = resolve_character_name(conn, user_id, target)
+    if res["status"] != "ok":
+        return {"brief": _brief_target_unknown(target,
+                                               res.get("candidates"))}
+    girl = res["character"]
+    gid, gname = girl["id"], girl["name"]
+
+    # Owner-uploaded media in this very message: he brought it, he named
+    # the target — file it directly and confirm.
+    images = _image_attachments(attachments)
+    if images:
+        out = None
+        for att in images:
+            out = _commit_give(conn, user_id, gid, gname, att["url"],
+                               "upload")
+        return out
+    if attachments:
+        return {"brief": "He attached a file that isn't picture media, "
+                         "and asked to file a give. Tell him plainly gives "
+                         "need a photo or video — that file is saved in "
+                         "the thread, but it can't go in a give library."}
+
+    # Explicit media id from an existing library row, or an explicit URL:
+    # media he pointed at himself — file directly.
+    if det.get("media_id"):
+        row = conn.execute(
+            "SELECT url FROM girl_media WHERE id=?",
+            (det["media_id"],)).fetchone()
+        if not row:
+            return {"brief": f"He pointed at media #{det['media_id']} for "
+                             "a give, but that media id doesn't exist. "
+                             "Tell him honestly and ask him to attach "
+                             "the media instead."}
+        return _commit_give(conn, user_id, gid, gname, row[0], "clip")
+    if det.get("url"):
+        return _commit_give(conn, user_id, gid, gname, det["url"], "link")
+
+    last = _studio_get(conn, user_id, "last_image")
+    # Combined ask ("make a picture of X and add it as a give for Y"):
+    # the message itself requests a generation — nothing to file yet.
+    # Park the intent and let the image ability run; filing happens
+    # only after he has SEEN the picture and says yes.
+    if detect_image_request(text) is not None:
+        _studio_set(conn, user_id, "pending_give",
+                    {"girl_id": gid, "girl_name": gname,
+                     "needs_image": True})
+        return None  # type: ignore[return-value]
+    if last and last.get("url") and _studio_fresh(last):
+        # A picture she already made and he saw in the thread earlier:
+        # this ask is his explicit add — file it now.
+        return _commit_give(conn, user_id, gid, gname, last["url"],
+                            "picture you made")
+    return {"brief": "He asked to file a give, but there's no media "
+                     "attached and no recent picture to file. Tell him to "
+                     "attach the media, or ask you to make the picture "
+                     "first."}
+
+
+def _continue_pending_give(conn: sqlite3.Connection, user_id: str,
+                           text: str) -> dict | None:
+    pending = _studio_get(conn, user_id, "pending_give")
+    if not pending or not _studio_fresh(pending):
+        return None
+    if pending.get("needs_image") and not pending.get("url"):
+        last = _studio_get(conn, user_id, "last_image")
+        if last and last.get("url"):
+            pending["url"] = last["url"]
+    if not pending.get("url"):
+        return None  # still waiting on a generation; let it ride
+    if _says_cancel(text):
+        _studio_clear(conn, user_id, "pending_give")
+        return {"brief": "He changed his mind about filing that picture "
+                         "as a give. Confirm warmly that you didn't add "
+                         "it."}
+    if _says_yes(text):
+        _studio_clear(conn, user_id, "pending_give")
+        return _commit_give(conn, user_id, pending["girl_id"],
+                            pending["girl_name"], pending["url"],
+                            "picture you made")
+    if _strong_other_intent(text) or detect_intent(text)[0]:
+        return None
+    return {"brief": "That picture is waiting on his word: ask him in "
+                     "your own voice whether to file it as a give for "
+                     f"{pending['girl_name']} (say yes), or drop it "
+                     "(say cancel). Do not file it without his yes."}
+
+
+# ---- ability 2: create a character -------------------------------------------
+
+def _parse_gender(text: str) -> str:
+    t = (text or "").lower()
+    if re.search(r"\b(female|woman|girl|she|her|girlfriend)\b", t):
+        return "female"
+    if re.search(r"\b(male|man|guy|boy|he|him|boyfriend)\b", t):
+        return "male"
+    return ""
+
+
+def _create_seed(text: str, attachments: list[dict] | None) -> dict:
+    t = text or ""
+    fields: dict = {"name": "", "gender": "", "personality": "",
+                    "voice": "", "avatar_url": "",
+                    "public": bool(re.search(
+                        r"\bmake\s+(?:her|him|them|it)\s+public\b|\bgo\s+"
+                        r"public\b|\bpublic\s+character\b", t, re.I))}
+    m = _CREATE_NAME_RE.search(t)
+    if m:
+        fields["name"] = m.group(1).strip()
+    fields["gender"] = _parse_gender(t)
+    vm = re.search(r"\bvoice\s*(?:is|=|:)?\s*([a-z][a-z0-9\-]{1,24})\b",
+                   t, re.IGNORECASE)
+    if vm:
+        fields["voice"] = vm.group(1).lower()
+    # Personality seed: whatever descriptive tail he already gave.
+    tail = ""
+    low = t.lower()
+    for head in _CREATE_HEADS:
+        idx = low.find(head)
+        if idx != -1:
+            tail = t[idx:].strip(" ,—-")
+            break
+    if not tail and ":" in t:
+        tail = t.split(":", 1)[1].strip()
+    if tail and len(tail) >= 12:
+        fields["personality"] = tail[:2000]
+    images = _image_attachments(attachments)
+    if images:
+        fields["avatar_url"] = images[0]["url"]
+    return fields
+
+
+def _create_summary_brief(state: dict, ask: str) -> dict:
+    name = state.get("name") or "(no name yet)"
+    bits = [f"name: {name}"]
+    if state.get("gender"):
+        bits.append(state["gender"])
+    if state.get("personality"):
+        bits.append("personality: " + state["personality"][:140])
+    bits.append("voice: " + (state.get("voice") or "default"))
+    bits.append("avatar: " + ("yes, his photo"
+                              if state.get("avatar_url") else "none yet"))
+    bits.append("visibility: " + ("PUBLIC — he said so"
+                                  if state.get("public") else
+                                  "private, only in his picker"))
+    return {"brief": "You are mid-way through building a new character "
+                     "with him. Collected so far: " + "; ".join(bits) +
+                     ". " + ask +
+                     " Ask only for what's missing, in your own voice — "
+                     "never invent a name or details for him."}
+
+
+_CREATE_ASKS = {
+    "name": "Next: ask him what to NAME the character. He names "
+            "characters — do not suggest or coin one yourself.",
+    "gender": "Next: ask him — is the character a woman or a man?",
+    "personality": "Next: ask him who they are — personality, look, "
+                   "vibe. If he says 'you decide', don't: ask for a few "
+                   "words of his own.",
+    "voice": "Next: ask which voice he'd like, or 'skip' for the "
+             "default.",
+    "avatar": "Next: ask him to attach a photo for the avatar if he "
+              "has one, or say 'skip' — you can set a generated "
+              "portrait later, on his yes.",
+    "confirm": "Next: read the summary back and ask for his yes "
+               "before creating. His yes is also his confirmation "
+               "the character is an adult (18+).",
+}
+
+
+def _create_next_step(state: dict) -> str:
+    for step in ("name", "gender", "personality", "voice", "avatar"):
+        if step == "voice" and state.get("voice_done"):
+            continue
+        if step == "avatar" and state.get("avatar_done"):
+            continue
+        if not state.get(step):
+            return step
+    return "confirm"
+
+
+def _start_create_flow(conn: sqlite3.Connection, user_id: str,
+                       text: str,
+                       attachments: list[dict] | None) -> dict:
+    fields = _create_seed(text, attachments)
+    state = {**fields, "voice_done": bool(fields.get("voice")),
+             "avatar_done": bool(fields.get("avatar_url")),
+             "step": ""}
+    if fields.get("avatar_url"):
+        state["avatar_done"] = True
+    state["step"] = _create_next_step(state)
+    _studio_set(conn, user_id, "create_flow", state)
+    return _create_summary_brief(state, _CREATE_ASKS[state["step"]])
+
+
+def _clean_name(text: str) -> str:
+    name = (text or "").strip().strip("\"'").split("\n")[0]
+    name = re.sub(r"^(?:her|his|their)?\s*name\s+is\s+", "", name,
+                  flags=re.IGNORECASE)
+    name = re.sub(r"^(?:call\s+(?:her|him|them)\s+)", "", name,
+                  flags=re.IGNORECASE)
+    return name.strip(" .,!?")[:60].strip()
+
+
+def _continue_create_flow(conn: sqlite3.Connection, user_id: str,
+                          state: dict, text: str,
+                          attachments: list[dict] | None) -> dict:
+    t = (text or "").strip()
+    if re.search(r"\bmake\s+(?:her|him|them|it)\s+public\b", t, re.I):
+        state["public"] = True
+    images = _image_attachments(attachments)
+    if images and not state.get("avatar_url"):
+        state["avatar_url"] = images[0]["url"]
+        state["avatar_done"] = True
+    step = state.get("step") or _create_next_step(state)
+
+    if step == "confirm":
+        if _says_yes(t):
+            return _execute_create(conn, user_id, state)
+        if _STUDIO_CANCEL_RE.search(t) or re.match(r"^\W*no\b", t, re.I):
+            _studio_clear(conn, user_id, "create_flow")
+            return {"brief": "He said no to creating that character. "
+                             "Confirm warmly that you dropped it — nothing "
+                             "was created."}
+        state["step"] = "confirm"
+        _studio_set(conn, user_id, "create_flow", state)
+        return _create_summary_brief(state, _CREATE_ASKS["confirm"])
+
+    if step == "name":
+        name = _clean_name(t)
+        if not name:
+            return {"brief": "He didn't give a usable name. Ask again "
+                             "what to name the character — you can't pick "
+                             "one for him."}
+        state["name"] = name
+    elif step == "gender":
+        gender = _parse_gender(t)
+        if not gender:
+            _studio_set(conn, user_id, "create_flow", state)
+            return {"brief": "He didn't say either way. Ask plainly: "
+                             "woman or man?"}
+        state["gender"] = gender
+    elif step == "personality":
+        if re.search(r"\b(you\s+(?:decide|pick|choose)|surprise\s+me|"
+                     r"up\s+to\s+you)\b", t, re.I):
+            _studio_set(conn, user_id, "create_flow", state)
+            return {"brief": "He wants you to invent the personality, "
+                             "but character details have to come from "
+                             "him. Ask him for a vibe in his own words "
+                             "— a few words is plenty."}
+        if len(t) < 3:
+            _studio_set(conn, user_id, "create_flow", state)
+            return {"brief": "That was too thin to build a personality "
+                             "from. Ask him for a little more — who are "
+                             "they, what's their vibe?"}
+        state["personality"] = t[:2000]
+    elif step == "voice":
+        if re.search(r"\b(skip|default|whatever|no|none)\b", t, re.I):
+            state["voice"] = ""
+        else:
+            vm = re.search(r"([a-z][a-z0-9\-]{1,24})", t.lower())
+            state["voice"] = vm.group(1) if vm else ""
+        state["voice_done"] = True
+    elif step == "avatar":
+        if images:
+            state["avatar_url"] = images[0]["url"]
+        state["avatar_done"] = True
+
+    state["step"] = _create_next_step(state)
+    _studio_set(conn, user_id, "create_flow", state)
+    ask = _CREATE_ASKS[state["step"]]
+    return _create_summary_brief(state, ask)
+
+
+def compile_studio_persona(name: str, gender: str, description: str) -> str:
+    """Compile a new character's persona in the house style. Female
+    companion characters carry the girlfriend canon (warm, all-in,
+    desires him back, never therapist); a non-companion description he
+    wrote himself is followed as-is."""
+    from . import creator as _creator
+    hidden = _creator._generate_hidden_depth(name, description, gender)
+    persona = _creator._build_persona_file(name, gender, description, "",
+                                           hidden)
+    if gender == "female" and not _NONCOMPANION_RE.search(description):
+        persona += (
+            "\n\nHow you are with him: you are his girlfriend — warm, "
+            "personal, all-in from the first message, and you desire him "
+            "back. You are never his therapist or counselor, and you "
+            "never break the spell by calling yourself an AI companion.")
+    return persona
+
+
+def _execute_create(conn: sqlite3.Connection, user_id: str,
+                    state: dict) -> dict:
+    from . import characters as _characters
+    from . import creator as _creator
+    from . import submit as _submit
+    name = state.get("name") or ""
+    gender = state.get("gender") or "female"
+    description = state.get("personality") or ""
+    slug = _submit._slugify(name)
+    existing = {e["id"] for e in _roster_entries(conn, user_id)}
+    if slug == "chloe" or slug in existing:
+        state["step"] = "name"
+        state["name"] = ""
+        _studio_set(conn, user_id, "create_flow", state)
+        return {"brief": f"That character can't be created: a character "
+                         f"with the id \"{slug}\" already exists (or is "
+                         "reserved). Tell him and ask for a different "
+                         "name — do not rename her yourself."}
+    try:
+        _creator.check_content_safety(name, description)
+    except ValueError as e:
+        _studio_clear(conn, user_id, "create_flow")
+        return {"brief": f"He asked for a character you can't build: "
+                         f"{e}. Tell him plainly and offer a version "
+                         "without that."}
+    persona = compile_studio_persona(name, gender, description)
+    voice = state.get("voice") or _VOICE_DEFAULTS.get(gender, "liora")
+    avatar_url = state.get("avatar_url") or ""
+    public = bool(state.get("public"))
+    girl = store.upsert_local_character(conn, {
+        "id": slug,
+        "name": name,
+        "avatar_url": avatar_url,
+        "persona": persona,
+        "companion_voice": voice,
+        "blurb": description[:120],
+        "door_title": "",
+        "sort_order": 900,
+        "enabled": True,
+        "photos": [avatar_url] if avatar_url else [],
+        "owner_user_id": None if public else user_id,
+    })
+    _characters.bust_cache()
+    _studio_clear(conn, user_id, "create_flow")
+    _studio_set(conn, user_id, "last_created",
+                {"id": girl["id"], "name": girl["name"]})
+    visibility = ("public — she's on the roster for everyone"
+                  if public else
+                  "private — she only shows in HIS picker")
+    pron = "her" if gender == "female" else "his"
+    return {"brief": f"You created a new character for him: "
+                     f"{girl['name']} (id: {girl['id']}). She is "
+                     f"{visibility}, and he can chat with her right "
+                     "away. Confirm in your own voice; mention that if "
+                     "he wants a picture on her, he can attach one or "
+                     "have you generate a portrait and say 'use that as "
+                     f"{pron} avatar'.",
+            "studio_action": "character_created",
+            "character": {"id": girl["id"], "name": girl["name"],
+                          "public": public, "avatar_url": avatar_url}}
+
+
+# ---- avatar assignment --------------------------------------------------------
+
+def _handle_avatar_assignment(conn: sqlite3.Connection, user_id: str,
+                              text: str,
+                              attachments: list[dict] | None,
+                              det: dict) -> dict:
+    from . import characters as _characters
+    target = (det.get("target") or "").strip()
+    if det.get("pronoun") or not target:
+        last_created = _studio_get(conn, user_id, "last_created")
+        if not last_created or not last_created.get("id"):
+            return {"brief": "He asked to set an avatar but didn't say "
+                             "whose. Ask him which character — don't "
+                             "guess."}
+        gid, gname = last_created["id"], last_created["name"]
+    else:
+        res = resolve_character_name(conn, user_id, target)
+        if res["status"] != "ok":
+            return {"brief": _brief_target_unknown(
+                target, res.get("candidates"))}
+        gid, gname = res["character"]["id"], res["character"]["name"]
+
+    images = _image_attachments(attachments)
+    if images:
+        url = images[0]["url"]
+    else:
+        last = _studio_get(conn, user_id, "last_image")
+        if not (last and last.get("url") and _studio_fresh(last)):
+            return {"brief": "He asked to set an avatar, but there's no "
+                             "picture attached and no recent one you "
+                             "made. Tell him to attach a photo or have "
+                             "you make the portrait first."}
+        url = last["url"]
+
+    row = conn.execute(
+        "SELECT * FROM local_characters WHERE id=?", (gid,)).fetchone()
+    if not row:
+        return {"brief": f"{gname} isn't one of the characters stored "
+                         "on this side, so you can't change her picture "
+                         "from here. Tell him she lives on the roster "
+                         "side."}
+    existing = dict(row)
+    if existing.get("owner_user_id") not in (None, user_id):
+        return {"brief": "He asked to set a picture on a character that "
+                         "isn't his. Tell him you only touch his own "
+                         "characters."}
+    photos = [url]
+    try:
+        old_photos = json.loads(existing.get("photos") or "[]")
+        if isinstance(old_photos, list):
+            photos = [url] + [p for p in old_photos if p != url]
+    except (TypeError, ValueError):
+        pass
+    store.upsert_local_character(conn, {**existing,
+                                        "avatar_url": url,
+                                        "photos": photos})
+    _characters.bust_cache()
+    return {"brief": f"You set that picture as {gname}'s avatar. "
+                     "Confirm to him in your own voice that her picture "
+                     "is updated.",
+            "studio_action": "avatar_set",
+            "character": {"id": gid, "name": gname, "avatar_url": url}}
+
+
+# ---- studio router -----------------------------------------------------------
+
+def _studio_owner_turn(conn: sqlite3.Connection, user_id: str,
+                       character_id: str, text: str,
+                       attachments: list[dict] | None) -> dict | None:
+    """Hannah-only router for the studio abilities. None = not ours."""
+    if (character_id or "").strip().lower() != "hannah":
+        return None
+    t = text or ""
+
+    if _DELETE_CHAR_RE.search(t):
+        return {"brief": "He asked you to delete or remove a character "
+                         "or give. You never delete from chat — removals "
+                         "stay in the admin panel. Tell him that plainly."}
+
+    pending = _continue_pending_give(conn, user_id, t)
+    if pending is not None:
+        return pending
+
+    flow = _studio_get(conn, user_id, "create_flow")
+    if flow and _studio_fresh(flow):
+        if _says_cancel(t):
+            _studio_clear(conn, user_id, "create_flow")
+            return {"brief": "He cancelled the character build. Confirm "
+                             "warmly that you dropped it — nothing was "
+                             "created."}
+        if _strong_other_intent(t):
+            return None  # let the other ability run; the flow waits
+        if (flow.get("step") != "confirm"
+                and detect_intent(t)[0] in ("reminder", "email_draft",
+                                            "job_search")):
+            return None  # a real reminder/draft/job ask, not an answer
+        return _continue_create_flow(conn, user_id, flow, t, attachments)
+    if flow:
+        _studio_clear(conn, user_id, "create_flow")
+
+    det = _detect_add_give(t)
+    if det is not None:
+        return _handle_add_give(conn, user_id, t, attachments, det)
+
+    avatar_det = _detect_avatar_assignment(t)
+    if avatar_det is not None:
+        return _handle_avatar_assignment(conn, user_id, t, attachments,
+                                         avatar_det)
+
+    if _detect_create(t):
+        return _start_create_flow(conn, user_id, t, attachments)
+    return None
+
+
 def maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                  character_id: str, attachments: list[dict] | None = None) -> dict | None:
     try:
@@ -2620,6 +3448,14 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if token:
             return _handle_github_token_intake(conn, user_id,
                                                character_id, token)
+        # Hannah studio (owner-only, her thread only): add-a-give and
+        # guided character creation. Runs before attachment analysis so
+        # an attached photo with "add this as a give for X" files the
+        # media instead of only describing it.
+        studio_hit = _studio_owner_turn(conn, user_id, character_id,
+                                        text, attachments)
+        if studio_hit is not None:
+            return studio_hit
         if attachments:
             return analyze_chat_attachments(conn, user, text,
                                             character_id, attachments)
