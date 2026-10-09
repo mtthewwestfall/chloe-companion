@@ -2696,10 +2696,12 @@ _SOGNI_PLAN_DURATION = 6
 _SOGNI_PLAN_FPS = 24
 _SOGNI_PLAN_BILLING_MODE = "subscription"
 
-_SOGNI_LOGIN_RE = re.compile(
-    r"\bsogni\s+login\b\s*[:\-]?\s*"
-    r"(?!(?:sogni|login)\b)(\S+)\s+(?!(?:sogni|login)\b)(\S+)",
-    re.IGNORECASE)
+_SOGNI_TRIGGER_RE = re.compile(r"\bsogni\s+log\s?in\b", re.IGNORECASE)
+_CRED_WRAP_CHARS = "<>[]{}()\"'`"
+_CRED_LABEL_TOKENS = frozenset({
+    "sogni", "login", "log", "in", "username", "user", "password",
+    "pass", "pwd", "account", "email", "e-mail",
+})
 _SOGNI_LOGOUT_RE = re.compile(
     r"\b(forget|delete|remove|wipe|drop|sign\s*out|log\s*out)\b"
     r"[^.!?]{0,30}\bsogni\b"
@@ -2737,10 +2739,19 @@ _SOGNI_NO_SESSION_REPLY = (
 
 
 class _SogniPlanError(Exception):
-    """Failure whose kind she can report honestly, as-is."""
+    """Failure whose kind she can report honestly, as-is.
 
-    def __init__(self, kind: str, detail: str = ""):
+    The stage/status/error_code fields are log telemetry only: they
+    say WHERE the sign-in died (client create, nonce, login POST,
+    token backup) and what Sogni answered, never anything about the
+    credentials themselves."""
+
+    def __init__(self, kind: str, detail: str = "", *,
+                 stage: str = "", status=None, error_code=None):
         self.kind = kind
+        self.stage = stage
+        self.status = status
+        self.error_code = error_code
         super().__init__(detail or kind)
 
 
@@ -2768,20 +2779,42 @@ def detect_sogni_video_request(text: str) -> str | None:
     return subject.strip(" \t\r\n.!?")[:1000]
 
 
+def _clean_cred_token(tok: str) -> str:
+    """One pasted credential token, unwrapped: <u> / "u" / [u] -> u."""
+    t = (tok or "").strip().strip(_CRED_WRAP_CHARS)
+    return t.strip(",;:").strip(_CRED_WRAP_CHARS)
+
+
+def _cred_after_trigger(rest: str) -> list[str]:
+    """Credential values after the trigger words: labels, separators,
+    and wrapping punctuation dropped; the values themselves in order."""
+    values: list[str] = []
+    for raw in (rest or "").split():
+        tok = _clean_cred_token(raw)
+        if not tok or tok.lower() in _CRED_LABEL_TOKENS:
+            continue
+        values.append(tok)
+    return values
+
+
 def extract_sogni_login(text: str) -> tuple[str, str] | None:
     """The (username, password) from a "sogni login ..." message.
 
-    Takes the last well-formed match, so a lead-in like "here's my
-    sogni login: sogni login <u> <p>" resolves to the real pair
-    instead of swallowing the lead-in words as credentials."""
+    The trigger is "sogni login" or "sogni log in" (any case); labels
+    ("username:"/"password -") and wrapping brackets or quotes on the
+    values are stripped, so the pair that reaches the sign-in is the
+    one he actually typed. Takes the last well-formed match, so a
+    lead-in like "here's my sogni login: sogni login <u> <p>"
+    resolves to the real pair instead of swallowing the lead-in
+    words as credentials."""
     found: tuple[str, str] | None = None
-    for m in _SOGNI_LOGIN_RE.finditer(text or ""):
-        user, pw = m.group(1), m.group(2)
-        if user.lower() in ("sogni", "login") or \
-                pw.lower() in ("sogni", "login") or \
-                user.endswith(":"):
-            continue
-        found = (user, pw)
+    for m in _SOGNI_TRIGGER_RE.finditer(text or ""):
+        values = _cred_after_trigger((text or "")[m.end():])
+        if len(values) >= 2:
+            user, pw = values[0], values[1]
+            if _cred_value_ok(user) and _cred_value_ok(pw) \
+                    and user != pw:
+                found = (user, pw)
     return found
 
 
@@ -2795,11 +2828,14 @@ _SOGNI_CRED_STOPWORDS = frozenset({
     "the", "a", "an", "my", "your", "his", "her", "is", "it", "in",
     "on", "for", "to", "and", "or", "with", "me", "this", "that",
 })
+# The label must stand alone (start or after whitespace): a hyphen
+# before it means it's a segment of a hyphenated credential, not a
+# label ("CANARY-pw-9142" is a password, not "pw: 9142").
 _SOGNI_USER_LABEL_RE = re.compile(
-    r"\b(?:e-?mail|user(?:name)?|login|account)\b\s*"
+    r"(?<![A-Za-z0-9-])(?:e-?mail|user(?:name)?|login|account)\b\s*"
     r"(?:is\s+)?[:\-=]?\s*([^\s,;]+)", re.IGNORECASE)
 _SOGNI_PASS_LABEL_RE = re.compile(
-    r"\b(?:pass(?:word)?|pwd|pw)\b\s*"
+    r"(?<![A-Za-z0-9-])(?:pass(?:word)?|pwd|pw)\b\s*"
     r"(?:is\s+)?[:\-=]?\s*([^\s,;]+)", re.IGNORECASE)
 _SOGNI_PAIR_SLASH_RE = re.compile(r"^([^\s/:,;]+)\s*/\s*(\S+)$")
 _SOGNI_PAIR_COMMA_RE = re.compile(r"^([^\s/:,;]+)\s*[,;]\s*(\S+)$")
@@ -2807,8 +2843,44 @@ _SOGNI_PAIR_WORDS_RE = re.compile(r"^(\S+)\s+(\S+)$")
 
 
 def _cred_value_ok(value: str) -> bool:
-    v = (value or "").strip().strip("<>\"'")
+    v = _clean_cred_token(value or "")
     return len(v) >= 2 and v.lower() not in _SOGNI_CRED_STOPWORDS
+
+
+def _extract_labeled_sogni_login(text: str) -> tuple[str, str] | None:
+    """A pair named by BOTH labels ("username- X password - Y",
+    "user: X pass: Y", "my username is X and my password is Y").
+    Unambiguous on its own — no Sogni context needed."""
+    um = _SOGNI_USER_LABEL_RE.search(text or "")
+    pm = _SOGNI_PASS_LABEL_RE.search(text or "")
+    if not (um and pm) or um.span() == pm.span():
+        return None
+    user = _clean_cred_token(um.group(1))
+    pw = _clean_cred_token(pm.group(1))
+    if _cred_value_ok(user) and _cred_value_ok(pw) and user != pw:
+        return (user, pw)
+    return None
+
+
+def detect_sogni_login_attempt(text: str) -> bool:
+    """Credential-shaped paste even when no pair could be extracted.
+
+    A login message that cannot be parsed must still be scrubbed —
+    never left sitting in the stored thread — so the intake can claim
+    it, mask it, and answer honestly that the sign-in didn't take."""
+    t = text or ""
+    m = _SOGNI_TRIGGER_RE.search(t)
+    if m:
+        rest = t[m.end():]
+        # Value tokens after the trigger, or even just label words
+        # ("sogni login username password" — he was clearly pasting
+        # a login, it just carried nothing usable).
+        if _cred_after_trigger(rest) or any(
+                _clean_cred_token(tok).lower() in _CRED_LABEL_TOKENS
+                for tok in rest.split()):
+            return True
+    return bool(_SOGNI_USER_LABEL_RE.search(t)
+                and _SOGNI_PASS_LABEL_RE.search(t))
 
 
 def extract_sogni_login_forgiving(text: str, *, context: bool,
@@ -2826,23 +2898,27 @@ def extract_sogni_login_forgiving(text: str, *, context: bool,
     t = (text or "").strip()
     if not t:
         return None
-    um = _SOGNI_USER_LABEL_RE.search(t)
-    pm = _SOGNI_PASS_LABEL_RE.search(t)
-    if um and pm and um.span() != pm.span():
-        user = um.group(1).strip("<>\"'")
-        pw = pm.group(1).strip("<>\"'")
-        if _cred_value_ok(user) and _cred_value_ok(pw) and user != pw:
-            return (user, pw)
+    labeled = _extract_labeled_sogni_login(t)
+    if labeled:
+        return labeled
     if not (context or topic_open):
         return None
     for rx in (_SOGNI_PAIR_SLASH_RE, _SOGNI_PAIR_COMMA_RE):
         m = rx.match(t)
-        if m and _cred_value_ok(m.group(1)) and _cred_value_ok(m.group(2)):
-            return (m.group(1), m.group(2))
+        if m:
+            pair = (_clean_cred_token(m.group(1)),
+                    _clean_cred_token(m.group(2)))
+            if _cred_value_ok(pair[0]) and _cred_value_ok(pair[1]) \
+                    and pair[0] != pair[1]:
+                return pair
     if topic_open:
         m = _SOGNI_PAIR_WORDS_RE.match(t)
-        if m and _cred_value_ok(m.group(1)) and _cred_value_ok(m.group(2)):
-            return (m.group(1), m.group(2))
+        if m:
+            pair = (_clean_cred_token(m.group(1)),
+                    _clean_cred_token(m.group(2)))
+            if _cred_value_ok(pair[0]) and _cred_value_ok(pair[1]) \
+                    and pair[0] != pair[1]:
+                return pair
     return None
 
 
@@ -2923,23 +2999,60 @@ async def _sogni_plan_login_async(login: tuple[str, str]) -> dict:
 
     REST-only client (no socket needed to sign in). The login pair
     travels as one opaque intake value and the password half never
-    leaves this call; only the session token pair comes back."""
+    leaves this call; only the session token pair comes back.
+
+    Failures raise _SogniPlanError carrying sanitized telemetry
+    (stage, SDK error class/status/code) so the intake can log WHERE
+    it died. A thin recorder around the REST post notes which call
+    the SDK is on — it raises the same ApiError shape for the nonce
+    and the login POST, so the stage is otherwise indistinguishable.
+    Nothing credential-shaped is ever attached to the error."""
     from sogni_client import SogniClient
 
     username, password = login
-    client = await SogniClient.create(
-        app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
-        disable_socket=True)
+    stage = "client_create"
+    client = None
     try:
-        await client.account.login(username, password,
-                                   remember_me=True)
+        client = await SogniClient.create(
+            app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
+            disable_socket=True)
+        stage = "login"
+        rest = client.api_client.rest
+        orig_post = rest.post
+
+        async def _recording_post(path, *args, **kwargs):
+            nonlocal stage
+            p = str(path)
+            if p.endswith("/nonce"):
+                stage = "nonce"
+            elif p.endswith("/login"):
+                stage = "login_post"
+            return await orig_post(path, *args, **kwargs)
+
+        rest.post = _recording_post
+        try:
+            await client.account.login(username, password,
+                                       remember_me=True)
+        finally:
+            rest.post = orig_post
+        stage = "token_backup"
         backup = await client.api_client.auth.backup()
+    except _SogniPlanError:
+        raise
+    except Exception as e:  # noqa: BLE001 — telemetry, never credentials
+        raise _SogniPlanError(
+            "login_failed", str(e)[:120], stage=stage,
+            status=getattr(e, "status", None),
+            error_code=(getattr(e, "error_code", None)
+                        or getattr(e, "errorCode", None))) from e
     finally:
-        await client.aclose()
+        if client is not None:
+            await client.aclose()
     if not backup or not backup.get("token") \
             or not backup.get("refreshToken"):
         raise _SogniPlanError("login_failed",
-                              "sign-in returned no session")
+                              "sign-in returned no session",
+                              stage="token_backup")
     return {"token": backup["token"],
             "refreshToken": backup["refreshToken"]}
 
@@ -2950,7 +3063,12 @@ _SOGNI_LOGIN_WORDS_RE = re.compile(
 
 def _extract_any_sogni_login(conn: sqlite3.Connection, user_id: str,
                              text: str) -> tuple[str, str] | None:
-    """Exact "sogni login u p" first, then the forgiving shapes."""
+    """Labeled pairs first (unambiguous anywhere), then the trigger
+    forms ("sogni login/log in u p", brackets stripped), then the
+    forgiving bare-pair shapes inside Sogni context."""
+    labeled = _extract_labeled_sogni_login(text or "")
+    if labeled:
+        return labeled
     login = extract_sogni_login(text)
     if login:
         return login
@@ -3002,7 +3120,119 @@ def _sogni_plan_login(login: tuple[str, str]) -> dict:
     except _SogniPlanError:
         raise
     except Exception as e:  # noqa: BLE001 — she reports kinds, not stacks
-        raise _SogniPlanError("login_failed", str(e)[:120]) from e
+        raise _SogniPlanError("login_failed", str(e)[:120],
+                              stage="login") from e
+
+
+def _sogni_failure_telemetry(exc: BaseException,
+                             redact: tuple[str, ...] = ()) -> str:
+    """One sanitized sign-in failure line for the server log.
+
+    Stage, exception class, HTTP status, and Sogni's error code and
+    message — with any credential substring redacted out of the
+    message first. Never the username, never the password, never the
+    derived wallet, never tokens."""
+    parts = [f"stage={getattr(exc, 'stage', '') or 'login'}",
+             f"error={exc.__class__.__name__}"]
+    status = getattr(exc, "status", None)
+    if status is not None:
+        parts.append(f"status={status}")
+    code = getattr(exc, "error_code", None)
+    if code is None:
+        code = getattr(exc, "errorCode", None)
+    if code is not None:
+        parts.append(f"code={code}")
+    kind = getattr(exc, "kind", "")
+    if kind:
+        parts.append(f"kind={kind}")
+    msg = str(exc)[:200]
+    for value in redact:
+        if value and len(value) >= 3:
+            msg = msg.replace(value, "***")
+    if msg:
+        parts.append(f"message={msg!r}")
+    return " ".join(parts)
+
+
+# Sign-in attempt throttle (owner-only surface, but a pasted login
+# that fails must not become an oracle): a few failures lock further
+# attempts for a few minutes. In-memory — a restart clears it, which
+# is fine; the point is slowing a burst, not building a wall.
+_SOGNI_LOGIN_MAX_FAILURES = 5
+_SOGNI_LOGIN_LOCK_SECONDS = 600
+_sogni_login_fail_times: dict[str, list[float]] = {}
+
+
+def _sogni_login_recent_failures(user_id: str) -> list[float]:
+    now = time.time()
+    times = [t for t in _sogni_login_fail_times.get(user_id, [])
+             if now - t < _SOGNI_LOGIN_LOCK_SECONDS]
+    if times:
+        _sogni_login_fail_times[user_id] = times
+    else:
+        _sogni_login_fail_times.pop(user_id, None)
+    return times
+
+
+def sogni_login_lock_remaining(user_id: str) -> int:
+    """Seconds until sign-in attempts open again; 0 when not locked."""
+    times = _sogni_login_recent_failures(user_id)
+    if len(times) < _SOGNI_LOGIN_MAX_FAILURES:
+        return 0
+    return max(1, int(times[0] + _SOGNI_LOGIN_LOCK_SECONDS
+                      - time.time()) + 1)
+
+
+def perform_sogni_login(conn: sqlite3.Connection, user_id: str,
+                        login: tuple[str, str]) -> dict | None:
+    """The one sign-in path, shared by chat intake and the secure
+    login box. On success the session pair is stored (never the
+    password) and earlier missed pastes are swept; on failure the
+    sanitized telemetry line is logged and the throttle ticks.
+    Returns the stored session, or None."""
+    if sogni_login_lock_remaining(user_id):
+        print("[assist] sogni sign-in skipped (throttled): "
+              "stage=throttle error=TooManyAttempts", flush=True)
+        return None
+    try:
+        session = _sogni_plan_login(login)
+    except _SogniPlanError as e:
+        _sogni_login_fail_times.setdefault(user_id, []).append(
+            time.time())
+        print("[assist] sogni sign-in failed ("
+              + _sogni_failure_telemetry(e, redact=login) + ")",
+              flush=True)
+        return None
+    _sogni_login_fail_times.pop(user_id, None)
+    store_sogni_session(conn, session)
+    # A successful sign-in also cleans up any earlier paste of his
+    # that a narrower parser missed, in every assistant thread.
+    scrub_sogni_credentials_from_history(conn, user_id)
+    return session
+
+
+# Public names for the endpoint layer (main.py): the fixed words she
+# lands in-thread after a secure-box sign-in attempt.
+SOGNI_LOGIN_SAVED_REPLY = _SOGNI_LOGIN_SAVED_REPLY
+SOGNI_LOGIN_FAILED_REPLY = _SOGNI_LOGIN_FAILED_REPLY
+
+
+def _scrub_latest_user_turn(conn: sqlite3.Connection, user_id: str,
+                              character_id: str) -> None:
+    """Mask his newest stored turn wholesale — for a login attempt
+    whose pair could not even be extracted, there is no needle to
+    search by, and the newest user turn in this thread is the paste
+    itself (the chat path logs it before maybe_assist runs)."""
+    row = conn.execute(
+        "SELECT id FROM conversation WHERE user_id = ? "
+        "AND character_id = ? AND role = 'user' ORDER BY id DESC "
+        "LIMIT 1", (user_id, character_id)).fetchone()
+    if not row:
+        return
+    conn.execute(
+        "UPDATE conversation SET text = ? WHERE id = ?",
+        (_SOGNI_PLAN_PLACEHOLDER, row[0]))
+    conn.commit()
 
 
 def _handle_sogni_login_intake(conn: sqlite3.Connection, user_id: str,
@@ -3012,15 +3242,23 @@ def _handle_sogni_login_intake(conn: sqlite3.Connection, user_id: str,
     # sitting in the persisted history.
     _scrub_whole_message(conn, user_id, character_id, login[1],
                          _SOGNI_PLAN_PLACEHOLDER)
-    try:
-        session = _sogni_plan_login(login)
-    except _SogniPlanError:
-        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY}
-    store_sogni_session(conn, session)
-    # A successful sign-in also cleans up any earlier paste of his
-    # that a narrower parser missed, in every assistant thread.
-    scrub_sogni_credentials_from_history(conn, user_id)
+    if perform_sogni_login(conn, user_id, login) is None:
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY,
+                "sogni_login_box": True}
     return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_SAVED_REPLY}
+
+
+def _handle_sogni_login_unparseable(conn: sqlite3.Connection,
+                                      user_id: str,
+                                      character_id: str) -> dict:
+    """A credential-shaped paste no extractor could read. Still
+    scrubbed (it may hold a password), still answered honestly —
+    never fed to the brain, never left in the stored thread."""
+    _scrub_latest_user_turn(conn, user_id, character_id)
+    print("[assist] sogni sign-in failed (stage=parse "
+          "error=UnparseableLogin)", flush=True)
+    return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY,
+            "sogni_login_box": True}
 
 
 def _handle_sogni_logout(conn: sqlite3.Connection, user_id: str,
@@ -3375,7 +3613,8 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                          "say what it should show. Ask him what he "
                          "wants to see in it, warmly and briefly."}
     if not stored_sogni_session(conn):
-        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_NO_SESSION_REPLY}
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_NO_SESSION_REPLY,
+                "sogni_login_box": True}
     if _sogni_plan_active_job(conn, user_id):
         return {"brief": "He asked for another video, but the last "
                          "one is still rendering. Tell him it's on its "
@@ -3472,7 +3711,8 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
         _sogni_topic_touch(conn, user_id)
         if not stored_sogni_session(conn):
             return {"brief": FIXED_REPLY_PREFIX
-                    + _SOGNI_NO_SESSION_REPLY}
+                    + _SOGNI_NO_SESSION_REPLY,
+                    "sogni_login_box": True}
         loose = detect_sogni_media_ask(t)
         if loose:
             return _handle_sogni_video_request(conn, user_id,
@@ -3490,7 +3730,8 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                                             "job_search"):
         if not stored_sogni_session(conn):
             return {"brief": FIXED_REPLY_PREFIX
-                    + _SOGNI_NO_SESSION_REPLY}
+                    + _SOGNI_NO_SESSION_REPLY,
+                    "sogni_login_box": True}
         return {"brief": FIXED_REPLY_PREFIX + _SOGNI_SIGNED_IN_REPLY}
     return None
 
@@ -5160,6 +5401,15 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if sogni_login:
             return _handle_sogni_login_intake(
                 conn, user_id, character_id, sogni_login)
+        # A credential-shaped paste no extractor could read still
+        # gets claimed here: scrubbed from the stored thread and
+        # answered honestly, never left for the brain (or for anyone
+        # reading the history) to find.
+        if detect_sogni_login_attempt(text) \
+                and not _SOGNI_FORGET_RE.search(text or "") \
+                and not _SOGNI_LOGOUT_RE.search(text or ""):
+            return _handle_sogni_login_unparseable(
+                conn, user_id, character_id)
         # Hannah studio (owner-only, her thread only): add-a-give and
         # guided character creation. Runs before attachment analysis so
         # an attached photo with "add this as a give for X" files the

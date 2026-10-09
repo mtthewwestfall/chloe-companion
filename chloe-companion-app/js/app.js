@@ -182,6 +182,14 @@
           }
           if ((t.text || '').trim()) addText(who, t.text || '');
         });
+        // Her stored login ask (or a failed attempt) is the last word:
+        // re-offer the secure entry box under it.
+        const lastTurn = turns[turns.length - 1];
+        if (lastTurn && lastTurn.role !== 'user'
+            && ASSISTANT_GIRLS.includes(girl.id)
+            && /not signed into your sogni|sign-in didn't take/i.test(lastTurn.text || '')) {
+          addSogniLoginButton();
+        }
         scrollBottom();
       } catch (e) {}
     }
@@ -322,6 +330,19 @@
     b.innerHTML = `
       <div class="photo-scene" style="height:auto;min-height:200px;"><img src="${url}" style="width:100%;display:block;" alt="Image Hannah made"></div>
       <div class="photo-caption">🎨 made this for you</div>`;
+    scrollBottom();
+  }
+
+  /* Secure Sogni login box: her login ask (live or replayed from
+     history) carries this button; it opens the sheet with the
+     password field — credentials never travel as chat text. */
+  function addSogniLoginButton() {
+    const wrap = addMsg('her', '', { caption: currentGirl.name + ' · ' + timeNow() });
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary full';
+    btn.textContent = '🔐 Enter Sogni login';
+    btn.addEventListener('click', () => openSheet('sogniLoginSheet'));
+    wrap.firstChild.appendChild(btn);
     scrollBottom();
   }
 
@@ -554,6 +575,7 @@
       }
       if (res.photo_url) addPhotoDrop(res.photo_url, res.reply_text);
       if (res.image_url) addGeneratedImage(res.image_url);
+      if (res.sogni_login_box) addSogniLoginButton();
       if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
@@ -1012,6 +1034,53 @@
   });
   document.querySelectorAll('.sheet').forEach((s) => {
     s.addEventListener('click', (e) => { if (e.target === s) s.classList.add('hidden'); });
+  });
+
+  /* ---------- Sogni secure login sheet ---------- */
+
+  function sogniLoginError(msg) {
+    const el = $('sogniLoginError');
+    el.textContent = msg || '';
+    el.classList.toggle('hidden', !msg);
+  }
+
+  async function submitSogniLogin() {
+    const username = $('sogniLoginUser').value.trim();
+    const passField = $('sogniLoginPass');
+    const password = passField.value;
+    passField.value = ''; // out of the field the moment it's read
+    sogniLoginError('');
+    if (!username || !password) {
+      sogniLoginError('Put both the username and the password in.');
+      return;
+    }
+    const submitBtn = $('sogniLoginSubmit');
+    submitBtn.disabled = true;
+    try {
+      const res = await ApiClient.sogniLogin(username, password, currentGirl.id);
+      if (res && res.ok) {
+        $('sogniLoginUser').value = '';
+        closeSheet('sogniLoginSheet');
+        addText('her', res.reply || "got it, babe — i'm signed into your sogni now.");
+      } else {
+        sogniLoginError("That sign-in didn't take — check the login and try again.");
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || '');
+      if (msg.includes('429')) {
+        sogniLoginError('Too many tries — give it a few minutes, then try again.');
+      } else if (msg.includes('403')) {
+        sogniLoginError('That sign-in box is owner-only.');
+      } else {
+        sogniLoginError('Could not reach her just now — try again in a moment.');
+      }
+    }
+    submitBtn.disabled = false;
+  }
+
+  $('sogniLoginSubmit').addEventListener('click', submitSogniLogin);
+  $('sogniLoginPass').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitSogniLogin();
   });
 
   /* ---------- companion creator ---------- */

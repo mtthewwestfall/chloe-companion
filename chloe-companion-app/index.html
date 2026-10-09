@@ -244,6 +244,21 @@
       </div>
     </div>
 
+    <!-- Sogni secure login sheet: opened from her "Enter Sogni login"
+         button in an assistant thread. The password goes straight to
+         the sign-in over his session and is never saved or shown. -->
+    <div id="sogniLoginSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Sogni sign-in</h2><button class="sheet-close" data-close="sogniLoginSheet">✕</button></div>
+        <p class="sheet-sub">Signs her into your Sogni Unlimited plan so she can make your videos. Your password is used for this one sign-in and never saved.</p>
+        <input id="sogniLoginUser" class="auth-input" placeholder="Sogni username" type="text" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <input id="sogniLoginPass" class="auth-input" placeholder="Sogni password" type="password" autocomplete="off">
+        <button id="sogniLoginSubmit" class="btn-primary full">Sign in</button>
+        <div id="sogniLoginError" class="auth-error hidden"></div>
+      </div>
+    </div>
+
     <!-- Auth sheet -->
     <div id="authSheet" class="sheet hidden">
       <div class="sheet-card">

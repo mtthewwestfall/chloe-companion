@@ -953,6 +953,10 @@ def chat(body: ChatIn, request: Request):
         if assist_hit and assist_hit.get("image_url"):
             resp["image_url"] = assist_hit["image_url"]
             resp["image_prompt"] = assist_hit.get("image_prompt", "")
+        # Secure login box: her fixed login ask carries a button that
+        # opens the in-app credential form (POST /assist/sogni-login).
+        if assist_hit and assist_hit.get("sogni_login_box"):
+            resp["sogni_login_box"] = True
         return resp
     finally:
         conn.close()
@@ -2082,6 +2086,61 @@ def assist_due_reminders(request: Request):
     user_id, user, conn = _assist_user(request)
     try:
         return {"reminders": assist.due_reminders(conn, user_id)}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Secure Sogni login box (2026-10-09, owner-directed): the "Enter Sogni
+# login" button in an assistant thread opens an in-app form; the pair
+# lands here over his authenticated session instead of in chat text.
+# Owner-only, assistant threads only, rate-limited by the shared
+# throttle in app.assist. The password drives the one server-side
+# SDK sign-in and is then discarded — never stored, never logged,
+# never echoed back; only the session token pair is kept.
+# ---------------------------------------------------------------------------
+
+class AssistSogniLoginIn(BaseModel):
+    username: str
+    password: str
+    character: str = "hannah"
+
+
+@app.post("/api/v1/assist/sogni-login")
+def assist_sogni_login(body: AssistSogniLoginIn, request: Request):
+    user_id = _current_user_id(request)  # 401 when not signed in
+    if user_id not in assist._owner_ids():
+        raise HTTPException(status_code=403, detail="owner_only")
+    character = (body.character or "").strip().lower()
+    if not assist.is_assistant_character(character):
+        raise HTTPException(status_code=400,
+                            detail="not_an_assistant_thread")
+    username = (body.username or "").strip()
+    password = body.password or ""
+    if not username or not password:
+        raise HTTPException(status_code=400,
+                            detail="missing_credentials")
+    if len(username) > 120 or len(password) > 256:
+        raise HTTPException(status_code=400,
+                            detail="credential_too_long")
+    remaining = assist.sogni_login_lock_remaining(user_id)
+    if remaining > 0:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "too_many_attempts",
+                    "retry_after_seconds": remaining})
+    conn = _conn()
+    try:
+        session = assist.perform_sogni_login(
+            conn, user_id, (username, password))
+        if session is None:
+            # Same fixed words as the chat intake failure, in-thread.
+            store.log_turn(conn, user_id, character,
+                           assist.SOGNI_LOGIN_FAILED_REPLY, character)
+            return {"ok": False, "error": "login_failed"}
+        store.log_turn(conn, user_id, character,
+                       assist.SOGNI_LOGIN_SAVED_REPLY, character)
+        return {"ok": True, "reply": assist.SOGNI_LOGIN_SAVED_REPLY}
     finally:
         conn.close()
 

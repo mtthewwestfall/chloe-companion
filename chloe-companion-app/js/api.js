@@ -176,6 +176,18 @@ const ApiClient = (() => {
     return resp;
   }
 
-  return { probe, chat, uploadChatAttachment, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, createCompanion, onStatus, isConnected: () => connected };
+  // Secure Sogni login box: the pair goes over his authenticated
+  // session to the one server-side sign-in; it is never kept here.
+  async function sogniLogin(username, password, characterId) {
+    const data = await request('POST', '/api/v1/assist/sogni-login', {
+      username,
+      password,
+      character: characterId || 'hannah',
+    }, 60000);
+    setConnected(true);
+    return data;
+  }
+
+  return { probe, chat, uploadChatAttachment, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, createCompanion, sogniLogin, onStatus, isConnected: () => connected };
 })();
 
