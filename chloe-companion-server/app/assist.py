@@ -19,11 +19,22 @@ SECURITY — the credential rule, non-negotiable:
   review job can read his repos, and it is scrubbed out of the persisted
   chat history. The raw value is NEVER echoed in any reply, prompt,
   endpoint response or log line — no fragments, not even the last 4.
+
+  SECOND NAMED EXCEPTION (2026-10-09, user-directed): the OWNER's Sogni
+  user session, for Hannah's plan-billed videos. He drops his Sogni
+  login once in chat; the password is used for that single sign-in
+  call and discarded — only the session token pair it returns is kept
+  (assist_secrets row "sogni_plan_session"), and the login message is
+  scrubbed out of the persisted history before the sign-in even runs.
+  Neither the password nor the tokens are ever echoed in any reply,
+  prompt, endpoint response or log line — no fragments.
+
   Everything else credential-shaped stays refused, exactly as above.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import http.client
@@ -158,6 +169,29 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                name TEXT PRIMARY KEY,
                value TEXT NOT NULL,
                updated_at TEXT)"""
+    )
+    # Hannah Sogni plan videos (2026-10-09): one row per render she
+    # queues for the owner. billing_mode is recorded with every job so
+    # the plan-billing law is auditable in the data, not just the code.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS sogni_plan_jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               character_id TEXT NOT NULL DEFAULT 'hannah',
+               prompt TEXT NOT NULL,
+               model TEXT NOT NULL,
+               billing_mode TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'queued',
+               project_id TEXT,
+               video_url TEXT,
+               detail TEXT,
+               delivered INTEGER NOT NULL DEFAULT 0,
+               created_at TEXT NOT NULL,
+               finished_at TEXT)"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sogni_plan_jobs_user "
+        "ON sogni_plan_jobs (user_id, status, id)"
     )
     # Owner chat attachments for Hannah (2026-10-09). Files live under
     # GENERATED_DIR/hannah-uploads and are served via /generated/...;
@@ -2214,6 +2248,633 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Hannah Sogni plan videos (2026-10-09, owner-directed): she makes
+# short videos of herself for the owner on his Sogni Unlimited plan.
+#
+# Billing law (owner-settled, browser-proven 2026-10-09): every render
+# is submitted with billingMode "subscription", so his plan covers it.
+# There is deliberately NO credits / API-key path anywhere in this
+# section: config.SOGNI_API_KEY is never read here, no cost estimate
+# is ever requested, and a job the plan refuses is never resubmitted
+# on any other mode — she reports the refusal instead. (The separate
+# customer media-request features keep their own pre-existing gates;
+# this section neither uses nor changes them.)
+#
+# Auth (see the SECOND NAMED EXCEPTION in the module docstring): he
+# drops his Sogni login once in chat as "sogni login <username>
+# <password>". The password drives that one sign-in call and is then
+# discarded — only the user-session token pair is kept, in
+# assist_secrets row "sogni_plan_session". The login message is
+# scrubbed from the persisted history before the sign-in even runs.
+# The SDK refreshes the access token from the stored refresh token;
+# when a render rotates the pair, the fresh pair replaces the stored
+# one. A fully dead session means she asks him to drop the login once
+# more — the password itself is never stored to re-login from.
+#
+# Flow: her immediate answer confirms the render is on; a daemon
+# thread submits the job (socket jobRequest, MiniMax H3 image-to-
+# video, her avatar as the first frame, 768x1024, ~6s), polls to
+# completion, mints the result URL, downloads the clip into
+# GENERATED_DIR, and lands it in this chat as a video bubble
+# (store.log_turn with a video attachment — the same follow-up
+# primitive dev-agent results and review findings use). Owner-only,
+# Hannah's thread only, one render at a time, daily cap.
+# ---------------------------------------------------------------------------
+_SOGNI_PLAN_SESSION = "sogni_plan_session"
+_SOGNI_PLAN_APP_ID = "companion-hannah-plan"
+_SOGNI_PLAN_PLACEHOLDER = "[sogni login]"
+_SOGNI_PLAN_WIDTH = 768
+_SOGNI_PLAN_HEIGHT = 1024
+_SOGNI_PLAN_DURATION = 6
+_SOGNI_PLAN_FPS = 24
+_SOGNI_PLAN_BILLING_MODE = "subscription"
+
+_SOGNI_LOGIN_RE = re.compile(
+    r"\bsogni\s+login\b\s*[:\-]?\s*"
+    r"(?!(?:sogni|login)\b)(\S+)\s+(?!(?:sogni|login)\b)(\S+)",
+    re.IGNORECASE)
+_SOGNI_LOGOUT_RE = re.compile(
+    r"\b(forget|delete|remove|wipe|drop|sign\s*out|log\s*out)\b"
+    r"[^.!?]{0,30}\bsogni\b"
+    r"|\bsogni\b[^.!?]{0,30}\b(log\s*out|sign\s*out|logout|disconnect)\b",
+    re.IGNORECASE)
+_SOGNI_FORGET_RE = re.compile(
+    r"\b(forget|wipe|delete|remove|revoke)\b[^.!?]{0,30}\bsogni\b",
+    re.IGNORECASE)
+_VIDEO_ASK_RE = re.compile(
+    r"(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:make|create|generate|render|shoot|film)(?:\s+me)?\s+"
+    r"(?:a\s+|an\s+|the\s+)?video\b\s*(.*)$",
+    re.IGNORECASE)
+
+_SOGNI_LOGIN_SAVED_REPLY = (
+    "got it, babe — i'm signed into your sogni now, and that "
+    "password's already scrubbed out of our chat. tell me to make "
+    "you a video and i'll actually make it.")
+_SOGNI_LOGIN_FAILED_REPLY = (
+    "that sign-in didn't take, babe — sogni turned it away. check "
+    "the login and drop it once more like: sogni login <username> "
+    "<password>.")
+_SOGNI_LOGOUT_REPLY = (
+    "done — signed out of sogni on my side and wiped the saved "
+    "sign-in. drop your login here again whenever you want videos "
+    "back.")
+_SOGNI_LOGOUT_NOTHING_REPLY = (
+    "nothing to wipe, babe — i'm not signed into sogni right now.")
+_SOGNI_NO_SESSION_REPLY = (
+    "i'd love to, babe — but i'm not signed into your sogni on "
+    "this end yet. drop your login right here once, like this: "
+    "sogni login <username> <password> — i'll save the sign-in "
+    "safe, scrub that message out of our chat, and the password's "
+    "gone for good. then ask me again and i'll make it.")
+
+
+class _SogniPlanError(Exception):
+    """Failure whose kind she can report honestly, as-is."""
+
+    def __init__(self, kind: str, detail: str = ""):
+        self.kind = kind
+        super().__init__(detail or kind)
+
+
+def sogni_plan_daily_cap() -> int:
+    return _env_int("HANNAH_SOGNI_PLAN_DAILY_CAP", 10, 1)
+
+
+def detect_sogni_video_request(text: str) -> str | None:
+    """Return the video subject for an explicit video ask, else None.
+
+    An empty string is meaningful: she was asked to make a video but
+    no subject was supplied, so she asks what it should show.
+    """
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t:
+        return None
+    # A leading "hannah, ..." address is not part of the ask.
+    t = re.sub(r"^hannah\s*[,!:\-]\s*", "", t, flags=re.IGNORECASE)
+    match = _VIDEO_ASK_RE.search(t)
+    if not match:
+        return None
+    subject = (match.group(1) or "").strip()
+    subject = re.sub(r"^(?:of|for|showing|about)\s+", "", subject,
+                     flags=re.IGNORECASE)
+    return subject.strip(" \t\r\n.!?")[:1000]
+
+
+def extract_sogni_login(text: str) -> tuple[str, str] | None:
+    """The (username, password) from a "sogni login ..." message.
+
+    Takes the last well-formed match, so a lead-in like "here's my
+    sogni login: sogni login <u> <p>" resolves to the real pair
+    instead of swallowing the lead-in words as credentials."""
+    found: tuple[str, str] | None = None
+    for m in _SOGNI_LOGIN_RE.finditer(text or ""):
+        user, pw = m.group(1), m.group(2)
+        if user.lower() in ("sogni", "login") or \
+                pw.lower() in ("sogni", "login") or \
+                user.endswith(":"):
+            continue
+        found = (user, pw)
+    return found
+
+
+def store_sogni_session(conn: sqlite3.Connection, session: dict) -> None:
+    """Save (or rotate) her Sogni session token pair. Never logged."""
+    ensure_tables(conn)
+    value = json.dumps({
+        "token": str(session.get("token") or ""),
+        "refreshToken": str(session.get("refreshToken") or ""),
+    })
+    conn.execute(
+        "INSERT INTO assist_secrets (name, value, updated_at) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT (name) DO UPDATE SET value = excluded.value, "
+        "updated_at = excluded.updated_at",
+        (_SOGNI_PLAN_SESSION, value,
+         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    conn.commit()
+
+
+def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
+    """The stored token pair, or None when she is signed out."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT value FROM assist_secrets WHERE name = ?",
+        (_SOGNI_PLAN_SESSION,)).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row[0] or "")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = str(data.get("token") or "")
+    refresh = str(data.get("refreshToken") or "")
+    if not token or not refresh:
+        return None
+    return {"token": token, "refreshToken": refresh}
+
+
+def clear_sogni_session(conn: sqlite3.Connection) -> bool:
+    """Delete the stored session. True when one was actually there."""
+    ensure_tables(conn)
+    cur = conn.execute(
+        "DELETE FROM assist_secrets WHERE name = ?",
+        (_SOGNI_PLAN_SESSION,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def _scrub_whole_message(conn: sqlite3.Connection, user_id: str,
+                           character_id: str, needle: str,
+                           placeholder: str) -> None:
+    """Replace his just-saved turn wholesale when it holds a secret.
+
+    The chat path logs his raw message before maybe_assist runs; a
+    login message is nothing but credentials, so the entire row
+    becomes the placeholder (masking fragments would leave the
+    username and password shape behind)."""
+    if not needle:
+        return
+    row = conn.execute(
+        "SELECT id FROM conversation WHERE user_id = ? "
+        "AND character_id = ? AND role = 'user' AND instr(text, ?) > 0 "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, character_id, needle)).fetchone()
+    if not row:
+        return
+    conn.execute(
+        "UPDATE conversation SET text = ? WHERE id = ?",
+        (placeholder, row[0]))
+    conn.commit()
+
+
+async def _sogni_plan_login_async(login: tuple[str, str]) -> dict:
+    """One Sogni sign-in via the SDK's wallet-signature login.
+
+    REST-only client (no socket needed to sign in). The login pair
+    travels as one opaque intake value and the password half never
+    leaves this call; only the session token pair comes back."""
+    from sogni_client import SogniClient
+
+    username, password = login
+    client = await SogniClient.create(
+        app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
+        disable_socket=True)
+    try:
+        await client.account.login(username, password,
+                                   remember_me=True)
+        backup = await client.api_client.auth.backup()
+    finally:
+        await client.aclose()
+    if not backup or not backup.get("token") \
+            or not backup.get("refreshToken"):
+        raise _SogniPlanError("login_failed",
+                              "sign-in returned no session")
+    return {"token": backup["token"],
+            "refreshToken": backup["refreshToken"]}
+
+
+def _sogni_plan_login(login: tuple[str, str]) -> dict:
+    """Sync seam over the sign-in (monkeypatched in tests)."""
+    try:
+        return asyncio.run(_sogni_plan_login_async(login))
+    except _SogniPlanError:
+        raise
+    except Exception as e:  # noqa: BLE001 — she reports kinds, not stacks
+        raise _SogniPlanError("login_failed", str(e)[:120]) from e
+
+
+def _handle_sogni_login_intake(conn: sqlite3.Connection, user_id: str,
+                                 character_id: str,
+                                 login: tuple[str, str]) -> dict:
+    # Scrub FIRST: even a failed sign-in never leaves the password
+    # sitting in the persisted history.
+    _scrub_whole_message(conn, user_id, character_id, login[1],
+                         _SOGNI_PLAN_PLACEHOLDER)
+    try:
+        session = _sogni_plan_login(login)
+    except _SogniPlanError:
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY}
+    store_sogni_session(conn, session)
+    return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_SAVED_REPLY}
+
+
+def _handle_sogni_logout(conn: sqlite3.Connection, user_id: str,
+                           character_id: str,
+                           login: tuple[str, str] | None) -> dict:
+    had = clear_sogni_session(conn)
+    if login:
+        # "forget my sogni login user pass" — scrub the paste too.
+        _scrub_whole_message(conn, user_id, character_id, login[1],
+                             _SOGNI_PLAN_PLACEHOLDER)
+    reply = _SOGNI_LOGOUT_REPLY if had else _SOGNI_LOGOUT_NOTHING_REPLY
+    return {"brief": FIXED_REPLY_PREFIX + reply}
+
+
+# ---- render queue --------------------------------------------------------
+
+def _sogni_plan_params(prompt: str, ref_path: str | None = None,
+                         model: str | None = None) -> dict:
+    """The one and only job shape she ever submits.
+
+    billingMode is pinned to the plan here; there is no parameter,
+    env var, or fallback anywhere that can switch a job to credits
+    billing — a guard test keeps it that way."""
+    params: dict = {
+        "type": "video",
+        "modelId": model or config.SOGNI_VIDEO_MODEL,
+        "positivePrompt": prompt,
+        "numberOfMedia": 1,
+        "duration": _SOGNI_PLAN_DURATION,
+        "fps": _SOGNI_PLAN_FPS,
+        "width": _SOGNI_PLAN_WIDTH,
+        "height": _SOGNI_PLAN_HEIGHT,
+        "billingMode": _SOGNI_PLAN_BILLING_MODE,
+    }
+    if ref_path:
+        params["referenceImage"] = ref_path
+    return params
+
+
+_NEG_CLAUSE_RE = re.compile(
+    r"[,]?\s*\b(?:no|without|don't|do not|never)\s+([^,.;!?]+)",
+    re.IGNORECASE)
+
+
+def _sogni_plan_prompt(her_name: str, subject: str) -> str:
+    """His words, shaped the way H3 likes: stated exclusions folded
+    into the positive prompt, quality folded in as description (H3
+    takes no negativePrompt field, so none is ever sent)."""
+    exclusions: list[str] = []
+
+    def _eat(m: re.Match) -> str:
+        exclusions.append(m.group(1).strip())
+        return ""
+
+    main = _NEG_CLAUSE_RE.sub(_eat, subject or "")
+    main = re.sub(r"\s+", " ", main).strip(" ,")
+    if not main:
+        main = "smiling at the camera"
+    prompt = f"Photorealistic {her_name}, {main}"
+    for ex in exclusions[:3]:
+        if ex:
+            prompt += f", keeping the scene free of {ex}"
+    prompt += (", clean high-quality footage, natural anatomy, soft "
+               "flattering light, coherent background, subtle natural "
+               "motion, she looks at the camera")
+    return prompt[:1200]
+
+
+def _classify_sogni_failure(text: str) -> str:
+    """Map a Sogni failure blob to the outcome she reports."""
+    low = (text or "").lower()
+    if any(k in low for k in ("401", "unauthorized", "unauthenticated",
+                              "invalid token", "token expired",
+                              "refresh token", "not authenticated")):
+        return "session_dead"
+    if any(k in low for k in ("sensitive content", "sensitive",
+                              "moderation", "nsfw")):
+        return "blocked"
+    if any(k in low for k in ("billing", "subscription", "unlimited",
+                              "plan", "fair-use", "fair use",
+                              "insufficient", "quota", "not covered",
+                              "cannot cover", "can't cover")):
+        return "plan_rejected"
+    return "failed"
+
+
+async def _sogni_plan_render(session: dict, prompt: str,
+                               ref_path: str | None,
+                               model: str | None = None) -> tuple[dict, dict | None]:
+    """Submit one plan-billed render and download the clip.
+
+    Returns (outcome, fresh_session): outcome is
+    {"status", "project_id", "path", "detail"} with status one of
+    done / blocked / plan_rejected / session_dead / failed; the
+    fresh session (the SDK rotates the pair) must be persisted by
+    the caller. Every failure is classified, never retried on
+    another billing mode."""
+    from sogni_client import SogniClient
+
+    from . import media_gen
+
+    outcome: dict = {"status": "failed", "project_id": None,
+                     "path": None, "detail": ""}
+    fresh: dict | None = None
+    client = None
+    try:
+        media_gen._patch_websocket_quirk()
+        client = await SogniClient.create(
+            app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
+            disable_socket=False, websocket_factory=media_gen._ws_factory)
+        await client.set_tokens(token=session.get("token") or "",
+                                refresh_token=session.get(
+                                    "refreshToken") or "")
+        project = await client.projects.create(
+            _sogni_plan_params(prompt, ref_path, model))
+        outcome["project_id"] = project.id
+        urls: list = []
+        try:
+            urls = await project.wait_for_completion(timeout=900) or []
+        except Exception:  # noqa: BLE001 — classify from project state
+            urls = []
+        if not urls:
+            info: dict = {}
+            try:
+                info = await client.projects.get(project.id) or {}
+            except Exception:  # noqa: BLE001
+                info = {}
+            for wj in (info.get("completedWorkerJobs") or []):
+                img_id = wj.get("imgID") or wj.get("id")
+                if not img_id:
+                    continue
+                try:
+                    urls.append(await client.projects.media_download_url(
+                        {"jobId": project.id, "id": img_id,
+                         "type": "complete"}))
+                except Exception:  # noqa: BLE001
+                    pass
+            if not urls:
+                blob = " ".join(
+                    str(info.get(k) or "")
+                    for k in ("status", "reason", "error"))
+                outcome["status"] = _classify_sogni_failure(blob)
+                outcome["detail"] = blob[:200] or \
+                    "render ended with no result"
+                return outcome, fresh
+        os.makedirs(config.GENERATED_DIR, exist_ok=True)
+        filename = "hannah-vid-{0}-{1}.mp4".format(
+            datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+            uuid.uuid4().hex[:10])
+        dest = os.path.join(config.GENERATED_DIR, filename)
+        media_gen._download(urls[0], dest)
+        outcome["status"] = "done"
+        outcome["path"] = dest
+        outcome["detail"] = "billingMode=subscription; project completed"
+    except Exception as e:  # noqa: BLE001 — classify, never crash the thread
+        if outcome["status"] == "failed":
+            outcome["status"] = _classify_sogni_failure(str(e))
+            outcome["detail"] = str(e)[:200]
+    finally:
+        if client is not None:
+            try:
+                backup = await client.api_client.auth.backup()
+                if backup and backup.get("token") \
+                        and backup.get("refreshToken"):
+                    fresh = {"token": backup["token"],
+                             "refreshToken": backup["refreshToken"]}
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+    return outcome, fresh
+
+
+def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
+                    model: str | None = None) -> tuple[dict, dict | None]:
+    """Sync seam over the render (monkeypatched in tests)."""
+    try:
+        return asyncio.run(_sogni_plan_render(session, prompt,
+                                              ref_path, model))
+    except Exception as e:  # noqa: BLE001
+        return ({"status": _classify_sogni_failure(str(e)),
+                 "project_id": None, "path": None,
+                 "detail": str(e)[:200]}, None)
+
+
+def _fetch_first_frame(avatar_url: str) -> str | None:
+    """Her reference frame as a local file (face-lock). Mirrors the
+    custom-video flow; app-relative avatar urls retry via localhost."""
+    if not avatar_url:
+        return None
+    from . import media_gen
+
+    path = media_gen._fetch_reference(avatar_url)
+    if path:
+        return path
+    if avatar_url.startswith("/"):
+        port = os.environ.get("PORT", "8471")
+        return media_gen._fetch_reference(
+            f"http://127.0.0.1:{port}{avatar_url}")
+    return None
+
+
+def _sogni_plan_active_job(conn: sqlite3.Connection,
+                             user_id: str) -> dict | None:
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT id FROM sogni_plan_jobs WHERE user_id = ? "
+        "AND status IN ('queued', 'rendering') ORDER BY id DESC "
+        "LIMIT 1", (user_id,)).fetchone()
+    return {"id": row[0]} if row else None
+
+
+def _sogni_plan_today_count(conn: sqlite3.Connection, user_id: str,
+                              now_epoch: float | None = None) -> int:
+    ensure_tables(conn)
+    now = time.time() if now_epoch is None else float(now_epoch)
+    start_local = datetime.fromtimestamp(now, tz=_TZ).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_local.astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    row = conn.execute(
+        "SELECT COUNT(*) FROM sogni_plan_jobs WHERE user_id = ? "
+        "AND created_at >= ?", (user_id, start_utc)).fetchone()
+    return int(row[0] or 0)
+
+
+def _sogni_plan_enqueue(conn: sqlite3.Connection, user_id: str,
+                          character_id: str, subject: str) -> int:
+    ensure_tables(conn)
+    cur = conn.execute(
+        "INSERT INTO sogni_plan_jobs (user_id, character_id, prompt, "
+        "model, billing_mode, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 'queued', ?)",
+        (user_id, character_id, subject, config.SOGNI_VIDEO_MODEL,
+         _SOGNI_PLAN_BILLING_MODE, _utc_iso()))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
+                          outcome: dict) -> None:
+    """Land the outcome in his chat as her follow-up message."""
+    status = outcome.get("status") or "failed"
+    attachments: list[dict] = []
+    if status == "done" and outcome.get("video_url"):
+        size = 0
+        try:
+            size = os.path.getsize(outcome.get("path") or "")
+        except OSError:
+            size = 0
+        attachments = [{"kind": "video", "url": outcome["video_url"],
+                        "name": "hannah-video.mp4", "size": size}]
+        text = "here's your video, babe — made this one just for you."
+    elif status == "blocked":
+        text = ("sogni's filter stopped that one cold before it even "
+                "rendered, babe — that's their wall, not me. give me a "
+                "tamer version and i'm on it.")
+    elif status == "plan_rejected":
+        text = ("your plan wouldn't cover that one, babe — sogni "
+                "rejected it before anything rendered, so i stopped "
+                "right there.")
+    elif status == "session_dead":
+        text = ("my sogni sign-in expired, babe — drop your login "
+                "here once more like: sogni login <username> "
+                "<password> and i'll pick it right back up.")
+    else:
+        text = ("that one didn't come through, babe — sogni hiccuped "
+                "on their end. say the word and i'll run it again.")
+    store.log_turn(conn, job["user_id"], job["character_id"], text,
+                   job["character_id"], attachments)
+
+
+def _run_sogni_plan_job(job_id: int) -> None:
+    """Background worker: render, log, deliver. Opens its own
+    connection (connections are not shared across threads). Only job
+    state is printed — never prompts, tokens, or credentials."""
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM sogni_plan_jobs WHERE id = ?",
+            (job_id,)).fetchone()
+        if not row or row["status"] != "queued":
+            return
+        job = dict(row)
+        conn.execute(
+            "UPDATE sogni_plan_jobs SET status = 'rendering' "
+            "WHERE id = ?", (job_id,))
+        conn.commit()
+        outcome: dict = {"status": "session_dead", "project_id": None,
+                         "path": None, "detail": "session missing"}
+        fresh: dict | None = None
+        session = stored_sogni_session(conn)
+        if session:
+            from . import characters
+
+            girl = characters.get_character(job["character_id"],
+                                            user_id=job["user_id"])
+            ref_path = _fetch_first_frame(girl.get("avatar_url") or "")
+            try:
+                prompt = _sogni_plan_prompt(
+                    girl.get("name") or "Hannah", job["prompt"])
+                outcome, fresh = _sogni_plan_run(
+                    session, prompt, ref_path, job["model"])
+            finally:
+                if ref_path:
+                    try:
+                        os.unlink(ref_path)
+                    except OSError:
+                        pass
+        if fresh:
+            store_sogni_session(conn, fresh)
+        if outcome.get("status") == "session_dead":
+            clear_sogni_session(conn)
+        video_url = None
+        if outcome.get("status") == "done" and outcome.get("path"):
+            video_url = "/generated/" + os.path.basename(
+                outcome["path"])
+            outcome["video_url"] = video_url
+        conn.execute(
+            "UPDATE sogni_plan_jobs SET status = ?, project_id = ?, "
+            "video_url = ?, detail = ?, finished_at = ?, "
+            "delivered = 1 WHERE id = ?",
+            (outcome.get("status") or "failed",
+             outcome.get("project_id"), video_url,
+             (outcome.get("detail") or "")[:300], _utc_iso(), job_id))
+        conn.commit()
+        job["character_id"] = job.get("character_id") or "hannah"
+        _sogni_plan_deliver(conn, job, outcome)
+        print(f"[assist] sogni plan job #{job_id} "
+              f"{outcome.get('status')}", flush=True)
+    except Exception:  # noqa: BLE001 — a worker must never take chat down
+        print(f"[assist] sogni plan job #{job_id} worker failed",
+              flush=True)
+    finally:
+        conn.close()
+
+
+def _spawn_sogni_plan_job(job_id: int) -> None:
+    t = threading.Thread(target=_run_sogni_plan_job, args=(job_id,),
+                         daemon=True, name=f"sogni-plan-{job_id}")
+    t.start()
+
+
+def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
+                                  character_id: str,
+                                  subject: str) -> dict:
+    if not subject:
+        return {"brief": "He asked you to make a video but did not "
+                         "say what it should show. Ask him what he "
+                         "wants to see in it, warmly and briefly."}
+    if not stored_sogni_session(conn):
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_NO_SESSION_REPLY}
+    if _sogni_plan_active_job(conn, user_id):
+        return {"brief": "He asked for another video, but the last "
+                         "one is still rendering. Tell him it's on its "
+                         "way and will land right here when it's done; "
+                         "one at a time."}
+    cap = sogni_plan_daily_cap()
+    if _sogni_plan_today_count(conn, user_id) >= cap:
+        return {"brief": "He asked for another video, but he's hit "
+                         "today's video limit. Tell him honestly the "
+                         "video desk is closed until tomorrow; do not "
+                         "promise a time you do not know."}
+    job_id = _sogni_plan_enqueue(conn, user_id, character_id, subject)
+    _spawn_sogni_plan_job(job_id)
+    return {"brief": "You just started making that video for him on "
+                     "his Sogni Unlimited plan — it's rendering now, "
+                     "and the finished clip will land right here in "
+                     "this chat when it's ready. Confirm in your own "
+                     "voice, short and warm; do not mention models, "
+                     "queues, or process."}
+
+
+# ---------------------------------------------------------------------------
 # Chat attachments — owner-only Hannah image/file intake (2026-10-09).
 #
 # The owner can attach images, videos, and readable documents to a
@@ -3307,6 +3968,8 @@ def _strong_other_intent(text: str) -> bool:
     a pending studio flow must not swallow those."""
     if detect_image_request(text) is not None:
         return True
+    if detect_sogni_video_request(text) is not None:
+        return True
     if detect_github_review(text) is not None:
         return True
     if detect_app_status(text) or detect_owner_brief(text):
@@ -3858,6 +4521,22 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if token:
             return _handle_github_token_intake(conn, user_id,
                                                character_id, token)
+        # Sogni plan session intake — same rule as the token intake
+        # above, before any intent or model path: a pasted login must
+        # never ride along into a brief or the model's context. A
+        # present paste means intake (even alongside "drop your
+        # login here" phrasing) unless an explicit forget/wipe verb
+        # targets it, mirroring the token revoke flow.
+        sogni_login = extract_sogni_login(text)
+        if sogni_login and not _SOGNI_FORGET_RE.search(text or ""):
+            return _handle_sogni_login_intake(
+                conn, user_id, character_id, sogni_login)
+        if _SOGNI_LOGOUT_RE.search(text or ""):
+            return _handle_sogni_logout(conn, user_id, character_id,
+                                           sogni_login)
+        if sogni_login:
+            return _handle_sogni_login_intake(
+                conn, user_id, character_id, sogni_login)
         # Hannah studio (owner-only, her thread only): add-a-give and
         # guided character creation. Runs before attachment analysis so
         # an attached photo with "add this as a give for X" files the
@@ -3869,6 +4548,14 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if attachments:
             return analyze_chat_attachments(conn, user, text,
                                             character_id, attachments)
+        # Sogni plan videos (owner-only, Hannah's thread only) —
+        # checked before the image lane so "make a video" never lands
+        # in the picture desk.
+        video_subject = detect_sogni_video_request(text)
+        if video_subject is not None and \
+                (character_id or "").strip().lower() == "hannah":
+            return _handle_sogni_video_request(
+                conn, user_id, character_id, video_subject)
         image_prompt = detect_image_request(text)
         if image_prompt is not None:
             return _handle_image_request(conn, user_id, character_id,
