@@ -239,3 +239,107 @@ class AppStatusTest(unittest.TestCase):
         self.assertEqual(s["onefetch"]["founder_count"], 1)
         self.assertEqual(s["roof_rover"]["shelf_leads"], 2)
         self.assertEqual(s["gemini"]["believed_healthy"], 2)
+
+
+class ImageGenerationTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        assist.ensure_tables(self.conn)
+        self.old_env = {k: os.environ.get(k) for k in (
+            "HANNAH_IMAGE_COOLDOWN_S", "HANNAH_IMAGE_DAILY_CAP",
+            "HANNAH_IMAGE_MODEL", "HANNAH_IMAGE_FALLBACK_MODEL")}
+        os.environ["HANNAH_IMAGE_COOLDOWN_S"] = "60"
+        os.environ["HANNAH_IMAGE_DAILY_CAP"] = "3"
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_generated = assist.config.GENERATED_DIR
+        assist.config.GENERATED_DIR = self.tmp.name
+        self.old_post = assist._image_post
+
+    def tearDown(self):
+        assist._image_post = self.old_post
+        assist.config.GENERATED_DIR = self.old_generated
+        self.tmp.cleanup()
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.conn.close()
+
+    def _fake_image_data(self):
+        import base64
+        raw = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+        return {"candidates": [{"content": {"parts": [{
+            "inlineData": {
+                "mimeType": "image/png",
+                "data": base64.b64encode(raw).decode("ascii"),
+            }}]}}]}
+
+    def test_detect_image_prompt(self):
+        self.assertEqual(
+            assist.detect_image_request(
+                "Hannah, make an image of a red barn at sunset"),
+            "a red barn at sunset")
+        self.assertEqual(
+            assist.detect_image_request(
+                "create a picture: neon sign for a coffee shop"),
+            "neon sign for a coffee shop")
+        self.assertEqual(
+            assist.detect_image_request("draw me a cat wearing a hat"),
+            "cat wearing a hat")
+        self.assertEqual(assist.detect_image_request("make an image"), "")
+
+    def test_non_image_ask_not_hijacked(self):
+        self.assertIsNone(assist.detect_image_request("make me a coffee"))
+        self.assertIsNone(assist.detect_image_request("what did you do today"))
+
+    def test_extract_inline_image(self):
+        result = assist._extract_generated_image(self._fake_image_data())
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["mime_type"], "image/png")
+        self.assertTrue(result["bytes"].startswith(b"\x89PNG"))
+
+    def test_post_is_free_only_single_attempt(self):
+        calls = []
+        old = assist.gemini_keys.post_json
+        try:
+            assist.gemini_keys.post_json = lambda *a, **kw: (
+                calls.append((a, kw)) or {"candidates": []})
+            assist._image_post("a lighthouse", "gemini-test-image")
+        finally:
+            assist.gemini_keys.post_json = old
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][1]["free_only"])
+        self.assertEqual(calls[0][1]["max_attempts"], 1)
+        self.assertEqual(calls[0][1]["source"], "hannah-image")
+        self.assertIn("gemini-test-image:generateContent", calls[0][0][0])
+
+    def test_handle_success_cooldown_and_cap(self):
+        assist._image_post = lambda prompt, model: self._fake_image_data()
+        first = assist._handle_image_request(
+            self.conn, "owner_1", "hannah", "a red barn", now_epoch=1000)
+        self.assertIn("image_url", first)
+        self.assertTrue(first["image_url"].startswith("/generated/hannah-img-"))
+        saved = os.path.join(self.tmp.name,
+                             os.path.basename(first["image_url"]))
+        self.assertTrue(os.path.exists(saved))
+
+        second = assist._handle_image_request(
+            self.conn, "owner_1", "hannah", "a blue barn", now_epoch=1030)
+        self.assertNotIn("image_url", second)
+        self.assertIn("too soon", second["brief"])
+
+        os.environ["HANNAH_IMAGE_DAILY_CAP"] = "1"
+        third = assist._handle_image_request(
+            self.conn, "owner_1", "hannah", "a green barn", now_epoch=1061)
+        self.assertNotIn("image_url", third)
+        self.assertIn("today's image limit", third["brief"])
+
+    def test_pool_unavailable_is_honest_and_recorded(self):
+        assist._image_post = lambda prompt, model: None
+        result = assist._handle_image_request(
+            self.conn, "owner_1", "hannah", "a lighthouse", now_epoch=2000)
+        self.assertNotIn("image_url", result)
+        self.assertIn("free image keys are resting", result["brief"])
+        gate = assist.image_gate(self.conn, "owner_1", now_epoch=2001)
+        self.assertEqual(gate["attempts"], 1)

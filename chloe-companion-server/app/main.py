@@ -857,6 +857,9 @@ def chat(body: ChatIn, request: Request):
         # device (Gmail API from the browser) — the token never reaches us.
         if assist_hit and assist_hit.get("email_draft"):
             resp["email_draft"] = assist_hit["email_draft"]
+        if assist_hit and assist_hit.get("image_url"):
+            resp["image_url"] = assist_hit["image_url"]
+            resp["image_prompt"] = assist_hit.get("image_prompt", "")
         return resp
     finally:
         conn.close()

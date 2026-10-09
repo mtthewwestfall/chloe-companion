@@ -311,6 +311,15 @@
       </div>`;
   }
 
+  function addGeneratedImage(url) {
+    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' · ' + timeNow() });
+    const b = wrap.firstChild;
+    b.innerHTML = `
+      <div class="photo-scene" style="height:auto;min-height:200px;"><img src="${url}" style="width:100%;display:block;" alt="Image Hannah made"></div>
+      <div class="photo-caption">🎨 made this for you</div>`;
+    scrollBottom();
+  }
+
   /* ---------- chat flow ---------- */
 
   let sending = false;
@@ -336,6 +345,7 @@
         addText('her', res.reply_text || '…');
       }
       if (res.photo_url) addPhotoDrop(res.photo_url, res.reply_text);
+      if (res.image_url) addGeneratedImage(res.image_url);
       if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {

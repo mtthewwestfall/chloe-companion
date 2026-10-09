@@ -866,7 +866,7 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
     for key_id, key_value in candidates:
         if key_id in tried:
             continue
-        if state["n"] >= _max_attempts() or time.monotonic() >= state["deadline"]:
+        if state["n"] >= state.get("max_n", _max_attempts()) or time.monotonic() >= state["deadline"]:
             break
         tried.add(key_id)
         state["n"] += 1
@@ -895,7 +895,7 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                 key_id, key_value = queue.pop(0)
                 if key_id in tried:
                     continue
-                if state["n"] >= _max_attempts() \
+                if state["n"] >= state.get("max_n", _max_attempts()) \
                         or time.monotonic() >= state["deadline"]:
                     return False
                 tried.add(key_id)
@@ -933,7 +933,8 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
 
 
 def post_json(url: str, payload: dict, timeout: int = 30,
-              source: str = "unknown", free_only: bool = False) -> dict | None:
+              source: str = "unknown", free_only: bool = False,
+              max_attempts: int | None = None) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Fail-fast phases (no sleeping anywhere on the request path):
@@ -956,7 +957,9 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     """
     caller_timeout = int(timeout or 30)
     attempt_timeout = max(1, min(caller_timeout, int(_fast_timeout_s())))
-    state = {"n": 0, "deadline": time.monotonic() + _attempt_budget_s()}
+    attempt_cap = _max_attempts() if max_attempts is None else max(1, int(max_attempts))
+    state = {"n": 0, "deadline": time.monotonic() + _attempt_budget_s(),
+             "max_n": attempt_cap}
     tried: set[int] = set()
 
     if free_only:

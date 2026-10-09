@@ -24,6 +24,7 @@ SECURITY — the credential rule, non-negotiable:
 
 from __future__ import annotations
 
+import base64
 import hmac
 import http.client
 import json
@@ -31,13 +32,15 @@ import os
 import re
 import sqlite3
 import threading
+import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from . import db, gemini_keys, store
+from . import config, db, gemini_keys, store
 
 # ---------------------------------------------------------------------------
 # Tier capability matrix — higher tier, more she can do.
@@ -125,6 +128,14 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reminders_due "
         "ON reminders (delivered, remind_at)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS image_usage (
+               user_id TEXT NOT NULL,
+               day TEXT NOT NULL,
+               attempts INTEGER NOT NULL DEFAULT 0,
+               last_epoch REAL NOT NULL DEFAULT 0,
+               PRIMARY KEY (user_id, day))"""
     )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS assist_secrets (
@@ -1914,6 +1925,243 @@ def _brief_with_links(lead: str, res: dict) -> str:
     return brief
 
 
+
+# ---------------------------------------------------------------------------
+# Image generation — owner-only, free Gemini pool only.
+#
+# Hannah calls the same key manager used by the proxy, restricted with
+# free_only=True. There is deliberately no Sogni or paid fallback: when the
+# free pool has no healthy key or neither supported free image model answers,
+# she says so plainly instead of manufacturing an image another way.
+# ---------------------------------------------------------------------------
+_IMAGE_NOUNS = (
+    "image|picture|photo|photograph|artwork|illustration|graphic|poster|"
+    "logo|wallpaper")
+_IMAGE_ASK_RE = re.compile(
+    r"^(?:hannah\s*[,!:\-]\s*)?(?:please\s+)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:make|create|generate|draw|paint|render|sketch|imagine|design)"
+    r"(?:\s+me)?\s+(?:an?\s+|the\s+)?"
+    rf"(?:{_IMAGE_NOUNS})"
+    r"(?:\s+of|\s+for|\s+showing|\s*[:,\-])?\s*(.*)$",
+    re.IGNORECASE)
+_IMAGE_DRAW_RE = re.compile(
+    r"^(?:hannah\s*[,!:\-]\s*)?(?:please\s+)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:draw|paint|sketch|render)(?:\s+me)?\s+"
+    r"(?:an?\s+|the\s+)?(.+)$",
+    re.IGNORECASE)
+_IMAGE_MODEL_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                    "{model}:generateContent")
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def image_cooldown_seconds() -> int:
+    return _env_int("HANNAH_IMAGE_COOLDOWN_S", 60, 0)
+
+
+def image_daily_cap() -> int:
+    return _env_int("HANNAH_IMAGE_DAILY_CAP", 20, 1)
+
+
+def image_models() -> list[str]:
+    """Supported models in probe order (at most two, deduped)."""
+    models = [os.environ.get("HANNAH_IMAGE_MODEL", "gemini-2.5-flash-image"),
+              os.environ.get("HANNAH_IMAGE_FALLBACK_MODEL",
+                             "gemini-2.0-flash-preview-image-generation")]
+    out: list[str] = []
+    for model in models:
+        model = (model or "").strip()
+        if model and model not in out:
+            out.append(model)
+    return out[:2]
+
+
+def detect_image_request(text: str) -> str | None:
+    """Return the visual prompt for an explicit image ask, else None.
+
+    An empty string is meaningful: Hannah was asked to make an image but no
+    subject was supplied, so she should ask what to make rather than invent
+    one silently.
+    """
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t:
+        return None
+    match = _IMAGE_ASK_RE.match(t) or _IMAGE_DRAW_RE.match(t)
+    if not match:
+        return None
+    prompt = (match.group(1) or "").strip()
+    prompt = re.sub(r"^(?:of|for)\s+", "", prompt, flags=re.IGNORECASE)
+    prompt = re.sub(r"^(?:something\s+)?like\s+", "", prompt,
+                    flags=re.IGNORECASE)
+    return prompt.strip(" \t\r\n.!?")[:1000]
+
+
+def _image_usage_row(conn: sqlite3.Connection, user_id: str,
+                     day: str) -> tuple[int, float]:
+    row = conn.execute(
+        "SELECT attempts, last_epoch FROM image_usage "
+        "WHERE user_id=? AND day=?", (user_id, day)).fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row[0] or 0), float(row[1] or 0.0)
+
+
+def image_gate(conn: sqlite3.Connection, user_id: str,
+               now_epoch: float | None = None) -> dict:
+    """Cooldown/daily-cap decision without recording an attempt."""
+    ensure_tables(conn)
+    now = time.time() if now_epoch is None else float(now_epoch)
+    day = datetime.fromtimestamp(now, tz=_TZ).strftime("%Y-%m-%d")
+    attempts, last_epoch = _image_usage_row(conn, user_id, day)
+    cap = image_daily_cap()
+    cooldown = image_cooldown_seconds()
+    remaining_cooldown = max(0, int(cooldown - (now - last_epoch))) \
+        if last_epoch else 0
+    allowed = attempts < cap and remaining_cooldown == 0
+    return {"allowed": allowed, "day": day, "attempts": attempts,
+            "daily_cap": cap, "cooldown_seconds": cooldown,
+            "retry_after_seconds": remaining_cooldown}
+
+
+def _record_image_attempt(conn: sqlite3.Connection, user_id: str, day: str,
+                          now_epoch: float) -> None:
+    conn.execute(
+        """INSERT INTO image_usage (user_id, day, attempts, last_epoch)
+           VALUES (?, ?, 1, ?)
+           ON CONFLICT(user_id, day) DO UPDATE SET
+               attempts = attempts + 1, last_epoch = excluded.last_epoch""",
+        (user_id, day, float(now_epoch)))
+    conn.commit()
+
+
+def _extract_generated_image(data: dict | None) -> dict:
+    """Pull inline image bytes or explanatory text from generateContent."""
+    if not isinstance(data, dict):
+        return {"status": "unavailable"}
+    feedback = data.get("promptFeedback") or {}
+    if feedback.get("blockReason"):
+        return {"status": "refused",
+                "detail": str(feedback.get("blockReason"))[:200]}
+    texts: list[str] = []
+    for candidate in data.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            if not isinstance(part, dict):
+                continue
+            inline = part.get("inlineData") or part.get("inline_data") or {}
+            raw = inline.get("data")
+            if raw:
+                try:
+                    image_bytes = base64.b64decode(raw, validate=True)
+                except Exception:
+                    continue
+                if image_bytes:
+                    return {"status": "ok", "bytes": image_bytes,
+                            "mime_type": inline.get("mimeType")
+                            or inline.get("mime_type") or "image/png"}
+            if part.get("text"):
+                texts.append(str(part["text"]).strip())
+        if candidate.get("finishReason") in ("SAFETY", "PROHIBITED_CONTENT"):
+            detail = " ".join(texts)[:300] or str(candidate["finishReason"])
+            return {"status": "refused", "detail": detail}
+    if texts:
+        return {"status": "refused", "detail": " ".join(texts)[:300]}
+    return {"status": "unavailable"}
+
+
+def _image_post(prompt: str, model: str) -> dict | None:
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    return gemini_keys.post_json(
+        _IMAGE_MODEL_URL.format(model=model), payload, timeout=120,
+        source="hannah-image", free_only=True, max_attempts=1)
+
+
+def _save_generated_image(image_bytes: bytes, mime_type: str) -> str:
+    extensions = {"image/png": "png", "image/jpeg": "jpg",
+                  "image/jpg": "jpg", "image/webp": "webp"}
+    ext = extensions.get((mime_type or "").lower(), "png")
+    os.makedirs(config.GENERATED_DIR, exist_ok=True)
+    filename = "hannah-img-{0}-{1}.{2}".format(
+        datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+        uuid.uuid4().hex[:10], ext)
+    path = os.path.join(config.GENERATED_DIR, filename)
+    with open(path, "wb") as fh:
+        fh.write(image_bytes)
+    return "/generated/" + filename
+
+
+def _handle_image_request(conn: sqlite3.Connection, user_id: str,
+                          character_id: str, prompt: str,
+                          now_epoch: float | None = None) -> dict:
+    if not prompt:
+        return {"brief": "He asked you to make an image but did not say what "
+                         "it should show. Ask him what he wants in it, "
+                         "warmly and briefly."}
+    gate = image_gate(conn, user_id, now_epoch=now_epoch)
+    if gate["attempts"] >= gate["daily_cap"]:
+        return {"brief": "He asked for another image, but he has hit "
+                         "today's image limit. Tell him honestly the "
+                         "picture desk is closed until tomorrow; do not "
+                         "promise a time you do not know."}
+    if gate["retry_after_seconds"]:
+        return {"brief": "He asked for another image too soon after the "
+                         "last one. Tell him the free image keys need a "
+                         "short breather and ask him to give you about a "
+                         "minute; do not claim you made it."}
+    now = time.time() if now_epoch is None else float(now_epoch)
+    _record_image_attempt(conn, user_id, gate["day"], now)
+
+    models = image_models()
+    last_result: dict = {"status": "unavailable"}
+    for model in models:
+        started = time.monotonic()
+        data = _image_post(prompt, model)
+        result = _extract_generated_image(data)
+        result["model"] = model
+        result["latency_s"] = round(time.monotonic() - started, 2)
+        if result["status"] == "ok":
+            image_url = _save_generated_image(result["bytes"],
+                                              result["mime_type"])
+            return {
+                "brief": (
+                    "You just made the image he asked for. It is being "
+                    "shown to him in the chat now as an image bubble. "
+                    "Respond in your own voice, briefly and warmly, like "
+                    "you made it for him; do not mention models, APIs, "
+                    "keys, or process. His prompt was: " + prompt[:300]),
+                "image_url": image_url,
+                "image_prompt": prompt,
+                "image_model": model,
+                "image_latency_s": result["latency_s"],
+            }
+        last_result = result
+        # A content refusal is an answer, not a transient pool failure.
+        if result["status"] == "refused":
+            break
+
+    if last_result.get("status") == "refused":
+        detail = str(last_result.get("detail") or "").strip()
+        suffix = (" It said: " + detail[:180]) if detail else ""
+        return {"brief": "The image maker refused that prompt." + suffix +
+                         " Tell him honestly in your own voice, without "
+                         "lecturing, and offer to make a safer version."}
+    return {"brief": "You tried to make the image, but the free image keys "
+                     "are resting or unavailable right now. Tell him "
+                     "honestly that you could not make it this minute and "
+                     "ask him to try again shortly; do not pretend an "
+                     "image is attached."}
+
+
 def maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                  character_id: str) -> dict | None:
     try:
@@ -1942,6 +2190,10 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if token:
             return _handle_github_token_intake(conn, user_id,
                                                character_id, token)
+        image_prompt = detect_image_request(text)
+        if image_prompt is not None:
+            return _handle_image_request(conn, user_id, character_id,
+                                         image_prompt)
         gh = detect_github_review(text)
         if gh is not None:
             return _handle_github_review(conn, user_id, character_id, gh)
