@@ -843,6 +843,13 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
         data = _http_post(url, payload, key_value, timeout)
     except urllib.error.HTTPError as e:
         error_type = _classify_http_error(e.code)
+        try:
+            _err_body = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            _err_body = ""
+        logger.warning(
+            "gemini_keys attempt failed: source=%s key_id=%s http=%s %s",
+            source, key_id, e.code, _err_body)
     except Exception:
         error_type = "other"
     seconds = time.monotonic() - start
