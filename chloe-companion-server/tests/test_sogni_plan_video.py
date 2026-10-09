@@ -303,6 +303,120 @@ class VideoAskTest(SogniPlanCase):
         self.assertEqual(len(self._jobs()), 1)
 
 
+class SogniMentionLaneTest(SogniPlanCase):
+    """2026-10-09 denial fix: ANY Sogni mention in Hannah's thread
+    routes to the plan lane before the brain, and a short confirmation
+    right after a Sogni exchange stays in the lane too."""
+    MSG1 = "Use my sogni account from now on to generate pics and videos"
+    MSG2 = "Yes they do I just had it put in"
+
+    def test_screenshot_messages_no_session_get_login_ask(self):
+        hit = assist.maybe_assist(self.conn, OWNER_USER, self.MSG1,
+                                  "hannah")
+        self.assertIsNotNone(hit)
+        self.assertEqual(
+            hit["brief"],
+            assist.FIXED_REPLY_PREFIX + assist._SOGNI_NO_SESSION_REPLY)
+        self.assertEqual(self._jobs(), [])
+        self.assertEqual(self.spawned, [])
+        # His pushback stays in the lane (the topic is open now).
+        hit2 = assist.maybe_assist(self.conn, OWNER_USER, self.MSG2,
+                                   "hannah")
+        self.assertEqual(
+            hit2["brief"],
+            assist.FIXED_REPLY_PREFIX + assist._SOGNI_NO_SESSION_REPLY)
+        self.assertEqual(self._jobs(), [])
+
+    def test_screenshot_messages_with_session_confirm_signed_in(self):
+        assist.store_sogni_session(self.conn, dict(TOKENS))
+        hit = assist.maybe_assist(self.conn, OWNER_USER, self.MSG1,
+                                  "hannah")
+        self.assertEqual(
+            hit["brief"],
+            assist.FIXED_REPLY_PREFIX
+            + assist._SOGNI_SIGNED_IN_REPLY)
+        hit2 = assist.maybe_assist(self.conn, OWNER_USER, self.MSG2,
+                                   "hannah")
+        self.assertEqual(
+            hit2["brief"],
+            assist.FIXED_REPLY_PREFIX
+            + assist._SOGNI_SIGNED_IN_REPLY)
+        self.assertEqual(self._jobs(), [])
+
+    def test_mention_without_make_ask_no_session(self):
+        hit = assist.maybe_assist(
+            self.conn, OWNER_USER, "are you on my sogni yet?", "hannah")
+        self.assertIsNotNone(hit)
+        self.assertEqual(
+            hit["brief"],
+            assist.FIXED_REPLY_PREFIX + assist._SOGNI_NO_SESSION_REPLY)
+
+    def test_continuation_needs_open_topic(self):
+        # The pushback shape alone must not hijack ordinary chat.
+        hit = assist.maybe_assist(self.conn, OWNER_USER, self.MSG2,
+                                  "hannah")
+        self.assertIsNone(hit)
+
+    def test_loose_media_ask_with_subject_renders(self):
+        assist.store_sogni_session(self.conn, dict(TOKENS))
+        hit = assist.maybe_assist(
+            self.conn, OWNER_USER,
+            "make me pics of you dancing through sogni", "hannah")
+        self.assertIsNotNone(hit)
+        self.assertIn("rendering now", hit["brief"])
+        jobs = self._jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["prompt"], "you dancing")
+        self.assertEqual(jobs[0]["billing_mode"], "subscription")
+
+    def test_loose_media_ask_no_session_asks_login(self):
+        hit = assist.maybe_assist(
+            self.conn, OWNER_USER,
+            "make me pics of you dancing through sogni", "hannah")
+        self.assertEqual(
+            hit["brief"],
+            assist.FIXED_REPLY_PREFIX + assist._SOGNI_NO_SESSION_REPLY)
+        self.assertEqual(self._jobs(), [])
+
+    def test_mention_lane_only_in_hannah_thread(self):
+        hit = assist.maybe_assist(self.conn, OWNER_USER, self.MSG1,
+                                  "chloe")
+        # Not the Sogni lane: no fixed login ask leaks to other girls.
+        self.assertTrue(hit is None
+                        or not hit["brief"].startswith(
+                            assist.FIXED_REPLY_PREFIX))
+
+    def test_non_owner_gets_nothing(self):
+        hit = assist.maybe_assist(
+            self.conn, {"user_id": "someone_else", "tier": "plus"},
+            self.MSG1, "hannah")
+        self.assertIsNone(hit)
+        self.assertEqual(self._jobs(), [])
+
+    def test_detect_sogni_media_ask(self):
+        self.assertEqual(
+            assist.detect_sogni_media_ask("generate pics and videos"),
+            "")
+        self.assertEqual(
+            assist.detect_sogni_media_ask(
+                "make me pics of you dancing through sogni"),
+            "you dancing")
+        self.assertIsNone(
+            assist.detect_sogni_media_ask("use my sogni account"))
+        self.assertIsNone(
+            assist.detect_sogni_media_ask("hey beautiful"))
+
+    def test_no_api_key_in_the_new_lane(self):
+        for fn in (assist._handle_sogni_lane,
+                   assist.detect_sogni_media_ask):
+            self.assertNotIn("SOGNI_API_KEY", inspect.getsource(fn),
+                             fn.__name__)
+
+    def test_brief_states_sogni_truth(self):
+        self.assertIn("Sogni Unlimited plan", assist._OWNER_BRIEF)
+        self.assertIn("systems don't work that way", assist._OWNER_BRIEF)
+
+
 class WorkerTest(SogniPlanCase):
     """The worker opens its own db.connect() — so these run against a
     real temp-file database (config.DB_PATH pointed at it), with the

@@ -745,7 +745,14 @@ anything not covered, ask him — never invent):
   rule is free-first, always.
 - Rocky is his main Muse agent; Hannah covers for him in chat:
   builds via the dev agent, code reviews, live app status, and
-  marketing copy. She never claims she did something she didn't."""
+  marketing copy. She never claims she did something she didn't.
+- Hannah's media hands: she CAN make short videos of herself for
+  him on his Sogni Unlimited plan (she signs in once with his chat
+  login; every render is covered by the plan) and pictures of
+  herself through the shared free Gemini pool. She NEVER tells him
+  her "systems don't work that way" or otherwise denies these: if
+  he mentions Sogni she is either signed in and ready to make it,
+  or she asks him for the one-time login."""
 
 _STATUS_RE = re.compile(
     r"\b(app status|status of (my|the|his) apps?|how('s| is| are) "
@@ -2875,6 +2882,104 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Sogni lane routing (2026-10-09): the plan-video lane above fires only
+# on the narrow "make a video ..." shape, so a message that merely
+# TALKS about Sogni ("use my sogni account from now on to generate
+# pics and videos") used to fall through to the brain — which
+# improvised "I can't hop into your Sogni account like that, Matty.
+# My systems don't work that way." Deterministic rule instead: in
+# Hannah's thread, ANY owner message that mentions Sogni routes here
+# before the brain — signed out means the fixed one-time-login ask,
+# signed in means a fixed ready confirmation (or the render flow when
+# he actually asked her to make something). A short confirmation
+# right after a Sogni exchange ("yes they do", "i just had it put
+# in") stays in the lane too — the topic stays open for a while after
+# any lane hit, so his pushback can't fall through either.
+# ---------------------------------------------------------------------------
+_SOGNI_MENTION_RE = re.compile(r"\bsogni\b", re.IGNORECASE)
+_SOGNI_MEDIA_ASK_RE = re.compile(
+    r"\b(?:make|create|generate|render|shoot|film|record|give|send)\b"
+    r"(?:\s+me)?\s*(?:a\s+|an\s+|some\s+|the\s+)?"
+    r"(?:videos?|pics?|pictures?|photos?|clips?)\b[,\s]*(.*)$",
+    re.IGNORECASE)
+_SOGNI_CONTINUATION_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ok|okay|sure|right|exactly|correct|"
+    r"i\s+did|i\s+just|it's\s+in|it\s+is\s+in|done|put\s+in|"
+    r"dropped\s+it|sent\s+it)\b",
+    re.IGNORECASE)
+_SOGNI_TOPIC_KIND = "sogni_topic"
+
+_SOGNI_SIGNED_IN_REPLY = (
+    "i'm signed into your sogni, babe — what do you want me to make?")
+
+
+def detect_sogni_media_ask(text: str) -> str | None:
+    """Loose make-something ask ("generate pics and videos", "make me
+    pics of you dancing"). Returns the subject ("" when the ask names
+    no subject), or None when it isn't a make ask at all."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t:
+        return None
+    m = _SOGNI_MEDIA_ASK_RE.search(t)
+    if not m:
+        return None
+    subject = (m.group(1) or "").strip()
+    subject = re.sub(
+        r"^(?:and\s+)?(?:videos?|pics?|pictures?|photos?|clips?)\b[,\s]*",
+        "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"\bsogni\b", "", subject, flags=re.IGNORECASE)
+    subject = re.sub(r"^(?:of|for|about|showing)\s+", "", subject,
+                     flags=re.IGNORECASE)
+    subject = re.sub(r"\s+(?:through|on|with|via|using)\s*$", "",
+                     subject, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", subject).strip(" \t\r\n.!?")[:1000]
+
+
+def _sogni_topic_touch(conn: sqlite3.Connection, user_id: str) -> None:
+    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, {"open": True})
+
+
+def _sogni_topic_open(conn: sqlite3.Connection, user_id: str) -> bool:
+    return _studio_fresh(_studio_get(conn, user_id, _SOGNI_TOPIC_KIND))
+
+
+def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
+                       character_id: str, text: str) -> dict | None:
+    """Hannah-thread router for everything Sogni. None = not ours."""
+    t = text or ""
+    subject = detect_sogni_video_request(t)
+    if subject is not None:
+        _sogni_topic_touch(conn, user_id)
+        return _handle_sogni_video_request(conn, user_id,
+                                           character_id, subject)
+    if _SOGNI_MENTION_RE.search(t):
+        _sogni_topic_touch(conn, user_id)
+        if not stored_sogni_session(conn):
+            return {"brief": FIXED_REPLY_PREFIX
+                    + _SOGNI_NO_SESSION_REPLY}
+        loose = detect_sogni_media_ask(t)
+        if loose:
+            return _handle_sogni_video_request(conn, user_id,
+                                               character_id, loose)
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_SIGNED_IN_REPLY}
+    # No Sogni name, no video ask: a short confirmation while the
+    # Sogni topic is open ("yes they do", "i just had it put in")
+    # stays in the lane instead of falling to the brain — but never
+    # swallows one of her other abilities or a real typed intent.
+    if _sogni_topic_open(conn, user_id) \
+            and len(t.strip()) <= 160 \
+            and _SOGNI_CONTINUATION_RE.search(t) \
+            and not _strong_other_intent(t) \
+            and detect_intent(t)[0] not in ("reminder", "email_draft",
+                                            "job_search"):
+        if not stored_sogni_session(conn):
+            return {"brief": FIXED_REPLY_PREFIX
+                    + _SOGNI_NO_SESSION_REPLY}
+        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_SIGNED_IN_REPLY}
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Chat attachments — owner-only Hannah image/file intake (2026-10-09).
 #
 # The owner can attach images, videos, and readable documents to a
@@ -4548,14 +4653,16 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if attachments:
             return analyze_chat_attachments(conn, user, text,
                                             character_id, attachments)
-        # Sogni plan videos (owner-only, Hannah's thread only) —
+        # Sogni plan lane (owner-only, Hannah's thread only) —
         # checked before the image lane so "make a video" never lands
-        # in the picture desk.
-        video_subject = detect_sogni_video_request(text)
-        if video_subject is not None and \
-                (character_id or "").strip().lower() == "hannah":
-            return _handle_sogni_video_request(
-                conn, user_id, character_id, video_subject)
+        # in the picture desk. ANY Sogni mention routes here (plus
+        # short confirmations while the topic is open) so the brain
+        # never improvises a capability denial.
+        if (character_id or "").strip().lower() == "hannah":
+            sogni_hit = _handle_sogni_lane(conn, user_id,
+                                           character_id, text)
+            if sogni_hit is not None:
+                return sogni_hit
         image_prompt = detect_image_request(text)
         if image_prompt is not None:
             return _handle_image_request(conn, user_id, character_id,
