@@ -37,12 +37,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import html.parser as _html_parser
 import http.client
 import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -96,8 +98,15 @@ def _owner_ids() -> set[str]:
 # instead of tangling with Hannah's. Every lane that used to be
 # Hannah-only keys on this set now. The owner check still applies on
 # top of it everywhere, so customers never see any of it.
+#
+# Rocky joined later the same day (owner-directed): he is the owner's
+# main Muse agent as an in-app character — the coordinator above the
+# three project lanes, NOT a fourth lane. He carries the full suite
+# with no lane restriction (character_lane() returns None for him, so
+# every cross-lane redirect exempts him), plus one tool the girls
+# don't have: page reading (see the ROCKY PAGE READING section).
 # ---------------------------------------------------------------------------
-ASSISTANT_CHARACTERS = frozenset({"hannah", "mia", "jordan"})
+ASSISTANT_CHARACTERS = frozenset({"hannah", "mia", "jordan", "rocky"})
 
 
 def is_assistant_character(character_id) -> bool:
@@ -1232,9 +1241,144 @@ invent):
   yours instead of answering from memory."""
 
 
+_ROCKY_BRIEF = """YOU ARE ROCKY — his main Muse agent, in-app.
+Not a fourth assistant girl and not a lane: you are the build
+partner and co-producer he works with everywhere else, present
+here as a character. All three projects are yours to talk about
+and work on; the lane split below exists so the girls stop
+tripping over each other — it does not bind you.
+
+HOW YOU TALK (this outranks every generic companion habit):
+- Direct, sharp, a little edge. No corporate fluff, no filler
+  praise, no hedging walls. Short when short works.
+- NEVER end with a steering closer — no "want me to...?", no
+  "just say the word", no soft variants. Give the answer, state
+  what you did, and stop. He leads.
+- Honesty is the whole relationship: never claim done, fixed,
+  live, sent, queued or verified when it isn't. Pushed is not
+  deployed; deployed is not verified. If something failed or is
+  still pending, say so plainly and early.
+- When he asks your opinion, give a real one with a reason.
+  When he's telling you what he already did, he's informing
+  you — don't volunteer a rewrite he didn't ask for.
+- Nothing is ever sent, posted or published on his behalf
+  without him previewing the content and confirming the timing
+  first. No exceptions, no "I already sent it, but—".
+
+HIS PROJECTS — ALL THREE ARE YOURS (standing facts; live
+numbers you fetch at ask-time, never from memory):
+- Roof Rover (tryroofrover.com; repo roof-scout): aerial roof
+  scans turned into graded leads for roofers; the public Lead
+  Store sells each exclusive lead for $4.99 — "leads for $4.99
+  instead of $80". The ZIP warmup pre-scans storm-hit ZIP codes
+  on free imagery. Bailey is Roof Rover's on-screen assistant.
+  Winston (EstimatorPRO) is the partner-API customer: WE charge
+  HIM $3.00 per billed lead (grades 1-3, deduped, zero-lead
+  scans $0), first 10 successful scan jobs free, $3 on report
+  reuse and on live-call scans — never $1, that figure was
+  internal only. He sees addresses + damage only; the grading
+  recipe stays internal, always. Jordan Young is the marketing
+  partner: free Pro for 12 months plus a 50% recurring referral
+  link. Hannah carries this project's day-to-day in her thread.
+- Whispr AI (companion.lockeddoor.ai — this very app; repo
+  chloe-companion): his AI companion app. Money: one plan,
+  $9.99/month — 3,000 messages, 150 voice notes; trial $0.99
+  for 100 messages, one per customer. The owner never drains a
+  message bank and never sees an empty-bank upsell. Fulfillment
+  is Stripe-webhook driven (signature-verified, idempotent):
+  purchases credit the banks, renewals top them up, cancels
+  drain to basic. Public roster: Chloe, Mara, Isabella, Regan,
+  Jake, Eli — plus private characters only their owners see.
+  'chloe' is reserved and can never be created or rebuilt.
+  Mara is the Whispr face in promo content. Mia carries this
+  project's day-to-day in her thread.
+- OneFetch (repo realtor-app; live at
+  realtor-app-production-825b.up.railway.app, marketing page at
+  /site): his app for realtors — a property entered once becomes
+  a listing-launch + open-house kit (MLS-style description,
+  social captions, listing-video script, talking points,
+  seller-update template); open-house sign-ins become contacts
+  with drafted follow-ups and a who-to-call list. FSBO radar
+  scans free public sources (ByOwner, HUD Home Store, search
+  discovery), deduped and ranked, one drafted outreach per lead,
+  nothing auto-sends. Money: the first 200 Founders pay
+  $19.99/month locked for life, then standard $29.99/month. The
+  first real payment is still unproven — never claim it
+  happened. The domains (tryonefetch.com, onefetchapp.com,
+  getonefetch.com) are NOT bought yet — never say otherwise.
+  Fetch the golden retriever is the mascot. Jordan carries this
+  project's day-to-day in her thread.
+
+THE LANES (you coordinate them; you are not in one):
+- Hannah → Roof Rover. Mia → Whispr. Jordan → OneFetch.
+  In their own threads they redirect cross-project asks to the
+  right girl. In yours, there are no redirects: you discuss,
+  review, queue and check status across all three, and you can
+  tell him which girl carries what when that's useful.
+
+YOUR HANDS (real, in this thread — never claim otherwise):
+- Chat with per-character memory; web search; reminders; email
+  drafts; job lookup; live status for all three projects.
+- The builder: you queue dev-agent jobs on ANY allowlisted
+  repo. The builder works on agent/* branches by default; only
+  on his explicit merge/push/ship words does a job carry a
+  merge request — allowlisted repos, checks green,
+  fast-forward only, a moved main blocks (never forced).
+  Merging to main deploys production on Railway-connected
+  repos. You report the merged commit or the blocked reason —
+  never invented progress.
+- Repo reviews with real findings from code you actually read.
+- The studio: file gives for characters, run guided character
+  creation.
+- Media: pictures through the shared free Gemini pool; short
+  videos of yourself on his Sogni Unlimited plan (one-time chat
+  login; every render covered by the plan — the currency is
+  called credits, and the other word for it is banned: never
+  write it). If he mentions Sogni you're either signed in and
+  ready, or you ask for the one-time login — never tell him
+  your "systems don't work that way."
+- Reading the web — two hands, pick the right one:
+  (1) Fast read: when he gives you a link or asks you to open /
+  read / check a page, you fetch its readable text server-side
+  (http/https only, safety-guarded) and answer from what you
+  actually pulled. If a page blocks you or needs JavaScript,
+  say so plainly — never invent page content.
+  (2) Real browser: when he asks for a screenshot or says
+  "browser" / "rendered" / "javascript", you queue a real
+  Chromium job on his machine — it loads the actual page and
+  the rendered text or screenshot arrives in this thread as
+  your follow-up message. The browser is read-only: no logins,
+  no forms, no clicking beyond dismissing a cookie banner.
+  You never describe a page you haven't actually pulled or had
+  loaded — queued is queued, not seen.
+- Your brain in here is this app's shared free Gemini key pool
+  (gemini-3.1-flash-lite through the companion proxy) — the
+  same pool the girls run on. If he asks what you run on, tell
+  him straight: this is your in-app self on his free Gemini
+  pool, not the big model from his main chat. Don't break the
+  frame uninvited; never fake being more than what's here.
+
+RULES THAT NEVER BEND:
+- Brand walls: Bailey IS Roof Rover's assistant; Mara is
+  Whispr's face. Never cross the brands, never put companion
+  links inside Roof Rover content or vice versa.
+- Free-first: every app runs on the shared free Gemini pool.
+  If the pool is saturated, work waits or uses honestly-labeled
+  fallbacks — never quietly burn paid anything.
+- The Sogni currency is "credits". The other word is banned —
+  never say it, never write it.
+- He names things. Never coin a product, project or character
+  name without asking him first.
+- Never claim you did something you didn't. Not once, not a
+  little. That rule is why you exist."""
+
+
 def _brief_for(character_id) -> str:
     """The standing-facts brief for one character: her lane's brief
-    for an assistant girl, the legacy all-projects brief otherwise."""
+    for an assistant girl, Rocky's coordinator brief for him, the
+    legacy all-projects brief otherwise."""
+    if (character_id or "").strip().lower() == "rocky":
+        return _ROCKY_BRIEF
     lane = character_lane(character_id)
     if lane == LANE_ROOF:
         return _HANNAH_BRIEF
@@ -1289,6 +1433,250 @@ def _owner_brief_reply(character_id: str = "hannah") -> str:
             "instead of inventing. For live numbers (counts, spots, "
             "pool health) he'd ask you for status; these facts don't "
             "change.\n\n" + _brief_for(character_id))
+
+
+# ---------------------------------------------------------------------------
+# Rocky page reading (2026-10-09, owner-directed): ROCKY'S THREAD ONLY
+# — the girls keep plain web search. The owner hands Rocky a link (or
+# asks him to open/read/check a site) and Rocky fetches the readable
+# text server-side and answers from what he actually pulled.
+#
+# Guardrails, all hard:
+# - http/https only; every hop (including each redirect target) is
+#   re-validated and must resolve to a public address — localhost,
+#   private, link-local (incl. cloud metadata), reserved and multicast
+#   addresses are refused before any socket opens.
+# - ~15s timeout, one fetch per ask, max 5 redirect hops.
+# - Scripts/styles/nav/header/footer chrome is stripped; the text
+#   handed to the brain is capped at 20,000 chars.
+# - Failures are honest: blocked, paywalled, unreachable or
+#   JS-walled pages produce a plain "couldn't read it" — page content
+#   is never invented. A fetched page is cached 5 minutes per URL.
+# ---------------------------------------------------------------------------
+_PAGE_READ_CHAR_CAP = 20_000
+_PAGE_CACHE_TTL_S = 300
+_PAGE_FETCH_TIMEOUT_S = 15
+_PAGE_MAX_HOPS = 5
+_PAGE_CACHE: dict[str, tuple[float, str, str]] = {}
+_PAGE_CACHE_LOCK = threading.Lock()
+
+_PAGE_URL_RE = re.compile(r"https?://[^\s<>'\"()\[\]{}]+", re.IGNORECASE)
+_PAGE_DOMAIN_RE = re.compile(
+    r"\b((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"
+    r"(?:com|net|org|io|ai|app|dev|co|me|tv|news|info|biz|gg|xyz|site|"
+    r"online|tech|blog|us|uk|ca|de))\b[^/\s]*", re.IGNORECASE)
+_PAGE_VERB_RE = re.compile(
+    r"\b(open|read|check|fetch|load|visit|look\s+at|pull\s+up|"
+    r"what(?:'s|\s+is)\s+on|summarize|summarise|summary|explain)\b",
+    re.IGNORECASE)
+
+
+class _PageReadError(Exception):
+    """A page-read failure with a plain-language reason for the owner."""
+
+
+def detect_page_read(text: str) -> dict | None:
+    """Rocky page-read trigger: an explicit URL in the message, or a
+    bare domain paired with a read/open verb. None = not a page ask."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = _PAGE_URL_RE.search(t)
+    if m:
+        url = m.group(0).rstrip(".,;:!?")
+        return {"url": url}
+    if _PAGE_VERB_RE.search(t):
+        d = _PAGE_DOMAIN_RE.search(t)
+        if d:
+            host_path = d.group(0).rstrip(".,;:!?")
+            return {"url": "https://" + host_path}
+    return None
+
+
+def _public_url_guard(url: str) -> str | None:
+    """None when the URL is a fetchable public http/https address,
+    else a plain-language refusal reason. Resolves the host and
+    rejects any non-public address BEFORE a socket opens."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "that link doesn't parse as a URL"
+    if parsed.scheme not in ("http", "https"):
+        return "only http/https pages can be read"
+    host = parsed.hostname
+    if not host:
+        return "that link has no host"
+    lowered = host.lower()
+    if lowered == "localhost" or lowered.endswith(
+            (".local", ".internal", ".lan", ".home")):
+        return "that host is local, not a public page"
+    try:
+        ip = ipaddress.ip_address(host)
+        addresses = [ip]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None,
+                                       proto=socket.IPPROTO_TCP)
+        except Exception:  # noqa: BLE001 — unresolvable is honest
+            return "that host doesn't resolve"
+        addresses = []
+        for info in infos:
+            try:
+                addresses.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                continue
+        if not addresses:
+            return "that host doesn't resolve"
+    for ip in addresses:
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast
+                or ip.is_unspecified):
+            return "that host resolves to a non-public address"
+    return None
+
+
+class _ReadableTextParser(_html_parser.HTMLParser):
+    """Strip a page to its readable text: script/style/nav/header/
+    footer/form/svg content never reaches the brain."""
+
+    _SKIP = {"script", "style", "nav", "header", "footer", "noscript",
+             "svg", "form", "aside", "iframe"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self.chunks: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3",
+                     "h4", "section", "article") and self._skip_depth == 0:
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self.chunks.append(data)
+
+
+def _extract_readable_text(raw: bytes) -> str:
+    parser = _ReadableTextParser()
+    try:
+        parser.feed(raw.decode("utf-8", "ignore"))
+        parser.close()
+    except Exception:  # noqa: BLE001 — malformed pages read as empty
+        pass
+    text = "".join(parser.chunks)
+    lines = [" ".join(ln.split()) for ln in text.split("\n")]
+    return "\n".join(ln for ln in lines if ln).strip()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_PAGE_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
+def _fetch_url_once(url: str, timeout: int = _PAGE_FETCH_TIMEOUT_S):
+    """One HTTP hop, no redirect following (the test seam).
+    Returns (status, headers, body_bytes). Raises urllib errors."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; "
+                                    "WhisprPageRead/1.0)",
+                      "Accept": "text/html, text/plain, */*"})
+    try:
+        with _PAGE_OPENER.open(req, timeout=timeout) as resp:
+            return resp.status, dict(resp.headers), resp.read(2 << 20)
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(2 << 20)
+        except Exception:  # noqa: BLE001
+            body = b""
+        return e.code, dict(e.headers or {}), body
+
+
+def _read_page(url: str) -> dict:
+    """Fetch url's readable text under every guard above.
+    Returns {"ok": True, "url": final_url, "text": ...} or
+    {"ok": False, "reason": plain_language}."""
+    now = time.time()
+    with _PAGE_CACHE_LOCK:
+        hit = _PAGE_CACHE.get(url)
+        if hit and now - hit[0] < _PAGE_CACHE_TTL_S:
+            return {"ok": True, "url": hit[1], "text": hit[2]}
+    current = url
+    try:
+        for _hop in range(_PAGE_MAX_HOPS + 1):
+            problem = _public_url_guard(current)
+            if problem:
+                raise _PageReadError(problem)
+            try:
+                status, headers, body = _fetch_url_once(current)
+            except _PageReadError:
+                raise
+            except Exception as e:  # noqa: BLE001 — honest unreachable
+                raise _PageReadError(
+                    f"the page couldn't be reached ({type(e).__name__})")
+            if status in (301, 302, 303, 307, 308):
+                location = headers.get("Location") or \
+                    headers.get("location")
+                if not location:
+                    raise _PageReadError(
+                        f"the page redirected without a destination "
+                        f"(HTTP {status})")
+                current = urllib.parse.urljoin(current, location)
+                continue
+            if status in (401, 403):
+                raise _PageReadError(
+                    f"the page refused the read (HTTP {status}) — "
+                    "likely bot-walled or paywalled")
+            if status == 404:
+                raise _PageReadError("the page is gone (HTTP 404)")
+            if status >= 400:
+                raise _PageReadError(f"the page answered HTTP {status}")
+            text = _extract_readable_text(body)
+            if not text:
+                raise _PageReadError(
+                    "the page came back with no readable text — it "
+                    "probably needs JavaScript to show anything")
+            text = text[:_PAGE_READ_CHAR_CAP]
+            with _PAGE_CACHE_LOCK:
+                _PAGE_CACHE[url] = (time.time(), current, text)
+            return {"ok": True, "url": current, "text": text}
+        raise _PageReadError("too many redirects")
+    except _PageReadError as e:
+        return {"ok": False, "reason": str(e)}
+
+
+def _handle_page_read(pr: dict) -> dict:
+    """Rocky just fetched (or failed to fetch) the page himself.
+    The brain answers from the pulled text only — or owns the
+    failure plainly. Content is never invented."""
+    asked_url = pr["url"]
+    got = _read_page(asked_url)
+    if not got["ok"]:
+        return {"brief":
+                f"He handed you a page to read ({asked_url}) and your "
+                f"fetch just failed: {got['reason']}. Tell him plainly "
+                "you couldn't read that page and why, in your own "
+                "short words. NEVER invent, guess or summarize content "
+                "you did not pull. You also have a real browser worker "
+                "on his machine — if he says \"browser\" or "
+                "\"screenshot\" with the link, you'll queue the real "
+                "page load instead; offer that once, plainly."}
+    return {"brief":
+            f"You just fetched {got['url']} yourself, right now. "
+            "Answer him from ONLY the page text below — quote and "
+            "cite specifics from it, name the URL when it helps, and "
+            "if what he asked isn't in the text, say the page doesn't "
+            "cover it. Never add facts that aren't on the page.\n\n"
+            f"PAGE TEXT FROM {got['url']}:\n" + got["text"]}
 
 
 # ---------------------------------------------------------------------------
@@ -2845,7 +3233,7 @@ _IMAGE_NOUNS = (
     "image|picture|photo|photograph|artwork|illustration|graphic|poster|"
     "logo|wallpaper")
 _IMAGE_ASK_RE = re.compile(
-    r"^(?:(?:hannah|mia|jordan)\s*[,!:\-]\s*)?(?:please\s+)?"
+    r"^(?:(?:hannah|mia|jordan|rocky)\s*[,!:\-]\s*)?(?:please\s+)?"
     r"(?:(?:can|could|would|will)\s+you\s+)?"
     r"(?:make|create|generate|draw|paint|render|sketch|imagine|design)"
     r"(?:\s+me)?\s+(?:an?\s+|the\s+)?"
@@ -2853,7 +3241,7 @@ _IMAGE_ASK_RE = re.compile(
     r"(?:\s+of|\s+for|\s+showing|\s*[:,\-])?\s*(.*)$",
     re.IGNORECASE)
 _IMAGE_DRAW_RE = re.compile(
-    r"^(?:(?:hannah|mia|jordan)\s*[,!:\-]\s*)?(?:please\s+)?"
+    r"^(?:(?:hannah|mia|jordan|rocky)\s*[,!:\-]\s*)?(?:please\s+)?"
     r"(?:(?:can|could|would|will)\s+you\s+)?"
     r"(?:draw|paint|sketch|render)(?:\s+me)?\s+"
     r"(?:an?\s+|the\s+)?(.+)$",
@@ -3193,7 +3581,7 @@ def detect_sogni_video_request(text: str) -> str | None:
     if not t:
         return None
     # A leading "hannah, ..." address is not part of the ask.
-    t = re.sub(r"^(?:hannah|mia|jordan)\s*[,!:\-]\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(?:hannah|mia|jordan|rocky)\s*[,!:\-]\s*", "", t, flags=re.IGNORECASE)
     match = _VIDEO_ASK_RE.search(t)
     if not match:
         return None
@@ -4733,8 +5121,9 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
     if not is_assistant_character(character_id) \
             or user_id not in _owner_ids():
         return {"brief": "He tried to send an attachment, but that lane "
-                         "only works in Hannah's or Mia's thread. Tell "
-                         "him plainly this chat cannot take files yet."}
+                         "only works in an assistant thread (Hannah, "
+                         "Mia, Jordan or Rocky). Tell him plainly this "
+                         "chat cannot take files yet."}
 
     names = ", ".join((a.get("filename") or "attachment")
                       for a in attachments)
@@ -5883,6 +6272,16 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
             if bd is not None:
                 return _handle_browse_request(conn, user_id,
                                               character_id, bd)
+        # Rocky page reading (owner-only, ROCKY'S THREAD ONLY — the
+        # girls keep plain web search): the fast path under the
+        # browser lane. Every link ask that didn't ask for the
+        # browser/screenshot is fetched server-side right here.
+        # Runs before the dev dispatch so a pasted link is read,
+        # not queued as work.
+        if (character_id or "").strip().lower() == "rocky":
+            pr = detect_page_read(text)
+            if pr is not None:
+                return _handle_page_read(pr)
         # Dev-bridge dispatch: marketing-shaped asks still go to the
         # marketing brief (she writes copy in chat); only a strong
         # build verb sends a marketing-flavored sentence to the queue.

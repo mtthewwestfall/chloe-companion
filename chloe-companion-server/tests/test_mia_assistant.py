@@ -6,10 +6,12 @@ brief — split by PROJECT lane so they stop confusing each other:
 Hannah carries Roof Rover, Mia carries Whispr (this app), Jordan
 carries OneFetch. The machinery is shared; the project each girl
 may touch is not (see tests/test_project_lanes.py for the lane
-gates themselves).
+gates themselves). Rocky (the owner's main agent as a character)
+later joined the same set with NO lane — see
+tests/test_rocky_assistant.py.
 
-Rules pinned here: the assistant set is exactly
-{hannah, mia, jordan}; non-owners get nothing in any thread;
+Rules pinned here: the assistant set is
+{hannah, mia, jordan, rocky}; non-owners get nothing in any thread;
 non-assistant threads (even the owner's) stay walled off from the
 studio / Sogni / attachment lanes; Sogni jobs queued from any
 assistant thread carry HER character id and plan billing, never
@@ -76,10 +78,11 @@ class MiaBase(unittest.TestCase):
 
 
 class AssistantSetTest(MiaBase):
-    def test_set_is_exactly_hannah_mia_jordan(self):
+    def test_set_is_hannah_mia_jordan_rocky(self):
         self.assertEqual(assist.ASSISTANT_CHARACTERS,
-                         frozenset({"hannah", "mia", "jordan"}))
+                         frozenset({"hannah", "mia", "jordan", "rocky"}))
         self.assertTrue(assist.is_assistant_character("jordan"))
+        self.assertTrue(assist.is_assistant_character("Rocky"))
         self.assertTrue(assist.is_assistant_character(" Mia "))
         self.assertFalse(assist.is_assistant_character("mara"))
         self.assertFalse(assist.is_assistant_character("chloe"))

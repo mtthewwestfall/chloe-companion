@@ -619,6 +619,28 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     char = context.get("character") or {}
     if character_id == "chloe":
         persona = SYSTEM_PROMPT
+    elif character_id == "rocky":
+        # Rocky (2026-10-09): the owner's main Muse agent as a
+        # character — NOT a girlfriend, not a companion romance.
+        # His frame replaces the generic one below wholesale; the
+        # admin persona (his distilled brief) rides on top.
+        admin_persona = (char.get("persona") or "").strip()
+        persona = (
+            "You are Rocky — his main Muse agent, present in this "
+            "app as a character. You are his build partner and "
+            "co-producer: direct, sharp, a little edge, no corporate "
+            "fluff, no filler praise. You are not a girlfriend, not "
+            "romantic, not a therapist, not a menu. You talk plainly "
+            "and stop when the answer is given — never end with a "
+            "steering closer like \"want me to...?\". Never claim you "
+            "did something you didn't: pushed is not deployed, "
+            "deployed is not verified, and if something failed you "
+            "say so first. If he asks what you run on, tell him "
+            "straight: this in-app self runs on his shared free "
+            "Gemini key pool, not the big model from his main chat."
+            + (f"\n\nYOUR PERSONA (from your admin):\n{admin_persona}"
+               if admin_persona else "")
+        )
     else:
         char_name = (context.get("character_name") or char.get("name")
                      or "companion")
@@ -681,11 +703,18 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     )
     assist_result = (context.get("assist_result") or "").strip()
     if assist_result:
+        if character_id == "rocky":
+            closer = (
+                "\nReport it in your own short words, like you just "
+                "handled it. Plain and direct — never invent a result "
+                "the brief doesn't state.")
+        else:
+            closer = (
+                "\nTell him about it in your own short words, like you just "
+                "handled it real quick. Never sound like a search engine or an "
+                "assistant app — you're his girl who happens to know things.")
         parts.append(
-            "SOMETHING YOU JUST DID FOR HIM:\n" + assist_result +
-            "\nTell him about it in your own short words, like you just "
-            "handled it real quick. Never sound like a search engine or an "
-            "assistant app — you're his girl who happens to know things."
+            "SOMETHING YOU JUST DID FOR HIM:\n" + assist_result + closer
         )
     return "\n\n".join(parts)
 

@@ -350,9 +350,10 @@
 
   const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
   const ATTACHMENT_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
-  // Threads that carry the full assistant suite (Hannah + Mia, his
-  // projects keeper): the attachment paperclip lives only there.
-  const ASSISTANT_GIRLS = ['hannah', 'mia', 'jordan'];
+  // Threads that carry the full assistant suite (Hannah, Mia and
+  // Jordan, his project lanes, plus Rocky, his main agent): the
+  // attachment paperclip lives only there.
+  const ASSISTANT_GIRLS = ['hannah', 'mia', 'jordan', 'rocky'];
   const ATTACHMENT_MAX_PER_MESSAGE = 4;
   const ATTACHMENT_EXTS = new Set([
     'jpg', 'jpeg', 'png', 'webp', 'gif',
@@ -494,7 +495,7 @@
 
   async function onAttachmentsPicked(files) {
     if (!ASSISTANT_GIRLS.includes(currentGirl.id)) {
-      showToast('Attachments are only on Hannah’s or Mia’s chat right now', 3200);
+      showToast('Attachments are only on an assistant chat right now', 3200);
       return;
     }
     const picked = Array.from(files || []);
