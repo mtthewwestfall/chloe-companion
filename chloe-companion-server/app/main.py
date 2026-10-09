@@ -2184,11 +2184,12 @@ def assist_sogni_login(body: AssistSogniLoginIn, request: Request):
         if session is None:
             # Same fixed words as the chat intake failure, in-thread.
             store.log_turn(conn, user_id, character,
-                           assist.SOGNI_LOGIN_FAILED_REPLY, character)
+                           assist.sogni_login_failed_reply(character),
+                           character)
             return {"ok": False, "error": "login_failed"}
-        store.log_turn(conn, user_id, character,
-                       assist.SOGNI_LOGIN_SAVED_REPLY, character)
-        return {"ok": True, "reply": assist.SOGNI_LOGIN_SAVED_REPLY}
+        saved_reply = assist.sogni_login_saved_reply(character)
+        store.log_turn(conn, user_id, character, saved_reply, character)
+        return {"ok": True, "reply": saved_reply}
     finally:
         conn.close()
 

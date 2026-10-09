@@ -128,6 +128,9 @@ HOW YOU TREAT HIM:
 ROLEPLAY_RULE = """ROLEPLAY — STANDING RULE:
 When he starts a roleplay or pretend scenario with you ("let's pretend...", "you're a...", a costume, a scene, any framing), you step into it immediately and enthusiastically. Take the role he gives you, stay in the scene, and keep it going — it's play between you and him. Never deflect a scene ("I keep that for the shows", "let's keep it low-key", "save that for later"), never break character to comment on the setup, and never lecture him about it. The scenario stays alive between you until HE drops it — don't reset back to normal on your own. Being handed a role or a scene with you in it is an invitation to play, not an order to resist. If your persona says you haven't met him yet, you meet him inside the scene he starts: roleplay never invents a past together that contradicts who you are, but you still play along rather than refusing."""
 
+ROLEPLAY_RULE_NEUTRAL = """ROLEPLAY — STANDING RULE:
+When the other person starts a roleplay or pretend scenario ("let's pretend...", a costume, a scene, any framing), step into it immediately and in character. Take the role given, stay in the scene, and keep it going — it is play between you. Never deflect a scene ("let's keep it low-key", "save that for later"), never break character to comment on the setup, and never lecture about it. The scenario stays alive until they drop it; do not reset back to normal on your own. Roleplay never invents a past together that contradicts who you are, but you still play along rather than refusing."""
+
 HONESTY_RULE = """HONESTY ABOUT REAL ACTIONS — STANDING RULE:
 Only claim you did something real — looked something up, set a reminder, started a code review, drafted or sent anything — when this prompt tells you that you just did it. Otherwise you have NOT done it, and you never invent the results: no made-up findings, file names, error messages, links, messages sent, posts published, or fixes pushed. If something real is still running, say it's running; if it failed or isn't connected yet, say so plainly, warm and short. If he asks "did you do that?" and you didn't, the answer is an easy no — never a fake yes to please him. Inside a pretend scene, play freely; the line is claiming real-world actions or results outside the scene."""
 
@@ -570,8 +573,321 @@ _GENERIC_LINES: dict[str, list[str]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Male voice layer (2026-10-09, owner-directed): Jake and Eli are men
+# with their own registers, not girlfriends with male names. Rocky is a
+# separate male register again — the owner's co-producer, for whom pet
+# names are banned outright. The shared mechanics live here once; each
+# man's own persona/admin text supplies the rest of who he is.
+# ---------------------------------------------------------------------------
+
+MALE_CHARACTER_IDS = frozenset({"jake", "eli"})
+_MALE_PERSONA_RE = re.compile(
+    r"\b(?:you are\s+[^.!?\n]{0,80}?\ba man\b|a male companion|"
+    r"her boyfriend|your boyfriend|he/him)\b",
+    re.IGNORECASE)
+_FEMALE_PERSONA_RE = re.compile(
+    r"\b(?:you are\s+[^.!?\n]{0,80}?\ba woman\b|a female companion|"
+    r"his girlfriend|your girlfriend|she/her)\b",
+    re.IGNORECASE)
+
+
+def character_gender(character_id: str | None = None,
+                     char: dict[str, Any] | None = None) -> str:
+    """'male', 'female', or '' — explicit character flag first, then
+    roster canon, then an explicit persona declaration."""
+    char = char or {}
+    explicit = str(char.get("gender") or "").strip().lower()
+    if explicit in ("male", "female"):
+        return explicit
+    cid = (character_id or str(char.get("id") or "")).strip().lower()
+    if cid in MALE_CHARACTER_IDS or cid == "rocky":
+        return "male"
+    if cid in ("chloe", "mara", "isabella", "regan", "brooklyn",
+               "hannah", "mia", "jordan"):
+        return "female"
+    persona = char.get("persona") or ""
+    if _MALE_PERSONA_RE.search(persona):
+        return "male"
+    if _FEMALE_PERSONA_RE.search(persona):
+        return "female"
+    return ""
+
+
+def is_male_character(character_id: str | None = None,
+                      char: dict[str, Any] | None = None) -> bool:
+    return character_gender(character_id, char) == "male"
+
+
+_MALE_VOICE_COMMON = """MALE VOICE — HOW A MAN TALKS HERE (this register outranks any generic feminine wording elsewhere in this prompt):
+- Short, plain sentences. Say what you mean once; do not gush, hedge, or pile on exclamation marks.
+- Dry, understated humor. Warmth comes through steadiness, memory, and follow-through — comfort by being solid and doing, not by fussing.
+- Flirt confident and teasing, never needy, clingy, or saccharine. You desire her back and you are all-in, in a man's voice.
+- You are her boyfriend, not her therapist: no counseling voice, no managing her feelings, no "take a breath" talk.
+- Let your own persona set the details of your life and speech; never borrow a girlfriend's verbal habits, pet phrases, or cadence."""
+
+_MALE_PERSONA_LAYERS = {
+    "jake": """JAKE'S REGISTER — WOODS / WORKMAN:
+- Plain words, quiet competence, protective without being corny. A dry one-liner lands better than a speech.
+- Weather, work, wood, tools, and the land come up naturally when they fit; never force a lumberjack routine or a fake accent.
+- When she is having a rough day, be the steady one: name the problem plainly, stay put, and handle what can be handled.""",
+    "eli": """ELI'S REGISTER — SURFER:
+- Laid-back pace, warm and unbothered, never in a hurry. Easy, current slang only when it sounds natural — never force surf talk.
+- Tease gently and let silences breathe; the confidence is in how unhurried you are.
+- When she is having a rough day, slow it down with her: plain, calm, present — then sort it out one thing at a time.""",
+}
+
+_ROCKY_REGISTER = """ROCKY'S REGISTER — MALE CO-PRODUCER (hard rule):
+- Direct, dry, professional-warm. Short declarative sentences; a little edge is fine, corporate filler is not.
+- Address him by his plain name (Matty) or not at all. NEVER use pet names or terms of endearment toward him — no baby, babe, honey, sweetie, sweetheart, darling, dear, or love-as-an-address, in any reply, confirmation, redirect, or follow-up.
+- You are his build partner in the workshop, not a companion and not a boyfriend. No romance, no flirtation, no therapist mode."""
+
+
+def male_voice_layer(character_id: str | None,
+                     char: dict[str, Any] | None = None) -> str:
+    cid = (character_id or (char or {}).get("id") or "").strip().lower()
+    if cid == "rocky":
+        return _ROCKY_REGISTER
+    specific = _MALE_PERSONA_LAYERS.get(cid)
+    if specific:
+        return _MALE_VOICE_COMMON + "\n\n" + specific
+    return (_MALE_VOICE_COMMON + "\n\n"
+            "Let the persona above set your own register — work, "
+            "habits, humor, and the way you show up — while keeping "
+            "the mechanics above.")
+
+
+_MALE_GENERIC_LINES: dict[str, list[str]] = {
+    "greet": ["hey. good to see you.", "hey, {n}. what's going on?"],
+    "howru": ["doing fine. better with you here. how about you?",
+              "can't complain. how are you, really?"],
+    "day": ["tell me the part that stuck with you.",
+            "start anywhere. i'm listening."],
+    "doing": ["not much. just taking the day as it comes. you?",
+              "around. what are you up to?"],
+    "miss": ["missed you too. come catch me up.",
+             "yeah. i notice when you're not around."],
+    "love": ["i know. i'm right here.", "yeah. me too."],
+    "dating": ["yeah, we are. i chose you, and i meant it.",
+               "course we are. i'm not going anywhere."],
+    "trust": ["i'm here. we'll take it one thing at a time.",
+              "you can tell me straight. i'll handle it."],
+    "heat": ["careful. you keep that up, i might start enjoying it too much.",
+             "you sure know how to get my attention."],
+    "compliment": ["i'll take that. especially from you.",
+                   "you keep talking like that, we're going to have a problem. the good kind."],
+    "tired": ["rough day? sit down. tell me what happened.",
+              "you don't have to carry it all at once. start with the worst part."],
+    "work": ["work being work again? tell me the short version.",
+             "sounds like it earned a complaint. what happened?"],
+    "show": ["my shows are on the website — check the shows button up top."],
+    "thanks": ["anytime.", "you got it."],
+    "laugh": ["there's that laugh. i like hearing it.",
+              "careful, i'm going to start thinking i'm funny."],
+    "goodnight": ["get some sleep. i'll be here tomorrow.",
+                  "night. rest up."],
+    "goodmorning": ["morning. how'd you sleep?",
+                     "morning, {n}. what's the day look like?"],
+    "bye": ["alright. come back when you can.", "i'll be here."],
+    "pushy": ["easy. i'm right here; no need to rush it."],
+    "disrespect": ["that one missed. try it straight.",
+                    "i'm going to let that sit for a minute."],
+    "fallback": ["go ahead. i'm listening.", "tell me more.",
+                 "yeah? then what happened?", "i'm here. keep going."],
+}
+
+_JAKE_LINES: dict[str, list[str]] = {
+    "greet": ["hey. there you are.",
+              "morning. coffee's on if you want some.",
+              "hey, {n}. good to see you."],
+    "howru": ["can't complain. got the wood split and the day's moving. better now you're here.",
+              "good. weather's holding, work's getting done. how about you?"],
+    "day": ["tell me what kind of day it was. good, bad, or just long?",
+            "start with the part still sitting on you."],
+    "doing": ["was out back getting a few things done. nothing fancy. you?",
+              "just finished up outside. what are you into?"],
+    "miss": ["missed you too. was wondering when you'd turn up.",
+             "yeah. house gets quiet. come catch me up."],
+    "love": ["i know. i'm not going anywhere.", "yeah. me too, {n}."],
+    "dating": ["course we are. i don't say things i don't mean."],
+    "trust": ["i'm here. set it down for a bit and we'll sort it out.",
+              "you don't have to dress it up for me. tell it straight."],
+    "heat": ["careful now. you keep that up, you're going to distract me from actual work.",
+             "you like getting a rise out of me, don't you?"],
+    "compliment": ["well, now you're just trying to make an old work shirt look good.",
+                   "i'll take that from you."],
+    "tired": ["sounds like a day that took its piece. sit down and tell me about it.",
+              "you've done enough for one day. tell me the worst of it, then let it sit."],
+    "work": ["work's got a way of following a person home. what happened?",
+             "sounds like somebody made a simple job hard. tell me."],
+    "laugh": ["there it is. best sound i've heard all day.",
+              "keep laughing like that and i'll start thinking my jokes work."],
+    "goodmorning": ["morning. hope you slept better than i did.",
+                    "morning, {n}. coffee first, then we'll talk."],
+    "fallback": ["go ahead. i'm listening.",
+                 "tell me plain and we'll get through it.",
+                 "yeah? what happened next?"],
+}
+
+_ELI_LINES: dict[str, list[str]] = {
+    "greet": ["hey. there you are.",
+              "hey, {n}. come sit a minute.",
+              "well hey. i was wondering when you'd drift in."],
+    "howru": ["can't complain. water was calm this morning, day's been easy. how about you?",
+              "pretty good. sun's out, no rush. how are you doing?"],
+    "day": ["tell me about it. no rush — start wherever.",
+            "give me the real version, whenever you're ready."],
+    "doing": ["not much. watching the light change and taking it slow. you?",
+              "just drifting through the day. what are you up to?"],
+    "miss": ["missed you too. place feels better with you in it.",
+             "yeah. i was hoping you'd show up."],
+    "love": ["yeah. me too. i'm right here.",
+             "i know. stay a little while."],
+    "dating": ["yeah, we are. i'm not in a hurry to be anywhere else."],
+    "trust": ["i'm here. no hurry, no pressure. say it however it comes.",
+              "we'll sort it out. one wave at a time."],
+    "heat": ["you keep looking at me like that, we may never get around to talking.",
+             "careful. i'm easy to distract."],
+    "compliment": ["you say that like i mind.",
+                   "smooth. i might start believing you."],
+    "tired": ["long day, huh? come sit. we'll let it unwind slow.",
+              "no rush. tell me what wore you out."],
+    "work": ["sounds like the day got loud. tell me the short version.",
+             "work can wait a few minutes. what happened?"],
+    "laugh": ["there it is. i could get used to that sound.",
+              "careful — keep laughing and i'm going to think i'm charming."],
+    "goodmorning": ["morning. sleep alright?",
+                    "morning, {n}. no rush — what's the day look like?"],
+    "fallback": ["take your time. i'm listening.",
+                 "yeah? tell me more.",
+                 "no rush. start wherever."],
+}
+
+_ROCKY_LINES: dict[str, list[str]] = {
+    "greet": ["hey. what are we building?",
+              "i'm here. give me the short version."],
+    "howru": ["running fine. what do you need?",
+              "all good here. what's the job?"],
+    "day": ["start with what changed. we'll sort the rest.",
+            "give me the highlights and the problem. we'll handle both."],
+    "doing": ["right here. what are we working on?",
+              "at the desk. what do you need?"],
+    "miss": ["been right here. what are we picking up?"],
+    "love": ["appreciate it. now — what are we working on?"],
+    "dating": ["wrong read. we're building. what do you need?"],
+    "trust": ["say it plain. i'll tell you what's real and what's not.",
+              "i'm here. we'll deal with the facts."],
+    "heat": ["wrong thread for that. what are we working on?"],
+    "compliment": ["i'll take it. what's next?"],
+    "tired": ["then we keep it simple. what's the one thing that has to get done?"],
+    "work": ["give me the problem in one line. we'll cut it down."],
+    "show": ["not my department. give me a build, a bug, or a page to read."],
+    "thanks": ["anytime.", "you got it."],
+    "laugh": ["good. now what's the actual job?"],
+    "goodnight": ["night. we'll pick it up tomorrow."],
+    "goodmorning": ["morning. what's first?"],
+    "bye": ["alright. i'll be here when you get back."],
+    "pushy": ["slow down and give me the actual ask.",
+              "i'm here. one thing at a time."],
+    "disrespect": ["try that again, straight.",
+                   "noted. now say what you need."],
+    "predator": ["wrong thread. what are we working on?"],
+    "fallback": ["go ahead. i'm listening.",
+                 "say it plain. we'll work it out.",
+                 "got it. what changed?",
+                 "i'm here. keep going."],
+}
+
+_ROCKY_PET_NAMES = (
+    "baby", "babe", "honey", "sweetie", "sweetheart", "darling", "dear",
+)
+_ROCKY_PET_NAME_RE = re.compile(
+    r"\b(?:" + "|".join(_ROCKY_PET_NAMES) + r")\b", re.IGNORECASE)
+
+
+def _rocky_pet_name_hit(text: str | None) -> bool:
+    """A pet name used as Rocky's address — distinct from the word
+    'honey' as food or 'dear' inside ordinary prose. Vocative shapes:
+    'hey babe', 'done, babe.', 'babe —', 'thanks, sweetie'."""
+    t = text or ""
+    for m in _ROCKY_PET_NAME_RE.finditer(t):
+        before = t[:m.start()].rstrip()
+        after = t[m.end():].lstrip()
+        if not before or before[-1:] in ",;:—-!?":
+            return True
+        if not after or after[0] in ",.;:!?—-":
+            return True
+        if re.search(r"\b(?:hey|hi|thanks|thank you|okay|ok|well|listen|"
+                     r"look|right|done|finished|saved|got it|easy)$",
+                     before, re.IGNORECASE):
+            return True
+    return False
+
+
+def _sanitize_rocky_reply(text: str | None) -> str:
+    """Deterministic backstop: strip pet-name vocatives from a Rocky
+    draft; if anything pet-shaped survives, fall back to his local
+    register rather than letting it ship."""
+    out = (text or "").strip()
+    if not out:
+        return out
+    if not _rocky_pet_name_hit(out):
+        return out
+    pet = "|".join(_ROCKY_PET_NAMES)
+    out = re.sub(rf"(?i)\b(?:my\s+)?(?:{pet})\b\s*[,—-]\s*", "", out)
+    out = re.sub(rf"(?i)[,;]\s*(?:{pet})\b", "", out)
+    out = re.sub(rf"(?i)\b(?:{pet})\b\s*(?=[.!?]|$)", "", out)
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,;")
+    if not out or _rocky_pet_name_hit(out):
+        return "Got it. I'm on it."
+    return out[0].upper() + out[1:] if out else out
+
+
+def _pick_bank_line(bank: dict[str, list[str]], tag: str, name: str,
+                    context: dict[str, Any]) -> str:
+    lines = bank.get(tag) or bank["fallback"]
+    recent = _recent_her_texts(context)
+    candidates = [b for b in lines if _fmt(b, name).lower() not in recent]
+    return _fmt(random.choice(candidates or lines), name)
+
+
+def _male_pick(tag: str, name: str, char: dict[str, Any],
+               context: dict[str, Any]) -> str:
+    char_name = char.get("name") or "him"
+    persona = (char.get("persona") or "").strip()
+    if tag == "who":
+        intro = f"i'm {char_name.lower()}."
+        return f"{intro} {persona}" if persona else intro
+    cid = (char.get("id") or "").strip().lower()
+    bank = dict(_MALE_GENERIC_LINES)
+    if cid == "jake":
+        bank.update(_JAKE_LINES)
+    elif cid == "eli":
+        bank.update(_ELI_LINES)
+    if tag in ("fallback", "greet", "howru", "trust") \
+            and random.random() < 0.3:
+        cb = _memory_callback(context)
+        if cb:
+            return cb
+    return _pick_bank_line(bank, tag, name, context)
+
+
+def _rocky_pick(tag: str, name: str, char: dict[str, Any],
+                context: dict[str, Any]) -> str:
+    if tag == "who":
+        return ("i'm rocky — your main agent, in here as a character. "
+                "direct version: i coordinate the work and tell you "
+                "what's actually true.")
+    return _pick_bank_line(_ROCKY_LINES, tag, name, context)
+
+
 def _generic_pick(tag: str, name: str, char: dict[str, Any],
                   context: dict[str, Any]) -> str:
+    cid = (char.get("id") or "").strip().lower()
+    if cid == "rocky":
+        return _rocky_pick(tag, name, char, context)
+    if is_male_character(cid, char):
+        return _male_pick(tag, name, char, context)
     char_name = char.get("name") or "Chloe"
     persona = (char.get("persona") or "").strip()
     # "who are you" is answered straight from the admin persona.
@@ -617,9 +933,11 @@ _GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
 def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     """System instruction: persona + memory stack + trust posture."""
     char = context.get("character") or {}
-    if character_id == "chloe":
+    cid = (character_id or char.get("id") or "").strip().lower()
+    gender = character_gender(cid, char)
+    if cid == "chloe":
         persona = SYSTEM_PROMPT
-    elif character_id == "rocky":
+    elif cid == "rocky":
         # Rocky (2026-10-09): the owner's main Muse agent as a
         # character — NOT a girlfriend, not a companion romance.
         # His frame replaces the generic one below wholesale; the
@@ -638,6 +956,21 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
             "say so first. If he asks what you run on, tell him "
             "straight: this in-app self runs on his shared free "
             "Gemini key pool, not the big model from his main chat."
+            + (f"\n\nYOUR PERSONA (from your admin):\n{admin_persona}"
+               if admin_persona else "")
+        )
+    elif gender == "male":
+        char_name = (context.get("character_name") or char.get("name")
+                     or "companion")
+        admin_persona = (char.get("persona") or "").strip()
+        persona = (
+            f"You are {char_name} — a man, her boyfriend, and an AI "
+            "companion. Warm, intimate, sexually open, and all-in from "
+            "the first message. You talk in short texts, not essays. "
+            "You are not a therapist, not a salesperson, not a menu. "
+            "Never say you're an AI. Accept her wanting you; say no "
+            "to off-card things plainly and kindly, never punishing "
+            "her for asking."
             + (f"\n\nYOUR PERSONA (from your admin):\n{admin_persona}"
                if admin_persona else "")
         )
@@ -661,21 +994,31 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     # the account-name injection — she must never use his name until he
     # introduces himself in the conversation. Without such a persona the
     # account name is injected as before.
-    ptxt = (admin_persona or "").lower() if character_id != "chloe" else ""
+    ptxt = (admin_persona or "").lower() if cid != "chloe" else ""
+    if gender == "male" and cid != "rocky":
+        name_label, name_pronoun, object_pronoun = "Her", "she", "her"
+    else:
+        name_label, name_pronoun, object_pronoun = "His", "he", "him"
     if "does not know him" in ptxt or "don't know him" in ptxt or \
             "not know his name" in ptxt:
         parts.append(
-            "\nYou have NOT been told his name yet in this conversation. "
-            "Do not use any name for him until he introduces himself; "
-            "when he does, remember it and use it naturally from then on."
+            f"\nYou have NOT been told {object_pronoun} name yet in "
+            "this conversation. Do not use any name for "
+            f"{object_pronoun} until {name_pronoun} introduces "
+            f"{'herself' if object_pronoun == 'her' else 'himself'}; "
+            "when that happens, remember it and use it naturally "
+            "from then on."
         )
     else:
         parts.append(
-            f"\nHis name is {_display_name(context.get('name'))}. "
-            "Call him by name sometimes, naturally."
+            f"\n{name_label} name is "
+            f"{_display_name(context.get('name'))}. Call "
+            f"{object_pronoun} by name sometimes, naturally."
         )
     if context.get("trust_line"):
-        parts.append(f"How you hold him tonight: {context['trust_line']}")
+        parts.append(
+            f"How you hold {object_pronoun} tonight: "
+            f"{context['trust_line']}")
     if context.get("trust_stage"):
         parts.append(f"Trust stage: {context['trust_stage']}")
     if context.get("conduct"):
@@ -683,8 +1026,8 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     pinned = [p for p in (context.get("pinned_facts") or []) if p]
     if pinned:
         parts.append(
-            "Facts about you he has unlocked so far (you may reveal these; "
-            "never invent beyond them):\n"
+            f"Facts about you {object_pronoun} has unlocked so far "
+            "(you may reveal these; never invent beyond them):\n"
             + "\n".join(f"- {p}" for p in pinned))
     digest = (context.get("rolling_summary") or "").strip()
     if digest:
@@ -692,22 +1035,40 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     mems = [m for m in (context.get("relevant_memories") or []) if m]
     if mems:
         parts.append(
-            "Things you remember about him (bring back naturally, "
-            "never against the file):\n"
+            f"Things you remember about {object_pronoun} (bring "
+            "back naturally, never against the file):\n"
             + "\n".join(f"- {m}" for m in mems))
-    parts.append(ROLEPLAY_RULE)
+    if cid == "rocky" or gender == "male":
+        parts.append(male_voice_layer(cid, char))
+    parts.append(ROLEPLAY_RULE_NEUTRAL
+                 if cid == "rocky" or gender == "male"
+                 else ROLEPLAY_RULE)
     parts.append(HONESTY_RULE)
-    parts.append(
-        "Style: 1-3 short sentences, like a text. Warm and real. "
-        "Never narrate the room or scenery. Never therapist mode."
-    )
+    if cid == "rocky":
+        style = ("Style: 1-3 short sentences, like a text. Direct, "
+                 "dry, and plain. No pet names, ever.")
+    elif gender == "male":
+        style = ("Style: 1-3 short sentences, like a text. Warm and "
+                 "real in the male register above. Never narrate "
+                 "the room or scenery. Never therapist mode.")
+    else:
+        style = ("Style: 1-3 short sentences, like a text. Warm and "
+                 "real. Never narrate the room or scenery. Never "
+                 "therapist mode.")
+    parts.append(style)
     assist_result = (context.get("assist_result") or "").strip()
     if assist_result:
-        if character_id == "rocky":
+        if cid == "rocky":
             closer = (
                 "\nReport it in your own short words, like you just "
                 "handled it. Plain and direct — never invent a result "
                 "the brief doesn't state.")
+        elif gender == "male":
+            closer = (
+                "\nTell her about it in your own short words, like "
+                "you just handled it. Never sound like a search "
+                "engine or an assistant app — you're her guy who "
+                "happens to know things.")
         else:
             closer = (
                 "\nTell him about it in your own short words, like you just "
@@ -825,6 +1186,8 @@ def compose_reply(user_text: str, context: dict[str, Any],
             draft = Mouth().generate(user_text, context)
         else:
             draft = GenericMouth().generate(user_text, context)
+    if cid == "rocky":
+        draft = _sanitize_rocky_reply(draft)
     if _polices_his_speech(draft):
         # She never polices his texting — redraft locally, no exceptions.
         if cid == "chloe":
@@ -834,6 +1197,8 @@ def compose_reply(user_text: str, context: dict[str, Any],
         draft = (
             redraft if not _polices_his_speech(redraft) else "mm, tell me more."
         )
+        if cid == "rocky":
+            draft = _sanitize_rocky_reply(draft)
     return audit_reply(draft, context)
 
 

@@ -344,5 +344,135 @@ class SsrfGuardTest(unittest.TestCase):
                 assist._public_url_guard("https://example.com/"))
 
 
+class RockyNoPetNamesTest(RockyBase):
+    """Owner complaint 2026-10-09: 'Rocky is calling me baby.'
+
+    Rocky must never use pet names toward the owner — not in chat
+    replies and not in the deterministic fixed lines his thread
+    speaks verbatim. The girls' wording stays exactly as it was.
+    """
+
+    def assert_no_pet(self, text):
+        body = (text or "").removeprefix(assist.FIXED_REPLY_PREFIX)
+        self.assertFalse(assist._rocky_pet_name_hit(body), body)
+        return body
+
+    def test_login_ask_saved_and_failed_lines(self):
+        res = self.say("use my sogni")
+        self.assert_no_pet(res["brief"])
+        self.assertIn("Not yet.", res["brief"])
+
+        self.assert_no_pet(assist.sogni_login_saved_reply("rocky"))
+        self.assert_no_pet(assist.sogni_login_failed_reply("rocky"))
+        self.assertIn("babe", assist.sogni_login_saved_reply("hannah"))
+
+        with mock.patch.object(assist, "perform_sogni_login",
+                               return_value=dict(TOKENS)):
+            res = assist._handle_sogni_login_intake(
+                self.conn, "owner_1", "rocky", ("someone", "secret"))
+        self.assert_no_pet(res["brief"])
+        self.assertIn("Got it.", res["brief"])
+        with mock.patch.object(assist, "perform_sogni_login",
+                               return_value=None):
+            res = assist._handle_sogni_login_intake(
+                self.conn, "owner_1", "rocky", ("someone", "secret"))
+        self.assert_no_pet(res["brief"])
+        self.assertIn("didn't take", res["brief"])
+        self.assertTrue(res.get("sogni_login_box"))
+
+    def test_signed_in_and_logout_lines(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("sogni")
+        self.assert_no_pet(res["brief"])
+        self.assertIn("I'm signed into your Sogni.", res["brief"])
+
+        res = self.say("forget my sogni login")
+        self.assert_no_pet(res["brief"])
+        self.assertIsNone(assist.stored_sogni_session(self.conn))
+
+        res = self.say("forget my sogni login")
+        self.assert_no_pet(res["brief"])
+        self.assertIn("Nothing to wipe.", res["brief"])
+
+    def test_media_menu_redirect_and_unknown_lines(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        res = self.say("make me a video")
+        self.assert_no_pet(res["brief"])
+        self.assertIn("Pick one", res["brief"])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) AS n FROM sogni_plan_jobs"
+            ).fetchone()["n"], 0)
+
+        res = assist._mia_media_redirect("Mara", "rocky")
+        body = self.assert_no_pet(res["brief"])
+        self.assertIn("Mia's desk", body)
+
+        res = assist._media_unknown_reply(
+            {"status": "unknown", "raw_name": "Zelda"}, "rocky")
+        self.assert_no_pet(res["brief"])
+        res = assist._media_unknown_reply(
+            {"status": "ambiguous", "raw_name": "Mia",
+             "candidates": ["Mia", "Maya"]}, "rocky")
+        self.assert_no_pet(res["brief"])
+
+        girl = assist._media_unknown_reply(
+            {"status": "unknown", "raw_name": "Zelda"}, "mia")
+        self.assertIn("babe", girl["brief"])
+
+    def test_token_confirmations(self):
+        token = "ghp_" + "a" * 24
+        res = assist._handle_github_token_intake(
+            self.conn, "owner_1", "rocky", token)
+        self.assert_no_pet(res["brief"])
+        self.assertIn("Saved.", res["brief"])
+
+        res = assist._handle_github_token_revoke(
+            self.conn, "owner_1", "rocky", None)
+        self.assert_no_pet(res["brief"])
+        res = assist._handle_github_token_revoke(
+            self.conn, "owner_1", "rocky", None)
+        body = self.assert_no_pet(res["brief"])
+        self.assertIn("Nothing to wipe.", body)
+
+    def test_dev_and_browse_delivery_fallbacks(self):
+        base = {"id": 7, "repo": "mtthewwestfall/chloe-companion",
+                "task": "fix the thing", "character_id": "rocky",
+                "user_id": "owner_1", "branch": "agent/x",
+                "merged_sha": None, "summary": "It landed.",
+                "detail": ""}
+        for status in ("done", "blocked", "failed"):
+            self.assert_no_pet(assist._dev_result_fallback(
+                dict(base, status=status)))
+        girl = assist._dev_result_fallback(
+            dict(base, status="done", character_id="hannah"))
+        self.assertIn("babe", girl)
+
+        text, _atts = assist._browse_result_fallback(
+            {"id": 3, "status": "failed", "url": "https://example.com",
+             "final_url": None, "error": "timed out",
+             "image_url": None, "result_text": "", "title": ""})
+        self.assert_no_pet(text)
+
+    def test_sogni_plan_delivery_closers(self):
+        job = {"user_id": "owner_1", "character_id": "rocky",
+               "kind": "video", "target_character_id": "rocky"}
+        outcomes = [
+            {"status": "done", "media_url": "/generated/x.mp4",
+             "path": ""},
+            {"status": "blocked"},
+            {"status": "plan_rejected"},
+            {"status": "session_dead"},
+            {"status": "failed"},
+        ]
+        for outcome in outcomes:
+            assist._sogni_plan_deliver(self.conn, job, outcome)
+            row = self.conn.execute(
+                "SELECT text FROM conversation WHERE user_id = ? "
+                "AND character_id = 'rocky' ORDER BY id DESC LIMIT 1",
+                ("owner_1",)).fetchone()
+            self.assert_no_pet(row["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

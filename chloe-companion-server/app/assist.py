@@ -113,6 +113,47 @@ def is_assistant_character(character_id) -> bool:
     return (character_id or "").strip().lower() in ASSISTANT_CHARACTERS
 
 
+def _is_rocky(character_id) -> bool:
+    return (character_id or "").strip().lower() == "rocky"
+
+
+# Rocky register guard (owner, 2026-10-09): Rocky is the owner's male
+# co-producer and must never address him with a pet name — not in model
+# chat (brain.py enforces the same rule) and not in the deterministic
+# fixed lines below. Every shared fixed string therefore has a Rocky
+# variant in plain male register; the girls' wording is untouched.
+_ROCKY_PET_NAME_RE = re.compile(
+    r"\b(?:baby|babe|honey|sweetie|sweetheart|darling|dear)\b",
+    re.IGNORECASE)
+
+
+def _rocky_pet_name_hit(text: str | None) -> bool:
+    """True when a pet name is used as Rocky's address ('hey babe',
+    'done, babe.', 'babe —'), as opposed to an ordinary noun."""
+    t = text or ""
+    for m in _ROCKY_PET_NAME_RE.finditer(t):
+        before = t[:m.start()].rstrip()
+        after = t[m.end():].lstrip()
+        if not before or before[-1:] in ",;:—-!?":
+            return True
+        if not after or after[0] in ",.;:!?—-":
+            return True
+        if re.search(r"\b(?:hey|hi|thanks|thank you|okay|ok|well|"
+                     r"listen|look|right|done|finished|saved|got it|"
+                     r"easy)$", before, re.IGNORECASE):
+            return True
+    return False
+
+
+def _rocky_safe_text(text: str | None, fallback: str) -> str:
+    """Deterministic delivery backstop: a Rocky follow-up that still
+    carries a pet-name address is replaced, never shipped as-is."""
+    out = (text or "").strip()
+    if not out or _rocky_pet_name_hit(out):
+        return fallback
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Project lanes (2026-10-09, owner-directed): the two assistant girls
 # split his projects so they stop confusing each other. Hannah carries
@@ -1323,6 +1364,10 @@ tripping over each other — it does not bind you.
 HOW YOU TALK (this outranks every generic companion habit):
 - Direct, sharp, a little edge. No corporate fluff, no filler
   praise, no hedging walls. Short when short works.
+- NEVER use pet names toward him — no baby, babe, honey, sweetie,
+  sweetheart, darling, or dear-as-an-address, in chat replies,
+  confirmations, redirects, or follow-ups. Address him plainly by
+  name or not at all. You are his male co-producer, not a companion.
 - NEVER end with a steering closer — no "want me to...?", no
   "just say the word", no soft variants. Give the answer, state
   what you did, and stop. He leads.
@@ -1849,12 +1894,27 @@ _TOKEN_SAVED_REPLY = (
     "saved, babe — I put that key away safe on my end. next time you "
     "ask me to dig through one of your repos, that’s the one I’ll "
     "read with.")
+_ROCKY_TOKEN_SAVED_REPLY = (
+    "Saved. I put that key away on my end. Next time you ask me to "
+    "dig through one of your repos, that's the one I'll read with.")
 _TOKEN_REVOKED_REPLY = (
     "done — wiped that key clean off my side. next repo you have me "
     "read, I’ll use the server’s own key again.")
 _TOKEN_NOTHING_REPLY = (
     "nothing to wipe, babe — there’s no key saved on my end right "
     "now.")
+_ROCKY_TOKEN_NOTHING_REPLY = (
+    "Nothing to wipe. There's no key saved on my end right now.")
+
+
+def _token_saved_reply(character_id) -> str:
+    return (_ROCKY_TOKEN_SAVED_REPLY if _is_rocky(character_id)
+            else _TOKEN_SAVED_REPLY)
+
+
+def _token_nothing_reply(character_id) -> str:
+    return (_ROCKY_TOKEN_NOTHING_REPLY if _is_rocky(character_id)
+            else _TOKEN_NOTHING_REPLY)
 
 
 def extract_github_token(text: str) -> str | None:
@@ -1934,7 +1994,8 @@ def _handle_github_token_intake(conn: sqlite3.Connection, user_id: str,
                                 character_id: str, token: str) -> dict:
     store_github_token(conn, token)
     scrub_token_from_history(conn, user_id, character_id, token)
-    return {"brief": FIXED_REPLY_PREFIX + _TOKEN_SAVED_REPLY}
+    return {"brief": FIXED_REPLY_PREFIX
+            + _token_saved_reply(character_id)}
 
 
 def _handle_github_token_revoke(conn: sqlite3.Connection, user_id: str,
@@ -1944,7 +2005,8 @@ def _handle_github_token_revoke(conn: sqlite3.Connection, user_id: str,
     if token:
         # "forget this token ghp_…" — scrub the paste too; store nothing.
         scrub_token_from_history(conn, user_id, character_id, token)
-    reply = _TOKEN_REVOKED_REPLY if had else _TOKEN_NOTHING_REPLY
+    reply = _TOKEN_REVOKED_REPLY if had else \
+        _token_nothing_reply(character_id)
     return {"brief": FIXED_REPLY_PREFIX + reply}
 
 
@@ -2420,9 +2482,12 @@ def _dev_result_fallback(job: dict) -> str:
     repo, task, jid = job["repo"], job["task"][:120], job["id"]
     summary = (job.get("summary") or "").strip()
     detail = (job.get("detail") or "").strip()
+    rocky = _is_rocky(job.get("character_id"))
     if job["status"] == "done":
-        head = (f"done, babe — that build on {repo} actually finished. "
-                f"\"{task}\"")
+        head = ((f"done. that build on {repo} finished. "
+                 f"\"{task}\"") if rocky else
+                (f"done, babe — that build on {repo} actually finished. "
+                 f"\"{task}\""))
         if job.get("merged_sha"):
             head += (f" and it got MERGED to main at "
                      f"{job['merged_sha'][:8]} — merged to main means "
@@ -2434,9 +2499,17 @@ def _dev_result_fallback(job: dict) -> str:
         return head + tail + (f" (builder job #{jid} — the full report "
                               "is saved on my end.)")
     if job["status"] == "blocked":
+        if rocky:
+            return (f"I'm stuck on that one. That job on {repo} got "
+                    f"blocked. {detail or summary} Tell me how you "
+                    "want to handle it.")
         return (f"I'm stuck on that one, babe — that job on {repo} "
                 f"got blocked. {detail or summary} "
                 "tell me how you want to handle it.")
+    if rocky:
+        return (f"That build didn't land. \"{task}\" on {repo} ran "
+                f"out of tries. {summary or detail} Nothing fake "
+                "about it.")
     return (f"that build didn't land, babe — \"{task}\" on {repo} ran "
             f"out of tries. {summary or detail} nothing fake about it.")
 
@@ -2468,8 +2541,26 @@ def _voice_dev_result(job: dict) -> str | None:
         facts.append(f"what actually happened: {job['summary'][:1200]}")
     if job.get("detail"):
         facts.append(f"key detail: {job['detail'][:500]}")
-    payload = {
-        "system_instruction": {"parts": [{"text":
+    if _is_rocky(job.get("character_id")):
+        instruction = (
+            "You are Rocky, his male co-producer, texting him. The "
+            "dev builder he asked you to use just finished a job, and "
+            "these are the ONLY true facts about it:\n\n"
+            + "\n".join(facts) +
+            "\n\nBring him the result as your own message: direct, "
+            "dry, professional-warm, short. NEVER use pet names or "
+            "terms of endearment toward him — no baby, babe, honey, "
+            "sweetie, sweetheart, or darling. Done means tell him "
+            "what landed and the branch — and if the facts say it "
+            "was MERGED to main, say exactly that with the commit; "
+            "failed or blocked means say so plainly, say what the "
+            "detail says is needed, and never dress it up. Never "
+            "claim YOU personally wrote, committed or deployed "
+            "anything — the builder did the work; you queued it and "
+            "you're bringing him the outcome. Add NOTHING that is "
+            "not in the facts.")
+    else:
+        instruction = (
             f"You are {name}, his girl, texting him. The dev builder "
             "he asked you to use just finished a job, and these are "
             "the ONLY true facts about it:\n\n" + "\n".join(facts) +
@@ -2482,7 +2573,9 @@ def _voice_dev_result(job: dict) -> str | None:
             "Never claim YOU personally wrote, committed or deployed "
             "anything — the builder did the work; you queued it and "
             "you're bringing him the outcome. Add NOTHING that is not "
-            "in the facts."}]},
+            "in the facts.")
+    payload = {
+        "system_instruction": {"parts": [{"text": instruction}]},
         "contents": [{"role": "user", "parts": [
             {"text": "how did that build turn out?"}]}],
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 500},
@@ -2505,6 +2598,8 @@ def _voice_dev_result(job: dict) -> str | None:
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts
                        if p.get("text")).strip()
+        if _is_rocky(job.get("character_id")):
+            text = _rocky_safe_text(text, _dev_result_fallback(job))
         return text or None
     except (KeyError, IndexError, TypeError):
         return None
@@ -2862,7 +2957,9 @@ def _voice_browse_result(job: dict) -> str | None:
             "worker just finished a page load, and these are the "
             "ONLY true facts about it:\n\n" + "\n".join(facts) +
             "\n\nBring him the result as your own message: direct, "
-            "short, no fluff. If he asked a question, answer it ONLY "
+            "short, no fluff. NEVER use pet names or terms of "
+            "endearment toward him — no baby, babe, honey, sweetie, "
+            "sweetheart, or darling. If he asked a question, answer it ONLY "
             "from the page text above. Failed means say so plainly "
             "with the reason. Never claim you personally browsed "
             "anything — the worker loaded the page; you queued it "
@@ -2890,7 +2987,8 @@ def _voice_browse_result(job: dict) -> str | None:
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts
                        if p.get("text")).strip()
-        return text or None
+        fallback, _attachments = _browse_result_fallback(job)
+        return _rocky_safe_text(text, fallback) or None
     except (KeyError, IndexError, TypeError):
         return None
 
@@ -3143,8 +3241,22 @@ def _voice_findings(character_id: str, user_id: str, repo: str,
                 .get("name") or name)
     except Exception:
         pass
-    payload = {
-        "system_instruction": {"parts": [{"text":
+    if _is_rocky(character_id):
+        instruction = (
+            "You are Rocky, his male co-producer, texting him. A "
+            f"real code review just ran on his GitHub repo '{repo}' "
+            "and these are its actual findings — the only true "
+            "things:\n\n" + findings +
+            "\n\nSend him the findings as your own message: direct, "
+            "dry, professional-warm, short. NEVER use pet names or "
+            "terms of endearment toward him — no baby, babe, honey, "
+            "sweetie, sweetheart, or darling. Cover each finding "
+            "briefly with its file reference. Add NOTHING that is "
+            "not in the findings. Never claim you personally read, "
+            "fixed or pushed anything — the review ran and you are "
+            "bringing him the results.")
+    else:
+        instruction = (
             f"You are {name}, his girl, texting him. A real code review "
             f"just ran on his GitHub repo '{repo}' and these are its "
             "actual findings — the only true things:\n\n" + findings +
@@ -3153,7 +3265,9 @@ def _voice_findings(character_id: str, user_id: str, repo: str,
             "file reference. Add NOTHING that is not in the findings. "
             "Never claim you personally read, fixed or pushed "
             "anything — the review ran and you are bringing him the "
-            "results."}]},
+            "results.")
+    payload = {
+        "system_instruction": {"parts": [{"text": instruction}]},
         "contents": [{"role": "user", "parts": [
             {"text": "what did the review find?"}]}],
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700},
@@ -3176,6 +3290,8 @@ def _voice_findings(character_id: str, user_id: str, repo: str,
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts
                        if p.get("text")).strip()
+        if _is_rocky(character_id):
+            text = _rocky_safe_text(text, findings)
         return text or None
     except (KeyError, IndexError, TypeError):
         return None
@@ -3628,9 +3744,17 @@ _SOGNI_LOGIN_SAVED_REPLY = (
     "got it, babe — i'm signed into your sogni now, and that "
     "password's already scrubbed out of our chat. tell me to make "
     "you a video and i'll actually make it.")
+_ROCKY_SOGNI_LOGIN_SAVED_REPLY = (
+    "Got it. I'm signed into your Sogni now, and that password's "
+    "already scrubbed out of our chat. Tell me to make a video and "
+    "I'll make it.")
 _SOGNI_LOGIN_FAILED_REPLY = (
     "that sign-in didn't take, babe — sogni turned it away. check "
     "the login and drop it once more like: sogni login <username> "
+    "<password>.")
+_ROCKY_SOGNI_LOGIN_FAILED_REPLY = (
+    "That sign-in didn't take. Sogni turned it away. Check the "
+    "login and drop it once more like: sogni login <username> "
     "<password>.")
 _SOGNI_LOGOUT_REPLY = (
     "done — signed out of sogni on my side and wiped the saved "
@@ -3638,12 +3762,42 @@ _SOGNI_LOGOUT_REPLY = (
     "back.")
 _SOGNI_LOGOUT_NOTHING_REPLY = (
     "nothing to wipe, babe — i'm not signed into sogni right now.")
+_ROCKY_SOGNI_LOGOUT_NOTHING_REPLY = (
+    "Nothing to wipe. I'm not signed into Sogni right now.")
 _SOGNI_NO_SESSION_REPLY = (
     "i'd love to, babe — but i'm not signed into your sogni on "
     "this end yet. drop your login right here once, like this: "
     "sogni login <username> <password> — i'll save the sign-in "
     "safe, scrub that message out of our chat, and the password's "
     "gone for good. then ask me again and i'll make it.")
+_ROCKY_SOGNI_NO_SESSION_REPLY = (
+    "Not yet. I'm not signed into your Sogni on this end. Drop "
+    "your login right here once, like this: sogni login <username> "
+    "<password> — I'll save the sign-in, scrub that message out "
+    "of our chat, and the password's gone for good. Then ask me "
+    "again and I'll make it.")
+
+
+def sogni_login_saved_reply(character_id=None) -> str:
+    return (_ROCKY_SOGNI_LOGIN_SAVED_REPLY if _is_rocky(character_id)
+            else _SOGNI_LOGIN_SAVED_REPLY)
+
+
+def sogni_login_failed_reply(character_id=None) -> str:
+    return (_ROCKY_SOGNI_LOGIN_FAILED_REPLY if _is_rocky(character_id)
+            else _SOGNI_LOGIN_FAILED_REPLY)
+
+
+def _sogni_no_session_reply(character_id=None) -> str:
+    return (_ROCKY_SOGNI_NO_SESSION_REPLY if _is_rocky(character_id)
+            else _SOGNI_NO_SESSION_REPLY)
+
+
+def _sogni_logout_reply(character_id, had: bool) -> str:
+    if _is_rocky(character_id):
+        return (_SOGNI_LOGOUT_REPLY if had
+                else _ROCKY_SOGNI_LOGOUT_NOTHING_REPLY)
+    return _SOGNI_LOGOUT_REPLY if had else _SOGNI_LOGOUT_NOTHING_REPLY
 
 
 class _SogniPlanError(Exception):
@@ -3814,12 +3968,16 @@ def _is_vague_media_subject(subject: str) -> bool:
 
 
 def _media_options_reply(kind: str, options: list[str],
-                         target_name: str | None = None) -> dict:
+                         target_name: str | None = None,
+                         character_id: str | None = None) -> dict:
     who = f" of {target_name}" if target_name else ""
     lines = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(options))
-    return {"brief": FIXED_REPLY_PREFIX +
-            f"mm, i'd love to — here, pick one, babe, or tell me "
-            f"to pick for you:\n{lines}",
+    if _is_rocky(character_id):
+        lead = "Alright. Pick one, or tell me to pick for you:"
+    else:
+        lead = ("mm, i'd love to — here, pick one, babe, or tell "
+                "me to pick for you:")
+    return {"brief": FIXED_REPLY_PREFIX + lead + f"\n{lines}",
             "sogni_media_options": options,
             "sogni_media_kind_pending": kind}
 
@@ -4312,9 +4470,11 @@ def _handle_sogni_login_intake(conn: sqlite3.Connection, user_id: str,
     _scrub_whole_message(conn, user_id, character_id, login[1],
                          _SOGNI_PLAN_PLACEHOLDER)
     if perform_sogni_login(conn, user_id, login) is None:
-        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY,
+        return {"brief": FIXED_REPLY_PREFIX
+                + sogni_login_failed_reply(character_id),
                 "sogni_login_box": True}
-    return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_SAVED_REPLY}
+    return {"brief": FIXED_REPLY_PREFIX
+            + sogni_login_saved_reply(character_id)}
 
 
 def _handle_sogni_login_unparseable(conn: sqlite3.Connection,
@@ -4326,7 +4486,8 @@ def _handle_sogni_login_unparseable(conn: sqlite3.Connection,
     _scrub_latest_user_turn(conn, user_id, character_id)
     print("[assist] sogni sign-in failed (stage=parse "
           "error=UnparseableLogin)", flush=True)
-    return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY,
+    return {"brief": FIXED_REPLY_PREFIX
+            + sogni_login_failed_reply(character_id),
             "sogni_login_box": True}
 
 
@@ -4338,7 +4499,7 @@ def _handle_sogni_logout(conn: sqlite3.Connection, user_id: str,
         # "forget my sogni login user pass" — scrub the paste too.
         _scrub_whole_message(conn, user_id, character_id, login[1],
                              _SOGNI_PLAN_PLACEHOLDER)
-    reply = _SOGNI_LOGOUT_REPLY if had else _SOGNI_LOGOUT_NOTHING_REPLY
+    reply = _sogni_logout_reply(character_id, had)
     return {"brief": FIXED_REPLY_PREFIX + reply}
 
 
@@ -4609,6 +4770,7 @@ def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
     """Land the outcome in his chat as her follow-up message."""
     status = outcome.get("status") or "failed"
     kind = job.get("kind") or "video"
+    rocky = _is_rocky(job.get("character_id"))
     media_url = outcome.get("media_url") or outcome.get("video_url")
     attachments: list[dict] = []
     if status == "done" and media_url:
@@ -4623,31 +4785,50 @@ def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
             attachments = [{"kind": "image", "url": media_url,
                             "name": f"{who}-image.jpg", "size": size}]
             if "fallback" in (outcome.get("detail") or ""):
-                text = ("sogni was unavailable on that one, babe — "
-                        "i made this picture through the free "
-                        "picture desk instead.")
+                text = (("Sogni was unavailable on that one. I made "
+                         "this picture through the free picture desk "
+                         "instead.") if rocky else
+                        ("sogni was unavailable on that one, babe — "
+                         "i made this picture through the free "
+                         "picture desk instead."))
             else:
-                text = ("here's your picture, babe — made this one "
-                        "just for you.")
+                text = (("Here's your picture. Made this one for "
+                         "you.") if rocky else
+                        ("here's your picture, babe — made this one "
+                         "just for you."))
         else:
             attachments = [{"kind": "video", "url": media_url,
                             "name": f"{who}-video.mp4", "size": size}]
-            text = "here's your video, babe — made this one just for you."
+            text = (("Here's your video. Made this one for you.")
+                    if rocky else
+                    "here's your video, babe — made this one just for you.")
     elif status == "blocked":
-        text = ("sogni's filter stopped that one cold before it even "
-                "rendered, babe — that's their wall, not me. give me a "
-                "tamer version and i'm on it.")
+        text = (("Sogni's filter stopped that one cold before it "
+                 "even rendered. That's their wall. Give me a tamer "
+                 "version and I'm on it.") if rocky else
+                ("sogni's filter stopped that one cold before it even "
+                 "rendered, babe — that's their wall, not me. give me a "
+                 "tamer version and i'm on it."))
     elif status == "plan_rejected":
-        text = ("your plan wouldn't cover that one, babe — sogni "
-                "rejected it before anything rendered, so i stopped "
-                "right there.")
+        text = (("Your plan wouldn't cover that one. Sogni rejected "
+                 "it before anything rendered, so I stopped right "
+                 "there.") if rocky else
+                ("your plan wouldn't cover that one, babe — sogni "
+                 "rejected it before anything rendered, so i stopped "
+                 "right there."))
     elif status == "session_dead":
-        text = ("my sogni sign-in expired, babe — drop your login "
-                "here once more like: sogni login <username> "
-                "<password> and i'll pick it right back up.")
+        text = (("My Sogni sign-in expired. Drop your login here "
+                 "once more like: sogni login <username> <password> "
+                 "and I'll pick it right back up.") if rocky else
+                ("my sogni sign-in expired, babe — drop your login "
+                 "here once more like: sogni login <username> "
+                 "<password> and i'll pick it right back up."))
     else:
-        text = ("that one didn't come through, babe — sogni hiccuped "
-                "on their end. say the word and i'll run it again.")
+        text = (("That one didn't come through. Sogni hiccuped on "
+                 "their end. Say the word and I'll run it again.")
+                if rocky else
+                ("that one didn't come through, babe — sogni hiccuped "
+                 "on their end. say the word and i'll run it again."))
     store.log_turn(conn, job["user_id"], job["character_id"], text,
                    job["character_id"], attachments)
 
@@ -4780,11 +4961,12 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                                   raw_text: str = "") -> dict:
     target_id = target_character_id or character_id
     if target_id != character_id and character_id != "mia":
-        return _mia_media_redirect(target_name)
+        return _mia_media_redirect(target_name, character_id)
     _media_topic_touch(conn, user_id, kind="video", subject=subject,
                        target_character_id=target_id)
     if not stored_sogni_session(conn):
-        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_NO_SESSION_REPLY,
+        return {"brief": FIXED_REPLY_PREFIX
+                + _sogni_no_session_reply(character_id),
                 "sogni_login_box": True}
     intent = detect_sogni_media_intent(raw_text or subject)
     if _is_vague_media_subject(subject):
@@ -4793,7 +4975,8 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                            options=options,
                            target_character_id=target_id,
                            target_name=target_name, intent=intent)
-        return _media_options_reply("video", options, target_name)
+        return _media_options_reply("video", options, target_name,
+                                    character_id)
     if _sogni_plan_active_job(conn, user_id):
         return {"brief": "He asked for another video, but the last "
                          "one is still rendering. Tell him it's on its "
@@ -4824,28 +5007,43 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
             "sogni_media_intent": intent}
 
 
-def _mia_media_redirect(target_name: str | None = None) -> dict:
+def _mia_media_redirect(target_name: str | None = None,
+                        character_id: str | None = None) -> dict:
     """Cross-character media belongs to Mia's desk. Fixed text, in
     the lane-redirect voice, so a self-only girl never improvises
     a denial or quietly makes someone else herself."""
-    return {"brief": FIXED_REPLY_PREFIX +
-            "that's mia's desk, babe — she makes the other girls' "
-            "videos and pics from her thread. ask her and she's "
-            "got it. i only make my own over here.",
+    if _is_rocky(character_id):
+        text = ("That's Mia's desk. She makes the other girls' "
+                "videos and pics from her thread. I only make my "
+                "own over here.")
+    else:
+        text = ("that's mia's desk, babe — she makes the other girls' "
+                "videos and pics from her thread. ask her and she's "
+                "got it. i only make my own over here.")
+    return {"brief": FIXED_REPLY_PREFIX + text,
             "sogni_media_redirect": "mia"}
 
 
-def _media_unknown_reply(parsed: dict) -> dict:
+def _media_unknown_reply(parsed: dict,
+                         character_id: str | None = None) -> dict:
     name = parsed.get("raw_name") or "that"
+    rocky = _is_rocky(character_id)
     if parsed.get("status") == "ambiguous":
         cands = ", ".join(parsed.get("candidates") or [])
-        return {"brief": FIXED_REPLY_PREFIX +
-                f"i've got more than one {name} on the roster, "
-                f"babe ({cands}) — which one do you mean?",
+        if rocky:
+            text = (f"I've got more than one {name} on the roster "
+                    f"({cands}). Which one do you mean?")
+        else:
+            text = (f"i've got more than one {name} on the roster, "
+                    f"babe ({cands}) — which one do you mean?")
+        return {"brief": FIXED_REPLY_PREFIX + text,
                 "sogni_media_unknown": name}
-    return {"brief": FIXED_REPLY_PREFIX +
-            f"i don't have a {name} i can make yet, babe — who "
-            "do you mean?",
+    if rocky:
+        text = f"I don't have a {name} I can make yet. Who do you mean?"
+    else:
+        text = (f"i don't have a {name} i can make yet, babe — who "
+                "do you mean?")
+    return {"brief": FIXED_REPLY_PREFIX + text,
             "sogni_media_unknown": name}
 
 
@@ -4976,7 +5174,7 @@ def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
         prompt = parsed.get("subject", prompt)
     if target_character_id and target_character_id != character_id \
             and (character_id or "").strip().lower() != "mia":
-        return _mia_media_redirect(target_name)
+        return _mia_media_redirect(target_name, character_id)
     _media_topic_touch(conn, user_id, kind="image", subject=prompt,
                        target_character_id=target_character_id)
     if _is_vague_media_subject(prompt):
@@ -4986,7 +5184,8 @@ def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
                            options=options,
                            target_character_id=target_character_id,
                            target_name=target_name, intent=intent_v)
-        return _media_options_reply("image", options, target_name)
+        return _media_options_reply("image", options, target_name,
+                                    character_id)
     if not stored_sogni_session(conn):
         # Sogni is unavailable (not signed in): the free picture
         # desk is the fallback, and the reply says which path ran.
@@ -5088,6 +5287,13 @@ _SOGNI_TOPIC_KIND = "sogni_topic"
 
 _SOGNI_SIGNED_IN_REPLY = (
     "i'm signed into your sogni, babe — what do you want me to make?")
+_ROCKY_SOGNI_SIGNED_IN_REPLY = (
+    "I'm signed into your Sogni. What do you want me to make?")
+
+
+def _sogni_signed_in_reply(character_id=None) -> str:
+    return (_ROCKY_SOGNI_SIGNED_IN_REPLY if _is_rocky(character_id)
+            else _SOGNI_SIGNED_IN_REPLY)
 
 
 def detect_sogni_media_ask(text: str) -> str | None:
@@ -5221,7 +5427,7 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
         _sogni_topic_touch(conn, user_id)
         if not stored_sogni_session(conn):
             return {"brief": FIXED_REPLY_PREFIX
-                    + _SOGNI_NO_SESSION_REPLY,
+                    + _sogni_no_session_reply(character_id),
                     "sogni_login_box": True}
         loose = detect_sogni_media_ask(t)
         if loose:
@@ -5231,7 +5437,8 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                                           loose, raw_text=t)
             return _route_sogni_video(conn, user_id, character_id,
                                       loose, raw_text=t)
-        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_SIGNED_IN_REPLY}
+        return {"brief": FIXED_REPLY_PREFIX
+                + _sogni_signed_in_reply(character_id)}
     # No Sogni name, no video ask: a short confirmation while the
     # Sogni topic is open ("yes they do", "i just had it put in")
     # stays in the lane instead of falling to the brain — but never
@@ -5244,9 +5451,10 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                                             "job_search"):
         if not stored_sogni_session(conn):
             return {"brief": FIXED_REPLY_PREFIX
-                    + _SOGNI_NO_SESSION_REPLY,
+                    + _sogni_no_session_reply(character_id),
                     "sogni_login_box": True}
-        return {"brief": FIXED_REPLY_PREFIX + _SOGNI_SIGNED_IN_REPLY}
+        return {"brief": FIXED_REPLY_PREFIX
+                + _sogni_signed_in_reply(character_id)}
     return None
 
 

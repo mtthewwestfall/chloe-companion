@@ -19,7 +19,10 @@ roster on every refresh — a local girl with the same id as a Keyhole girl
 overrides it. The 'chloe' id is reserved and can never be added locally.
 
 Character dicts (internal): {id, name, avatar_url, persona,
-companion_voice, blurb, door_title, sort_order}.
+companion_voice, blurb, door_title, sort_order, gender}. Gender is a
+derived internal voice flag: explicit roster ids win, then an explicit
+persona declaration ("You are X, a man/woman") — it is never inferred
+from a voice or a name alone.
 
 Owner-only private characters (2026-10-08): a local character may carry
 an owner_user_id. Such a character is private — it is only listed for,
@@ -32,6 +35,7 @@ panel passes include_private=True so she stays manageable.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 from typing import Any
@@ -41,6 +45,48 @@ from . import config
 CACHE_TTL_S = 300
 
 _cache: dict[str, Any] = {"ts": 0.0, "chars": []}
+
+# The companion store has no gender column, so the derived flag comes
+# from the roster ids whose gender is product canon, then from an
+# explicit persona declaration. Rocky is male but is handled as the
+# owner's co-producer, never as a boyfriend character.
+_MALE_CHARACTER_IDS = frozenset({"jake", "eli", "rocky"})
+_FEMALE_CHARACTER_IDS = frozenset({
+    "chloe", "mara", "isabella", "regan", "brooklyn", "hannah", "mia",
+    "jordan",
+})
+_MALE_PERSONA_RE = re.compile(
+    r"\b(?:you are\s+[^.!?\n]{0,80}?\ba man\b|a male companion|"
+    r"her boyfriend|your boyfriend|he/him)\b",
+    re.IGNORECASE)
+_FEMALE_PERSONA_RE = re.compile(
+    r"\b(?:you are\s+[^.!?\n]{0,80}?\ba woman\b|a female companion|"
+    r"his girlfriend|your girlfriend|she/her)\b",
+    re.IGNORECASE)
+
+
+def character_gender(character_id: str | None = None,
+                     persona: str = "") -> str:
+    """Return 'male', 'female', or '' when the roster does not say."""
+    cid = (character_id or "").strip().lower()
+    if cid in _MALE_CHARACTER_IDS:
+        return "male"
+    if cid in _FEMALE_CHARACTER_IDS:
+        return "female"
+    text = persona or ""
+    if _MALE_PERSONA_RE.search(text):
+        return "male"
+    if _FEMALE_PERSONA_RE.search(text):
+        return "female"
+    return ""
+
+
+def _with_gender(char: dict[str, Any]) -> dict[str, Any]:
+    out = dict(char)
+    explicit = str(out.get("gender") or "").strip().lower()
+    out["gender"] = explicit if explicit in ("male", "female") else \
+        character_gender(out.get("id"), out.get("persona") or "")
+    return out
 
 # Built-in fallback: Chloe must always resolve, even when the Keyhole
 # backend is unreachable. Her full personality engine lives in brain.py /
@@ -54,6 +100,7 @@ CHLOE_FALLBACK: dict[str, Any] = {
     "blurb": "",
     "door_title": "",
     "sort_order": 0,
+    "gender": "female",
     "verified_fictional": True,  # flagship AI character, inherently fictional
 }
 
@@ -107,6 +154,7 @@ def _fetch() -> list[dict[str, Any]]:
             "blurb": str(c.get("blurb") or ""),
             "door_title": str(c.get("door_title") or ""),
             "sort_order": c.get("sort_order") or 0,
+            "gender": character_gender(girl, str(c.get("persona") or "")),
         })
     return out
 
@@ -131,10 +179,10 @@ def get_characters(refresh: bool = False,
             _cache["chars"] = chars
         _cache["local"] = _local_characters()
         _cache["ts"] = now
-    chars = [dict(c) for c in _cache["chars"]]
+    chars = [_with_gender(c) for c in _cache["chars"]]
     for lc in _cache.get("local") or []:
         chars = [c for c in chars if c["id"] != lc["id"]]
-        chars.append(dict(lc))
+        chars.append(_with_gender(lc))
     if not any(c["id"] == "chloe" for c in chars):
         chars.append(dict(CHLOE_FALLBACK))
     if not include_private:
