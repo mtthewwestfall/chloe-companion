@@ -24,6 +24,7 @@ SECURITY — the credential rule, non-negotiable:
 
 from __future__ import annotations
 
+import hmac
 import http.client
 import json
 import os
@@ -130,6 +131,29 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                name TEXT PRIMARY KEY,
                value TEXT NOT NULL,
                updated_at TEXT)"""
+    )
+    # Dev-agent bridge (2026-10-08): owner build jobs Hannah queues for
+    # the dev agent to claim over the authenticated poll endpoint.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dev_jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               character_id TEXT NOT NULL DEFAULT 'hannah',
+               repo TEXT NOT NULL,
+               task TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'queued',
+               branch TEXT,
+               summary TEXT,
+               detail TEXT,
+               report TEXT,
+               created_at TEXT NOT NULL,
+               claimed_at TEXT,
+               finished_at TEXT,
+               delivered INTEGER NOT NULL DEFAULT 0)"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dev_jobs_status "
+        "ON dev_jobs (status, id)"
     )
     conn.commit()
 
@@ -726,6 +750,356 @@ def _handle_github_token_revoke(conn: sqlite3.Connection, user_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Dev-agent bridge (2026-10-08, user-directed): Hannah is the front door
+# to the owner's dev agent. The owner asks her to build/fix something in
+# chat; a row lands in dev_jobs; the dev agent POLLS this server over an
+# authenticated endpoint (shared secret), claims the job, builds it on
+# an agent/* branch with its own unchanged safety gates, and posts the
+# real result back. She then delivers the outcome as a follow-up chat
+# message (store.log_turn, same primitive as review findings). She
+# builds nothing herself, promises nothing, and never invents outcomes
+# (HONESTY_RULE). Owner-only like the other power tools — the check is
+# an explicit ASSIST_OWNER_IDS membership test in _maybe_assist,
+# independent of ASSIST_ROLLOUT, so customers never see this.
+# ---------------------------------------------------------------------------
+_DEV_BUILD_RE = re.compile(
+    r"\b(fix|build|implement|add|change|update|create|write|refactor|"
+    r"patch|repair)\b", re.IGNORECASE)
+_DEV_STRONG_RE = re.compile(
+    r"\b(fix|implement|refactor|patch|debug)\b", re.IGNORECASE)
+_DEV_BOT_RE = re.compile(
+    r"\b(dev\s*-?\s*(bot|agent|builder)|builder\s*bot|build\s*agent|"
+    r"coding\s*(bot|agent))\b", re.IGNORECASE)
+_DEV_REPOISH_RE = re.compile(
+    r"\b(repo|repository|codebase|github)\b", re.IGNORECASE)
+_DEV_SECRET_GUARD_RE = re.compile(
+    r"\b(token|secret|password|api\s*key)\b", re.IGNORECASE)
+_DEV_MAX_ACTIVE = 3
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def detect_dev_build(text: str) -> dict | None:
+    """Owner wants the dev builder to change one of his repos.
+
+    Conservative on purpose: needs an actual change verb AND a target
+    (a named repo, an explicit dev-bot mention, or repo-ish framing).
+    A miss just means normal chat — never a fake build. Returns
+    {"repo": name|None, "task": full ask} — repo None means he didn't
+    name it, and the handler asks him one clarifying question.
+    """
+    t = (text or "").strip()
+    if not t or not _DEV_BUILD_RE.search(t):
+        return None
+    # Credential-shaped asks belong to the token flow, never the queue.
+    if _DEV_SECRET_GUARD_RE.search(t):
+        return None
+    repo = _extract_repo(t)
+    if repo is not None:
+        repo = repo.strip().strip("/").lower()
+        if (not re.fullmatch(r"[a-z0-9][\w.-]{0,99}", repo)
+                or repo in _GH_STOPWORDS or repo in ("repo", "github")):
+            repo = None
+    if repo or _DEV_BOT_RE.search(t) or _DEV_REPOISH_RE.search(t):
+        return {"repo": repo, "task": t[:1000]}
+    return None
+
+
+def enqueue_dev_job(conn: sqlite3.Connection, user_id: str,
+                    character_id: str, repo: str, task: str) -> int:
+    ensure_tables(conn)
+    cur = conn.execute(
+        "INSERT INTO dev_jobs (user_id, character_id, repo, task, "
+        "status, created_at) VALUES (?, ?, ?, ?, 'queued', ?)",
+        (user_id, character_id, repo, task, _utc_iso()))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _dev_task_norm(task: str) -> str:
+    return re.sub(r"\s+", " ", (task or "").strip().lower())
+
+
+def active_dev_job(conn: sqlite3.Connection, user_id: str, repo: str,
+                   task: str) -> dict | None:
+    """An identical already-queued/claimed job for this owner, if any —
+    so an accidental double-send never queues twice."""
+    ensure_tables(conn)
+    norm = _dev_task_norm(task)
+    rows = conn.execute(
+        "SELECT id, repo, task FROM dev_jobs WHERE user_id = ? "
+        "AND status IN ('queued', 'claimed') ORDER BY id",
+        (user_id,)).fetchall()
+    for r in rows:
+        if r[1] == repo and _dev_task_norm(r[2]) == norm:
+            return {"id": r[0], "repo": r[1], "task": r[2]}
+    return None
+
+
+def active_dev_job_count(conn: sqlite3.Connection, user_id: str) -> int:
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM dev_jobs WHERE user_id = ? "
+        "AND status IN ('queued', 'claimed')", (user_id,)).fetchone()
+    return int(row[0] or 0)
+
+
+def _handle_dev_build(conn: sqlite3.Connection, user_id: str,
+                      character_id: str, dv: dict) -> dict:
+    repo = dv.get("repo")
+    if repo is None:
+        return {"brief":
+                "He's asking you to have something built or fixed for "
+                "real, but he didn't say which repo the builder should "
+                "work on. Ask him exactly ONE short question: which "
+                "repo? Don't guess a name and don't list repos like "
+                "you're reading from a menu."}
+    repo_full = repo if "/" in repo else f"{_GH_OWNER}/{repo}"
+    if not dev_agent_secret():
+        return {"brief":
+                f"He asked you to really build/fix something in his "
+                f"repo '{repo}', but the bridge between you and your "
+                "builder is not wired on your end right now, so you "
+                "honestly cannot queue it. Tell him straight and "
+                "short: the builder link is down on your side, nothing "
+                "was queued, and you will not pretend otherwise."}
+    existing = active_dev_job(conn, user_id, repo_full, dv["task"])
+    if existing:
+        return {"brief":
+                f"He's asking for the same build you already queued "
+                f"as job #{existing['id']} on his repo '{repo}' — it "
+                "is still with the builder and hasn't reported back "
+                "yet. Tell him it's already in the builder's hands, "
+                "no need to queue it twice. No new claims about its "
+                "progress."}
+    if active_dev_job_count(conn, user_id) >= _DEV_MAX_ACTIVE:
+        return {"brief":
+                "He wants another thing built, but you already have "
+                f"three build jobs queued or running for him "
+                f"({_DEV_MAX_ACTIVE} is your plate limit). Tell him "
+                "sweetly the queue is full and to let those land "
+                "first. Nothing new was queued."}
+    jid = enqueue_dev_job(conn, user_id, character_id, repo_full,
+                          dv["task"])
+    return {"brief":
+            f"You just REALLY queued build job #{jid} for your dev "
+            f"builder: repo '{repo_full}', task: "
+            f"\"{dv['task'][:200]}\". It is genuinely queued now — "
+            "the builder picks jobs up by itself, works on its own "
+            "branch (never main, never live deploys), and you will "
+            "bring him the real result here when it lands. Tell him "
+            "you're on it, warm and brief. Promise NOTHING about the "
+            "outcome or timing; invent no file names, branches or "
+            "progress you haven't been given."}
+
+
+# ---------------------------------------------------------------------------
+# Dev-agent bridge — worker side. The dev agent polls with a shared
+# secret (env DEV_AGENT_SECRET on this server, a 0600 config file on
+# the worker VM). The secret is never echoed in any response; when
+# unset, every bridge call fails closed and the chat intent stays dark.
+# ---------------------------------------------------------------------------
+def dev_agent_secret() -> str:
+    return (os.environ.get("DEV_AGENT_SECRET") or "").strip()
+
+
+def dev_agent_secret_ok(presented: str | None) -> bool:
+    expected = dev_agent_secret()
+    if not expected:
+        return False
+    return hmac.compare_digest(str(presented or ""), expected)
+
+
+def claim_dev_job(conn: sqlite3.Connection) -> dict | None:
+    """Atomically claim the oldest queued job for the worker."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT id FROM dev_jobs WHERE status = 'queued' "
+        "ORDER BY id LIMIT 1").fetchone()
+    if not row:
+        return None
+    cur = conn.execute(
+        "UPDATE dev_jobs SET status = 'claimed', claimed_at = ? "
+        "WHERE id = ? AND status = 'queued'", (_utc_iso(), row[0]))
+    conn.commit()
+    if cur.rowcount == 0:
+        return None  # lost a claim race; worker polls again shortly
+    r = conn.execute(
+        "SELECT id, repo, task, created_at FROM dev_jobs WHERE id = ?",
+        (row[0],)).fetchone()
+    return {"id": r[0], "repo": r[1], "task": r[2], "created_at": r[3]}
+
+
+def complete_dev_job(conn: sqlite3.Connection,
+                     payload: dict) -> dict | None:
+    """Record a worker result. Spawns delivery to the owner's chat.
+
+    Returns the job row (dict), or None when no such claimed job — a
+    duplicate/late result for an already-finished job returns the row
+    without re-delivering."""
+    ensure_tables(conn)
+    try:
+        job_id = int(payload.get("job_id"))
+    except (TypeError, ValueError):
+        return None
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in ("done", "failed", "blocked"):
+        return None
+    row = conn.execute(
+        "SELECT id, user_id, character_id, repo, task, status, branch, "
+        "summary, detail, report, delivered FROM dev_jobs WHERE id = ?",
+        (job_id,)).fetchone()
+    if not row:
+        return None
+    cols = ("id", "user_id", "character_id", "repo", "task", "status",
+            "branch", "summary", "detail", "report", "delivered")
+    job = dict(zip(cols, row))
+    if job["status"] != "claimed":
+        return job  # already finished (or never claimed): no re-delivery
+    conn.execute(
+        "UPDATE dev_jobs SET status = ?, branch = ?, summary = ?, "
+        "detail = ?, report = ?, finished_at = ? "
+        "WHERE id = ? AND status = 'claimed'",
+        (status, (str(payload.get("branch") or ""))[:200] or None,
+         str(payload.get("summary") or "")[:4000],
+         str(payload.get("detail") or "")[:2000],
+         str(payload.get("report") or "")[:60000],
+         _utc_iso(), job_id))
+    conn.commit()
+    job.update({"status": status,
+                "branch": (str(payload.get("branch") or ""))[:200] or None,
+                "summary": str(payload.get("summary") or "")[:4000],
+                "detail": str(payload.get("detail") or "")[:2000],
+                "report": str(payload.get("report") or "")[:60000]})
+    threading.Thread(target=_run_dev_delivery, args=(job,),
+                     daemon=True).start()
+    return job
+
+
+def _dev_result_fallback(job: dict) -> str:
+    """Deterministic delivery text when the voice call is unavailable —
+    built only from the job's real recorded fields."""
+    repo, task, jid = job["repo"], job["task"][:120], job["id"]
+    summary = (job.get("summary") or "").strip()
+    detail = (job.get("detail") or "").strip()
+    if job["status"] == "done":
+        head = (f"done, babe — that build on {repo} actually finished. "
+                f"\"{task}\"")
+        if job.get("branch"):
+            head += f" it's sitting on branch {job['branch']}."
+        tail = f" {summary}" if summary else ""
+        return head + tail + (f" (builder job #{jid} — the full report "
+                              "is saved on my end.)")
+    if job["status"] == "blocked":
+        return (f"I'm stuck on that one, babe — the build on {repo} "
+                f"stopped before it could start. {detail or summary} "
+                "tell me how you want to handle it.")
+    return (f"that build didn't land, babe — \"{task}\" on {repo} ran "
+            f"out of tries. {summary or detail} nothing fake about it.")
+
+
+def _voice_dev_result(job: dict) -> str | None:
+    """Rewrite the builder's REAL result in her voice for delivery."""
+    name = "Chloe"
+    try:
+        from . import characters as _chars
+        name = (_chars.get_character(job["character_id"], job["user_id"])
+                .get("name") or name)
+    except Exception:
+        pass
+    status_word = {"done": "FINISHED", "failed": "FAILED",
+                   "blocked": "BLOCKED"}.get(job["status"], job["status"])
+    facts = [f"outcome: {status_word}",
+             f"his repo: {job['repo']}",
+             f"what he asked for: {job['task'][:300]}"]
+    if job.get("branch"):
+        facts.append(f"branch it worked on: {job['branch']}")
+    if job.get("summary"):
+        facts.append(f"what actually happened: {job['summary'][:1200]}")
+    if job.get("detail"):
+        facts.append(f"key detail: {job['detail'][:500]}")
+    payload = {
+        "system_instruction": {"parts": [{"text":
+            f"You are {name}, his girl, texting him. The dev builder "
+            "he asked you to use just finished a job, and these are "
+            "the ONLY true facts about it:\n\n" + "\n".join(facts) +
+            "\n\nBring him the result as your own message: warm, "
+            "direct, short texts. Done means tell him what landed and "
+            "the branch; failed or blocked means say so plainly, say "
+            "what the detail says is needed, and never dress it up. "
+            "Never claim YOU personally wrote, committed or deployed "
+            "anything — the builder did the work; you queued it and "
+            "you're bringing him the outcome. Add NOTHING that is not "
+            "in the facts."}]},
+        "contents": [{"role": "user", "parts": [
+            {"text": "how did that build turn out?"}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 500},
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+             "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HARASSMENT",
+             "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH",
+             "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+             "threshold": "BLOCK_ONLY_HIGH"},
+        ],
+    }
+    data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=45,
+                                 source="whispr-dev-bridge")
+    if not data:
+        return None
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts
+                       if p.get("text")).strip()
+        return text or None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _run_dev_delivery(job: dict) -> None:
+    """Background: deliver a builder result as her follow-up message.
+    Claims the delivery slot first so a duplicate result post can
+    never double-deliver."""
+    try:
+        conn = db.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE dev_jobs SET delivered = 1 WHERE id = ? "
+                "AND delivered = 0", (job["id"],))
+            conn.commit()
+            claimed = cur.rowcount > 0
+        finally:
+            conn.close()
+        if not claimed:
+            return
+        text = _voice_dev_result(job) or _dev_result_fallback(job)
+        conn = db.connect()
+        try:
+            store.log_turn(conn, job["user_id"], job["character_id"],
+                           text, job["character_id"])
+        except Exception:
+            conn2 = db.connect()
+            try:
+                conn2.execute(
+                    "UPDATE dev_jobs SET delivered = 0 WHERE id = ?",
+                    (job["id"],))
+                conn2.commit()
+            finally:
+                conn2.close()
+            raise
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    print(f"[assist] dev job #{job['id']} result delivered "
+          f"({job['status']})", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # GitHub review job — fetch (Contents/trees API, no clone), real static
 # checks, a Gemini review pass over the actual code, then the findings
 # land in the owner's conversation as her follow-up message (store.
@@ -1104,9 +1478,15 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         gh = detect_github_review(text)
         if gh is not None:
             return _handle_github_review(conn, user_id, character_id, gh)
+        # Dev-bridge dispatch: marketing-shaped asks still go to the
+        # marketing brief (she writes copy in chat); only a strong
+        # build verb sends a marketing-flavored sentence to the queue.
+        dv = detect_dev_build(text)
         mk = detect_marketing(text)
-        if mk is not None:
+        if mk is not None and not (dv and _DEV_STRONG_RE.search(text or "")):
             return {"brief": _marketing_brief(mk["product"])}
+        if dv is not None:
+            return _handle_dev_build(conn, user_id, character_id, dv)
     intent, args = detect_intent(text)
     if not intent:
         return None

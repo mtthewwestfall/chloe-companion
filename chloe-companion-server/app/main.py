@@ -392,6 +392,49 @@ def _startup():
     gemini_keys.start_prober()
 
 
+# ---------------------------------------------------------------------------
+# Dev-agent bridge (2026-10-08): the owner's dev agent polls here for
+# build jobs Hannah queued in chat, and posts real results back.
+# Auth is a shared-secret header (X-Dev-Agent-Secret) — no user session
+# is involved and no user data leaves these routes beyond job fields.
+# When DEV_AGENT_SECRET is unset on this server, both fail closed.
+# ---------------------------------------------------------------------------
+class DevAgentResultIn(BaseModel):
+    job_id: int
+    status: str
+    branch: str | None = None
+    summary: str = ""
+    detail: str = ""
+    report: str = ""
+
+
+@app.get("/api/v1/dev-agent/poll")
+def dev_agent_poll(request: Request):
+    if not assist.dev_agent_secret_ok(
+            request.headers.get("x-dev-agent-secret")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    conn = _conn()
+    try:
+        return {"ok": True, "job": assist.claim_dev_job(conn)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/dev-agent/result")
+def dev_agent_result(body: DevAgentResultIn, request: Request):
+    if not assist.dev_agent_secret_ok(
+            request.headers.get("x-dev-agent-secret")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    conn = _conn()
+    try:
+        job = assist.complete_dev_job(conn, body.model_dump())
+    finally:
+        conn.close()
+    if job is None:
+        raise HTTPException(status_code=404, detail="no_such_claimed_job")
+    return {"ok": True, "status": job["status"]}
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "chloe-companion", "phase": "3-multichar"}
