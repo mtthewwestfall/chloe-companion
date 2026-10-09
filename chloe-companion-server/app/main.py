@@ -138,6 +138,7 @@ class GirlIn(BaseModel):
     enabled: bool = True
     verified_fictional: bool = False
     owner_user_id: str = ""  # 2026-10-08: owner-only private character
+    photos: list[str] = []   # reference photos (data URIs), as in creator
 
 
 class GirlUpdate(BaseModel):
@@ -151,6 +152,7 @@ class GirlUpdate(BaseModel):
     enabled: bool | None = None
     verified_fictional: bool | None = None
     owner_user_id: str | None = None  # 2026-10-08: owner-only privacy scope
+    photos: list[str] | None = None   # reference photos (data URIs)
 
 
 class GeminiKeyIn(BaseModel):
@@ -387,6 +389,21 @@ def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = N
 @app.on_event("startup")
 def _startup():
     db.init_db()
+    # One-time-per-boot retro scrub (owner-directed 2026-10-09): a
+    # credential paste the intake parser once missed must not sit in
+    # the stored threads. Count only in the log — never content.
+    try:
+        conn = db.connect()
+        try:
+            assist.ensure_tables(conn)
+            n = assist.scrub_sogni_credentials_from_history(conn)
+            if n:
+                print(f"[assist] boot scrub replaced {n} stored "
+                      "credential-shaped message(s)")
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — never block boot on it
+        print(f"[assist] boot scrub skipped: {e.__class__.__name__}")
     # Background Gemini key prober: keeps the believed-healthy pool view
     # fresh off the request path (see app/gemini_keys.py). Disable with
     # GEMINI_PROBER=0.
@@ -775,7 +792,7 @@ def auth_telegram(body: dict):
 async def upload_chat_attachment(request: Request,
                                  character_id: str = Form("hannah"),
                                  file: UploadFile = File(...)):
-    """Owner-only Hannah attachment intake.
+    """Owner-only assistant attachment intake (Hannah and Mia).
 
     The file is validated, size-capped, stored under /generated/
     hannah-uploads, and returned as metadata the client then binds to
@@ -784,9 +801,11 @@ async def upload_chat_attachment(request: Request,
     """
     user_id = _current_user_id(request)
     cid = (character_id or "").strip().lower()
-    if cid != "hannah" or user_id not in assist._owner_ids():
-        raise HTTPException(status_code=403,
-                            detail="attachments are owner-only for Hannah")
+    if not assist.is_assistant_character(cid) \
+            or user_id not in assist._owner_ids():
+        raise HTTPException(
+            status_code=403,
+            detail="attachments are owner-only (assistant threads)")
     data = await file.read(assist.ATTACHMENT_READ_LIMIT + 1)
     conn = _conn()
     try:
@@ -817,10 +836,11 @@ def chat(body: ChatIn, request: Request):
         attachment_records: list[dict[str, Any]] = []
         public_attachments: list[dict[str, Any]] = []
         if body.attachment_ids:
-            if cid != "hannah" or user_id not in assist._owner_ids():
+            if not assist.is_assistant_character(cid) \
+                    or user_id not in assist._owner_ids():
                 raise HTTPException(
                     status_code=403,
-                    detail="attachments are owner-only for Hannah")
+                    detail="attachments are owner-only (assistant threads)")
             try:
                 attachment_records = assist.get_chat_attachments(
                     conn, user_id, cid, body.attachment_ids)

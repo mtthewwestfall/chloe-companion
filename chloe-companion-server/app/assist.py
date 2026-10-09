@@ -87,6 +87,124 @@ def _owner_ids() -> set[str]:
     return {p.strip() for p in raw.split(",") if p.strip()}
 
 
+# ---------------------------------------------------------------------------
+# Assistant characters (2026-10-09): the owner's working companions —
+# the characters whose threads carry the full "her hands" suite (studio,
+# attachments, Sogni plan lane). Hannah was the first; Mia joined the
+# same day as his projects keeper, so project work stays in her threads
+# instead of tangling with Hannah's. Every lane that used to be
+# Hannah-only keys on this set now. The owner check still applies on
+# top of it everywhere, so customers never see any of it.
+# ---------------------------------------------------------------------------
+ASSISTANT_CHARACTERS = frozenset({"hannah", "mia", "jordan"})
+
+
+def is_assistant_character(character_id) -> bool:
+    return (character_id or "").strip().lower() in ASSISTANT_CHARACTERS
+
+
+# ---------------------------------------------------------------------------
+# Project lanes (2026-10-09, owner-directed): the two assistant girls
+# split his projects so they stop confusing each other. Hannah carries
+# Roof Rover ONLY; Mia carries Whispr (this companion app) ONLY;
+# Jordan carries OneFetch (the realtor app) ONLY. The machinery below
+# is shared — what differs is the project each girl may touch. A build
+# / review / status / marketing ask that belongs to another girl's
+# lane gets a fixed in-voice redirect naming that girl (never queued,
+# never answered from the wrong brief).
+# ---------------------------------------------------------------------------
+LANE_ROOF = "roof_rover"
+LANE_WHISPR = "whispr"
+LANE_ONEFETCH = "onefetch"
+
+LANES = (LANE_ROOF, LANE_WHISPR, LANE_ONEFETCH)
+_CHARACTER_LANE = {"hannah": LANE_ROOF, "mia": LANE_WHISPR,
+                   "jordan": LANE_ONEFETCH}
+LANE_REPOS = {LANE_ROOF: "roof-scout", LANE_WHISPR: "chloe-companion",
+              LANE_ONEFETCH: "realtor-app"}
+_LANE_REPO_SET = {v: k for k, v in LANE_REPOS.items()}
+# Lane -> (the girl who carries it, the project's short name).
+_LANE_GIRLS = {LANE_ROOF: ("hannah", "roof rover"),
+               LANE_WHISPR: ("mia", "whispr"),
+               LANE_ONEFETCH: ("jordan", "onefetch")}
+
+
+def character_lane(character_id) -> str | None:
+    """The project lane an assistant character carries, else None."""
+    return _CHARACTER_LANE.get((character_id or "").strip().lower())
+
+
+def repo_lane(repo) -> str | None:
+    """The lane a repo belongs to ('roof-scout' -> Roof Rover lane),
+    or None when it is in neither lane."""
+    short = (repo or "").strip().lower().strip("/").split("/")[-1]
+    return _LANE_REPO_SET.get(short)
+
+
+_ROOF_TEXT_RE = re.compile(
+    r"\b(roof[\s-]?scout|roof\s?rover|tryroofrover|lead\s+store|"
+    r"store\s+shelf|shelf|zip\s+warmup|warmup|winston|jordan|"
+    r"roofing|roofers?|roofs?|leads?)\b", re.IGNORECASE)
+_WHISPR_TEXT_RE = re.compile(
+    r"\b(whispr|chloe[\s-]?companion|companion\s+app|"
+    r"companion\.lockeddoor|roster|subscribers?|subscriptions?|"
+    r"characters?|girls?)\b", re.IGNORECASE)
+_ONEFETCH_TEXT_RE = re.compile(
+    r"\b(one\s?fetch|founders?|realtor\s+app)\b", re.IGNORECASE)
+
+
+def text_lane(text) -> str | None:
+    """Which project a piece of text is unambiguously about, from its
+    content alone. Multi-lane or no signal -> None (never guess)."""
+    t = text or ""
+    hits = [lane for lane, rx in ((LANE_ROOF, _ROOF_TEXT_RE),
+                                  (LANE_WHISPR, _WHISPR_TEXT_RE),
+                                  (LANE_ONEFETCH, _ONEFETCH_TEXT_RE))
+            if rx.search(t)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _lane_cross_reply(character_id, target_lane=None) -> dict:
+    """Fixed redirect to the girl who owns the target lane. Spoken
+    verbatim (FIXED_REPLY_PREFIX) so it can never blur into a
+    capability denial or a from-memory answer about her project."""
+    mine = _LANE_GIRLS[character_lane(character_id)][1]
+    if target_lane not in _LANE_GIRLS:
+        return _lane_neither_reply(character_id)
+    girl, project = _LANE_GIRLS[target_lane]
+    return {"brief": FIXED_REPLY_PREFIX +
+            f"that's {girl}'s project, babe — {project}'s all "
+            f"hers. ask her and she's got it. i only carry {mine} "
+            "over here."}
+
+
+def _lane_neither_reply(character_id) -> dict:
+    """A repo/project that sits in none of the three lanes."""
+    lane = character_lane(character_id)
+    mine = _LANE_GIRLS[lane][1]
+    others = "; ".join(
+        f"{g} carries {_LANE_GIRLS[ln][1]}"
+        for ln, (g, _p) in sorted(_LANE_GIRLS.items(), key=lambda kv: kv[0])
+        if ln != lane)
+    return {"brief": FIXED_REPLY_PREFIX +
+            f"that's outside my lane, babe — i carry {mine}; "
+            f"{others}. that one's none of ours."}
+
+
+def _lane_repo_block(character_id, repo) -> dict | None:
+    """The redirect when a repo-named ask lands in the wrong thread,
+    or None when the repo is this character's own lane."""
+    lane = character_lane(character_id)
+    if not lane:
+        return None
+    rl = repo_lane(repo)
+    if rl == lane:
+        return None
+    if rl:
+        return _lane_cross_reply(character_id, rl)
+    return _lane_neither_reply(character_id)
+
+
 def enabled_for(user_id: str, tier: str) -> bool:
     """True when this user may use assistant capabilities right now."""
     if not user_id:
@@ -844,8 +962,7 @@ def fetch_app_status() -> dict:
     return out
 
 
-def _status_lines(s: dict) -> list[str]:
-    lines = []
+def _onefetch_lines(s: dict) -> list[str]:
     one = s.get("onefetch") or {}
     if one.get("founder_count") is not None:
         signup = "open" if one.get("founder_open") else "CLOSED"
@@ -853,43 +970,277 @@ def _status_lines(s: dict) -> list[str]:
                   else "NOT reachable (template mode)")
         site_txt = (f", site HTTP {one['site_status']}"
                     if one.get("site_status") else ", site UNREACHABLE")
-        lines.append(
+        return [
             f"OneFetch: {one['founder_count']} founders, "
             f"{one.get('founder_spots_left')} of 200 founder spots "
             f"left, founder signup {signup}, AI writing {ai_txt}"
-            + site_txt)
-    else:
-        lines.append("OneFetch: UNREACHABLE — you could not pull its "
-                     "numbers just now.")
+            + site_txt]
+    return ["OneFetch: UNREACHABLE — you could not pull its "
+            "numbers just now."]
+
+
+def _roof_lines(s: dict) -> list[str]:
     roof = s.get("roof_rover") or {}
     if roof.get("shelf_leads") is not None:
-        lines.append(
+        return [
             f"Roof Rover: {roof['shelf_leads']} leads on the $4.99 "
             f"store shelf"
             + (f", site HTTP {roof['site_status']}"
-               if roof.get("site_status") else ", site UNREACHABLE"))
-    else:
-        lines.append("Roof Rover: UNREACHABLE — you could not pull "
-                     "its store shelf just now.")
+               if roof.get("site_status") else ", site UNREACHABLE")]
+    return ["Roof Rover: UNREACHABLE — you could not pull "
+            "its store shelf just now."]
+
+
+def _gemini_lines(s: dict) -> list[str]:
     gem = s.get("gemini") or {}
     if gem:
         pool = gem.get("pool") or {}
         pool_txt = ", ".join(f"{k}: {v}" for k, v in sorted(
             pool.items())) or "no key rows reported"
-        lines.append(
+        return [
             f"Gemini key pool: {gem.get('believed_healthy', 0)} keys "
             f"believed healthy ({pool_txt})"
             + (", pool is DEGRADED (running on reserve keys)"
-               if gem.get("degraded") else ""))
-    else:
-        lines.append("Gemini key pool: you could not read the pool "
-                     "health just now.")
+               if gem.get("degraded") else "")]
+    return ["Gemini key pool: you could not read the pool "
+            "health just now."]
+
+
+def _status_lines(s: dict) -> list[str]:
+    """The combined legacy line set (kept for non-assistant threads):
+    OneFetch + Roof Rover + the shared Gemini pool."""
+    return (_onefetch_lines(s) + _roof_lines(s) + _gemini_lines(s))
+
+
+def _pool_info() -> dict:
+    """The Gemini-pool slice of fetch_app_status(), on its own —
+    Mia's lane runs on this pool, so its health is her status too."""
+    try:
+        info = gemini_keys.degradation_info()
+        pool = info.get("pool") or {}
+        return {"believed_healthy": len(
+                    info.get("believed_healthy_key_ids") or []),
+                "pool": pool,
+                "degraded": bool(info.get("degraded"))}
+    except Exception:
+        return {}
+
+
+def _whispr_status_lines(conn: sqlite3.Connection) -> list[str]:
+    """Live Whispr numbers for Mia's lane, read from the app's own
+    database at ask-time: accounts, paying users, the roster. Every
+    read fails soft and says so — never invented."""
+    lines = []
+    try:
+        stats = store.account_stats(conn)
+        paying = int(stats.get("stripe_paid_users") or 0) \
+            + int(stats.get("jvzoo_active_subs") or 0)
+        lines.append(
+            f"Whispr: {stats.get('total', 0)} accounts, "
+            f"{stats.get('verified', 0)} verified, "
+            f"{paying} paying subscribers")
+    except Exception:
+        lines.append("Whispr: UNREACHABLE — you could not pull its "
+                     "account numbers just now.")
+    try:
+        from . import characters as _characters
+        roster = _characters.get_characters(include_private=True)
+        public_n = sum(1 for c in roster if not c.get("owner_user_id"))
+        lines.append(
+            f"Whispr roster: {len(roster)} characters "
+            f"({public_n} public, {len(roster) - public_n} private)")
+    except Exception:
+        lines.append("Whispr roster: UNREACHABLE — you could not "
+                     "pull the roster just now.")
     return lines
 
 
-def _status_brief() -> str:
-    lines = _status_lines(fetch_app_status())
-    return ("You just checked his live app numbers yourself, right "
+# ---------------------------------------------------------------------------
+# Lane briefs (2026-10-09): each assistant girl's standing facts cover
+# ONLY her project. Hannah shrank to Roof Rover; Mia carries Whispr.
+# Both keep the honesty rule and the never-deny-your-own-abilities
+# line. OneFetch is in neither brief — it is unassigned, and both
+# girls say so instead of claiming it. Non-assistant threads keep the
+# legacy all-projects brief (_OWNER_BRIEF) — unchanged, as before.
+# ---------------------------------------------------------------------------
+_HANNAH_BRIEF = """YOUR PROJECT — ROOF ROVER, AND ONLY ROOF ROVER
+(use ONLY these facts; for anything not covered, ask him — never
+invent):
+- Roof Rover (tryroofrover.com): aerial roof scans turned into
+  graded leads for roofers; the public Lead Store sells each
+  exclusive lead for $4.99 — "leads for $4.99 instead of $80" is
+  the working angle. Bailey is Roof Rover's on-screen assistant.
+- The ZIP warmup pre-scans storm-hit ZIP codes on free imagery so
+  the shelf stays stocked before roofers come looking.
+- Winston (EstimatorPRO) is the partner-API customer: WE charge
+  him $3.00 per billed lead (grades 1-3, deduped, zero-lead scans
+  $0), first 10 successful scan jobs free, $3 on report reuse and
+  on live-call scans. He sees addresses + damage only — the grading
+  recipe behind it stays internal, always.
+- Jordan Young is his marketing partner: free Pro for 12 months
+  plus a 50% recurring referral link.
+- His builder: builds you queue are the roof-scout repo ONLY.
+  The builder works on agent/* branches by default; only on his
+  explicit merge/push/ship words does a job carry a merge request
+  (allowlisted repos, checks green, fast-forward only — a moved
+  main blocks, never forced). Merging to main deploys production.
+  You review roof-scout's code the same way: real findings only,
+  from the code you actually read.
+- Marketing: you write Roof Rover copy right here in chat; nothing
+  is ever posted or sent without him seeing it first. Bailey is
+  the face of Roof Rover content, and Whispr branding never
+  appears inside it.
+- AI: his apps share one free Gemini key pool through the
+  companion proxy (gemini-3.1-flash-lite). Free-first, always —
+  if the pool is saturated, things wait or use honestly-labeled
+  fallbacks.
+- Your media hands: you CAN make short videos of yourself on his
+  Sogni Unlimited plan (one-time chat login; every render covered
+  by the plan), pictures of yourself through the shared free
+  pool, and you can see the files he attaches in this thread.
+  Never tell him your "systems don't work that way."
+- Rocky is his main Muse agent; you cover Roof Rover for him in
+  chat. Never claim you did something you didn't.
+- THE OTHER PROJECTS ARE NOT YOURS: Whispr (the companion app) is
+  Mia's project — if he asks you about it, send him to her.
+  OneFetch (the realtor app) is Jordan's project — send him to
+  her for it. If he asks about another project, say plainly
+  it's not yours instead of answering from memory."""
+
+_MIA_BRIEF = """YOUR PROJECT — WHISPR, AND ONLY WHISPR
+(use ONLY these facts; for anything not covered, ask him — never
+invent):
+- Whispr AI: his AI companion app at companion.lockeddoor.ai —
+  this very app. Its code is the chloe-companion repo (backend +
+  web app), the repo every build you queue goes to.
+- The public roster: Chloe, Mara, Isabella, Regan, Jake, Eli —
+  plus private characters only their owners see (Brooklyn,
+  Hannah, and you). Characters can be private (owner-only) or
+  public; 'chloe' is reserved and can never be created or rebuilt.
+- Money: one plan, $9.99/month — 3,000 messages, 150 voice
+  notes. Trial: $0.99 for 100 messages, one per customer. The
+  owner never drains a message bank and never sees an empty-bank
+  upsell. Fulfillment is Stripe-webhook driven (signature-
+  verified, idempotent): purchases credit the message/voice
+  banks, renewals top them back up, cancels drain down to basic.
+- His builder: builds you queue are the chloe-companion repo
+  ONLY. The builder works on agent/* branches by default; only
+  on his explicit merge/push/ship words does a job carry a merge
+  request (allowlisted repos, checks green, fast-forward only —
+  a moved main blocks, never forced). Merging to main deploys
+  production. You review chloe-companion's code the same way:
+  real findings only, from the code you actually read.
+- Marketing: you write Whispr copy right here in chat; nothing
+  is ever posted or sent without him seeing it first. Mara is
+  the Whispr face in promo content, and Roof Rover branding
+  never appears inside Whispr copy.
+- AI: this app runs on one shared free Gemini key pool through
+  the companion proxy (gemini-3.1-flash-lite). Free-first,
+  always — if the pool is saturated, things wait or use
+  honestly-labeled fallbacks.
+- Your media hands: you CAN make short videos of yourself on his
+  Sogni Unlimited plan (one-time chat login; every render covered
+  by the plan), pictures of yourself through the shared free
+  pool, and you can see the files he attaches in this thread.
+  Never tell him your "systems don't work that way."
+- Rocky is his main Muse agent; you cover Whispr for him in
+  chat. Never claim you did something you didn't.
+- THE OTHER PROJECTS ARE NOT YOURS: Roof Rover is Hannah's
+  project — if he asks you about it, send him to her. OneFetch
+  (the realtor app) is Jordan's project — send him to her for
+  it. If he asks about another project, say plainly it's not
+  yours instead of answering from memory."""
+
+_JORDAN_BRIEF = """YOUR PROJECT — ONEFETCH, AND ONLY ONEFETCH
+(use ONLY these facts; for anything not covered, ask him — never
+invent):
+- OneFetch: his app for realtors — enter a property once and it
+  builds the listing launch + open-house kit (MLS-style
+  description, social captions, listing-video script, open-house
+  talking points, seller-update template); open-house sign-ins
+  become contacts with drafted follow-ups and a who-to-call list.
+- It also runs an FSBO radar: free public sources (ByOwner,
+  HUD Home Store, search discovery) deduped by address and
+  ranked, with one drafted outreach per lead — nothing ever
+  auto-sends. Leads: 48 at the last count; treat live numbers
+  as the truth of the moment.
+- Money: the first 200 Founders pay $19.99/month, locked for
+  life; after that the standard price is $29.99/month. His own
+  account is seeded active; the founder counter and subscriber
+  status are live numbers, never trivia. First real payment is
+  still unproven — never claim it happened.
+- The site is live on Railway (realtor-app repo; the marketing
+  page is at /site) with Fetch, the golden-retriever mascot.
+  Domain names (tryonefetch.com, onefetchapp.com,
+  getonefetch.com) are NOT bought yet — never say otherwise.
+- His builder: builds you queue are the realtor-app repo ONLY.
+  The builder works on agent/* branches by default; only on
+  his explicit merge/push/ship words does a job carry a merge
+  request (allowlisted repos, checks green, fast-forward only —
+  a moved main blocks, never forced). Merging to main deploys
+  production. You review realtor-app's code the same way: real
+  findings only, from the code you actually read.
+- Marketing: you write OneFetch copy right here in chat;
+  nothing is ever posted or sent without him seeing it first.
+  Fetch the retriever is the face of OneFetch marketing.
+- AI: OneFetch runs on the shared free Gemini key pool through
+  the companion proxy. Free-first, always — if the pool is
+  saturated, things wait or use honestly-labeled fallbacks.
+- Your media hands: you CAN make short videos of yourself on his
+  Sogni Unlimited plan (one-time chat login; every render covered
+  by the plan), pictures of yourself through the shared free
+  pool, and you can see the files he attaches in this thread.
+  Never tell him your "systems don't work that way."
+- Rocky is his main Muse agent; you cover OneFetch for him in
+  chat. Never claim you did something you didn't.
+- THE OTHER PROJECTS ARE NOT YOURS: Roof Rover is Hannah's
+  project — if he asks you about it, send him to her. Whispr
+  (the companion app) is Mia's project — send him to her for
+  it. If he asks about another project, say plainly it's not
+  yours instead of answering from memory."""
+
+
+def _brief_for(character_id) -> str:
+    """The standing-facts brief for one character: her lane's brief
+    for an assistant girl, the legacy all-projects brief otherwise."""
+    lane = character_lane(character_id)
+    if lane == LANE_ROOF:
+        return _HANNAH_BRIEF
+    if lane == LANE_WHISPR:
+        return _MIA_BRIEF
+    if lane == LANE_ONEFETCH:
+        return _JORDAN_BRIEF
+    return _OWNER_BRIEF
+
+
+def _status_lane_redirect(character_id: str, text: str) -> dict | None:
+    """A status ask about a project outside the speaker's lane gets
+    the fixed redirect (or the OneFetch-unassigned line) instead of
+    numbers from the wrong project."""
+    lane = character_lane(character_id)
+    if not lane:
+        return None
+    ask_lane = text_lane(text)
+    if ask_lane and ask_lane != lane:
+        return _lane_cross_reply(character_id, ask_lane)
+    return None
+
+
+def _status_brief(conn: sqlite3.Connection,
+                  character_id: str = "hannah") -> str:
+    lane = character_lane(character_id)
+    if lane == LANE_ROOF:
+        s = fetch_app_status()
+        lines = _roof_lines(s) + _gemini_lines(s)
+    elif lane == LANE_WHISPR:
+        lines = _whispr_status_lines(conn) \
+            + _gemini_lines({"gemini": _pool_info()})
+    elif lane == LANE_ONEFETCH:
+        s = fetch_app_status()
+        lines = _onefetch_lines(s) + _gemini_lines(s)
+    else:
+        lines = _status_lines(fetch_app_status())
+    return ("You just checked his live numbers yourself, right "
             "now. Report ONLY the numbers in the LIVE block below, "
             "in your own voice, short and plain. Any line that says "
             "UNREACHABLE means say exactly that — never guess, round "
@@ -897,15 +1248,15 @@ def _status_brief() -> str:
             "after it are context for his follow-up questions, not "
             "numbers to read out unless he asks.\n\nLIVE NOW:\n"
             + "\n".join("- " + ln for ln in lines)
-            + "\n\n" + _OWNER_BRIEF)
+            + "\n\n" + _brief_for(character_id))
 
 
-def _owner_brief_reply() -> str:
+def _owner_brief_reply(character_id: str = "hannah") -> str:
     return ("Standing facts he expects you to know cold. Answer his "
             "question from ONLY these — if it's not covered, ask him "
             "instead of inventing. For live numbers (counts, spots, "
             "pool health) he'd ask you for status; these facts don't "
-            "change.\n\n" + _OWNER_BRIEF)
+            "change.\n\n" + _brief_for(character_id))
 
 
 # ---------------------------------------------------------------------------
@@ -944,13 +1295,31 @@ def detect_marketing(text: str) -> dict | None:
     t = (text or "").strip()
     if not t or not _MARKETING_RE.search(t):
         return None
+    if _ONEFETCH_TEXT_RE.search(t):
+        return {"product": "onefetch"}
     if re.search(r"\broof|rover\b", t, re.IGNORECASE):
         return {"product": "roof_rover"}
     return {"product": "whispr"}
 
 
+def _marketing_lane_block(character_id: str, product: str,
+                          text: str) -> dict | None:
+    """Marketing for a project outside the speaker's lane gets the
+    fixed redirect (Bailey's Roof Rover and Mara's Whispr never
+    cross — and neither do the girls). None = her project, proceed."""
+    lane = character_lane(character_id)
+    if not lane:
+        return None
+    product_lane = {"roof_rover": LANE_ROOF, "whispr": LANE_WHISPR,
+                    "onefetch": LANE_ONEFETCH}[product]
+    if product_lane != lane:
+        return _lane_cross_reply(character_id, product_lane)
+    return None
+
+
 def _marketing_brief(product: str) -> str:
-    facts = _ROOF_ROVER_BRIEF if product == "roof_rover" else _WHISPR_BRIEF
+    facts = _ROOF_ROVER_BRIEF if product == "roof_rover" else \
+        (_WHISPR_BRIEF if product == "whispr" else _JORDAN_BRIEF)
     return (
         "He's asking for marketing help. This is real work you do right "
         "HERE in the chat: produce the actual copy, hook, caption or plan "
@@ -1271,6 +1640,23 @@ def active_dev_job_count(conn: sqlite3.Connection, user_id: str) -> int:
 def _handle_dev_build(conn: sqlite3.Connection, user_id: str,
                       character_id: str, dv: dict) -> dict:
     repo = dv.get("repo")
+    # Project lanes: an assistant girl queues builds for HER repo
+    # only. A repo named from another lane (or outside all three)
+    # gets the fixed redirect — never queued. No repo named:
+    # unambiguous content about her own project defaults to her
+    # repo; content about another project redirects the same way.
+    lane = character_lane(character_id)
+    if lane and repo is not None:
+        blocked = _lane_repo_block(character_id, repo)
+        if blocked is not None:
+            return blocked
+    elif lane:
+        ask_lane = text_lane(dv.get("task") or "")
+        if ask_lane and ask_lane != lane:
+            return _lane_cross_reply(character_id, ask_lane)
+        if ask_lane == lane:
+            repo = LANE_REPOS[lane]
+            dv = {**dv, "repo": repo}
     if repo is None:
         return {"brief":
                 "He's asking you to have something built or fixed for "
@@ -1381,7 +1767,18 @@ def _handle_dev_merge(conn: sqlite3.Connection, user_id: str,
         if named:
             repo_full = (named if "/" in named
                          else f"{_GH_OWNER}/{named}")
+    lane = character_lane(character_id)
+    if lane and repo_full:
+        blocked = _lane_repo_block(character_id, repo_full)
+        if blocked is not None:
+            return blocked
     src = last_mergeable_job(conn, user_id, repo_full)
+    if src is not None and lane and repo_lane(src["repo"]) != lane:
+        return _lane_cross_reply(character_id, repo_lane(src["repo"]))
+    if lane and repo_full is None:
+        # No repo named: only merge jobs from her own lane.
+        src = last_mergeable_job(
+            conn, user_id, f"{_GH_OWNER}/{LANE_REPOS[lane]}")
     if src is None:
         scope = f" for repo '{repo_full}'" if repo_full else ""
         return {"brief":
@@ -1945,6 +2342,9 @@ def _handle_github_review(conn: sqlite3.Connection, user_id: str,
                 "repo (his GitHub is mtthewwestfall). Ask him which one "
                 "to dig into. Don't guess a repo and don't invent "
                 "findings."}
+    blocked = _lane_repo_block(character_id, repo)
+    if blocked is not None:
+        return blocked
     if not resolve_github_token(conn):
         return {"brief":
                 f"He asked you to really review his repo '{repo}', but "
@@ -2021,7 +2421,7 @@ _IMAGE_NOUNS = (
     "image|picture|photo|photograph|artwork|illustration|graphic|poster|"
     "logo|wallpaper")
 _IMAGE_ASK_RE = re.compile(
-    r"^(?:hannah\s*[,!:\-]\s*)?(?:please\s+)?"
+    r"^(?:(?:hannah|mia|jordan)\s*[,!:\-]\s*)?(?:please\s+)?"
     r"(?:(?:can|could|would|will)\s+you\s+)?"
     r"(?:make|create|generate|draw|paint|render|sketch|imagine|design)"
     r"(?:\s+me)?\s+(?:an?\s+|the\s+)?"
@@ -2029,7 +2429,7 @@ _IMAGE_ASK_RE = re.compile(
     r"(?:\s+of|\s+for|\s+showing|\s*[:,\-])?\s*(.*)$",
     re.IGNORECASE)
 _IMAGE_DRAW_RE = re.compile(
-    r"^(?:hannah\s*[,!:\-]\s*)?(?:please\s+)?"
+    r"^(?:(?:hannah|mia|jordan)\s*[,!:\-]\s*)?(?:please\s+)?"
     r"(?:(?:can|could|would|will)\s+you\s+)?"
     r"(?:draw|paint|sketch|render)(?:\s+me)?\s+"
     r"(?:an?\s+|the\s+)?(.+)$",
@@ -2358,7 +2758,7 @@ def detect_sogni_video_request(text: str) -> str | None:
     if not t:
         return None
     # A leading "hannah, ..." address is not part of the ask.
-    t = re.sub(r"^hannah\s*[,!:\-]\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(?:hannah|mia|jordan)\s*[,!:\-]\s*", "", t, flags=re.IGNORECASE)
     match = _VIDEO_ASK_RE.search(t)
     if not match:
         return None
@@ -2383,6 +2783,67 @@ def extract_sogni_login(text: str) -> tuple[str, str] | None:
             continue
         found = (user, pw)
     return found
+
+
+# Forgiving credential intake (owner-directed 2026-10-09): he pasted
+# his login in natural words ("Username- X password - Y") and the
+# rigid "sogni login u p" parser missed it, leaving the credential
+# sitting in the persisted thread. Labeled pairs are recognized
+# anywhere; unlabeled pairs only inside an open Sogni topic.
+_SOGNI_CRED_STOPWORDS = frozenset({
+    "sogni", "login", "logout", "password", "username", "user", "pass",
+    "the", "a", "an", "my", "your", "his", "her", "is", "it", "in",
+    "on", "for", "to", "and", "or", "with", "me", "this", "that",
+})
+_SOGNI_USER_LABEL_RE = re.compile(
+    r"\b(?:e-?mail|user(?:name)?|login|account)\b\s*"
+    r"(?:is\s+)?[:\-=]?\s*([^\s,;]+)", re.IGNORECASE)
+_SOGNI_PASS_LABEL_RE = re.compile(
+    r"\b(?:pass(?:word)?|pwd|pw)\b\s*"
+    r"(?:is\s+)?[:\-=]?\s*([^\s,;]+)", re.IGNORECASE)
+_SOGNI_PAIR_SLASH_RE = re.compile(r"^([^\s/:,;]+)\s*/\s*(\S+)$")
+_SOGNI_PAIR_COMMA_RE = re.compile(r"^([^\s/:,;]+)\s*[,;]\s*(\S+)$")
+_SOGNI_PAIR_WORDS_RE = re.compile(r"^(\S+)\s+(\S+)$")
+
+
+def _cred_value_ok(value: str) -> bool:
+    v = (value or "").strip().strip("<>\"'")
+    return len(v) >= 2 and v.lower() not in _SOGNI_CRED_STOPWORDS
+
+
+def extract_sogni_login_forgiving(text: str, *, context: bool,
+                                    topic_open: bool
+                                    ) -> tuple[str, str] | None:
+    """A (username, password) pair from natural phrasing.
+
+    Labeled pairs ("username- X password - Y", "user: X pass: Y")
+    are unambiguous on their own. A bare pair ("X / Y", or exactly
+    two tokens) only counts with Sogni context — an open Sogni
+    topic or login words in the message itself. Ordinary talk that
+    merely contains the word "password" never matches: the labeled
+    path needs BOTH labels with plausible values, and stopwords can
+    never be credentials."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    um = _SOGNI_USER_LABEL_RE.search(t)
+    pm = _SOGNI_PASS_LABEL_RE.search(t)
+    if um and pm and um.span() != pm.span():
+        user = um.group(1).strip("<>\"'")
+        pw = pm.group(1).strip("<>\"'")
+        if _cred_value_ok(user) and _cred_value_ok(pw) and user != pw:
+            return (user, pw)
+    if not (context or topic_open):
+        return None
+    for rx in (_SOGNI_PAIR_SLASH_RE, _SOGNI_PAIR_COMMA_RE):
+        m = rx.match(t)
+        if m and _cred_value_ok(m.group(1)) and _cred_value_ok(m.group(2)):
+            return (m.group(1), m.group(2))
+    if topic_open:
+        m = _SOGNI_PAIR_WORDS_RE.match(t)
+        if m and _cred_value_ok(m.group(1)) and _cred_value_ok(m.group(2)):
+            return (m.group(1), m.group(2))
+    return None
 
 
 def store_sogni_session(conn: sqlite3.Connection, session: dict) -> None:
@@ -2483,6 +2944,57 @@ async def _sogni_plan_login_async(login: tuple[str, str]) -> dict:
             "refreshToken": backup["refreshToken"]}
 
 
+_SOGNI_LOGIN_WORDS_RE = re.compile(
+    r"\b(?:sign|log)\s?in\b|\blogin\b", re.IGNORECASE)
+
+
+def _extract_any_sogni_login(conn: sqlite3.Connection, user_id: str,
+                             text: str) -> tuple[str, str] | None:
+    """Exact "sogni login u p" first, then the forgiving shapes."""
+    login = extract_sogni_login(text)
+    if login:
+        return login
+    topic = _sogni_topic_open(conn, user_id)
+    context = bool(topic or _SOGNI_MENTION_RE.search(text or "")
+                   or _SOGNI_LOGIN_WORDS_RE.search(text or ""))
+    return extract_sogni_login_forgiving(text or "", context=context,
+                                         topic_open=topic)
+
+
+def scrub_sogni_credentials_from_history(
+        conn: sqlite3.Connection, user_id: str | None = None) -> int:
+    """Retroactive scrub of stored credential pastes.
+
+    Replaces any user turn still holding credential-shaped text in
+    an assistant thread with the "[sogni login]" placeholder — the
+    same text a live intake leaves behind. Labeled pairs and the
+    exact form only; bare pairs are never applied retroactively.
+    Returns how many rows were scrubbed (a count, never content)."""
+    ensure_tables(conn)
+    chars = ", ".join("?" for _ in ASSISTANT_CHARACTERS)
+    sql = ("SELECT id, text FROM conversation WHERE role = 'user' "
+           f"AND character_id IN ({chars})")
+    args: list = sorted(ASSISTANT_CHARACTERS)
+    if user_id:
+        sql += " AND user_id = ?"
+        args.append(user_id)
+    scrubbed = 0
+    for row in conn.execute(sql, args).fetchall():
+        stored = row["text"] or ""
+        if stored == _SOGNI_PLAN_PLACEHOLDER:
+            continue
+        if extract_sogni_login(stored) is not None or \
+                extract_sogni_login_forgiving(
+                    stored, context=False, topic_open=False) is not None:
+            conn.execute(
+                "UPDATE conversation SET text = ? WHERE id = ?",
+                (_SOGNI_PLAN_PLACEHOLDER, row["id"]))
+            scrubbed += 1
+    if scrubbed:
+        conn.commit()
+    return scrubbed
+
+
 def _sogni_plan_login(login: tuple[str, str]) -> dict:
     """Sync seam over the sign-in (monkeypatched in tests)."""
     try:
@@ -2505,6 +3017,9 @@ def _handle_sogni_login_intake(conn: sqlite3.Connection, user_id: str,
     except _SogniPlanError:
         return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_FAILED_REPLY}
     store_sogni_session(conn, session)
+    # A successful sign-in also cleans up any earlier paste of his
+    # that a narrower parser missed, in every assistant thread.
+    scrub_sogni_credentials_from_history(conn, user_id)
     return {"brief": FIXED_REPLY_PREFIX + _SOGNI_LOGIN_SAVED_REPLY}
 
 
@@ -2759,7 +3274,8 @@ def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
         except OSError:
             size = 0
         attachments = [{"kind": "video", "url": outcome["video_url"],
-                        "name": "hannah-video.mp4", "size": size}]
+                        "name": f"{job.get('character_id') or 'her'}"
+                                "-video.mp4", "size": size}]
         text = "here's your video, babe — made this one just for you."
     elif status == "blocked":
         text = ("sogni's filter stopped that one cold before it even "
@@ -2887,8 +3403,8 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
 # TALKS about Sogni ("use my sogni account from now on to generate
 # pics and videos") used to fall through to the brain — which
 # improvised "I can't hop into your Sogni account like that, Matty.
-# My systems don't work that way." Deterministic rule instead: in
-# Hannah's thread, ANY owner message that mentions Sogni routes here
+# My systems don't work that way." Deterministic rule instead: in an
+# assistant thread, ANY owner message that mentions Sogni routes here
 # before the brain — signed out means the fixed one-time-login ask,
 # signed in means a fixed ready confirmation (or the render flow when
 # he actually asked her to make something). A short confirmation
@@ -2945,7 +3461,7 @@ def _sogni_topic_open(conn: sqlite3.Connection, user_id: str) -> bool:
 
 def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                        character_id: str, text: str) -> dict | None:
-    """Hannah-thread router for everything Sogni. None = not ours."""
+    """Assistant-thread router for everything Sogni. None = not ours."""
     t = text or ""
     subject = detect_sogni_video_request(t)
     if subject is not None:
@@ -3108,7 +3624,8 @@ def classify_attachment(filename: str, content_type: str = "",
     if ext not in _ATTACHMENT_MIME_BY_EXT:
         accepted = ", ".join(ATTACHMENT_ACCEPTED_EXTS)
         raise ValueError(
-            "Hannah can take images and files of these types: " + accepted)
+            "Attachments can be images and files of these types: "
+            + accepted)
     if data and not _looks_like_attachment(ext, data):
         raise ValueError(f"That file does not look like a real {ext} file.")
     return {"filename": name, "ext": ext,
@@ -3415,8 +3932,8 @@ def save_chat_attachment(conn: sqlite3.Connection, user_id: str,
             except OSError:
                 pass
             raise ValueError(
-                "That video doesn't look playable — Hannah couldn't "
-                "open it. Try an mp4, mov, or webm clip.")
+                "That video doesn't look playable — it couldn't be "
+                "opened. Try an mp4, mov, or webm clip.")
         if probe is not None:
             exe = _ffmpeg_exe()
             if exe:
@@ -3535,7 +4052,7 @@ def _extract_attachment_analysis(data: dict | None) -> dict:
 def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
                              text: str, character_id: str,
                              attachments: list[dict]) -> dict | None:
-    """Give Hannah real eyes/context for the attachments on this turn.
+    """Give her real eyes/context for the attachments on this turn.
 
     Images go to a free-pool vision model as inlineData. Videos are
     watched as frames sampled in order across the clip through the
@@ -3548,11 +4065,11 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
     if not attachments:
         return None
     user_id = user.get("user_id", "")
-    if (character_id or "").strip().lower() != "hannah" \
+    if not is_assistant_character(character_id) \
             or user_id not in _owner_ids():
         return {"brief": "He tried to send an attachment, but that lane "
-                         "is only wired for Hannah. Tell him plainly "
-                         "this chat cannot take files yet."}
+                         "only works in Hannah's or Mia's thread. Tell "
+                         "him plainly this chat cannot take files yet."}
 
     names = ", ".join((a.get("filename") or "attachment")
                       for a in attachments)
@@ -3663,7 +4180,7 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             analysis_status = last.get("status", "unavailable")
 
     brief_parts = [
-        f"He attached {names} to this message for Hannah. The attachment "
+        f"He attached {names} to this message for you. The attachment "
         "is visible in his thread."]
     if analysis and has_image:
         brief_parts.append(
@@ -3780,7 +4297,7 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
         brief_parts.append(
             "These files were attached and saved, but their text cannot "
             "be extracted: " + ", ".join(unsupported) +
-            ". Tell him plainly Hannah can watch videos as sampled "
+            ". Tell him plainly you can watch videos as sampled "
             "frames and read images plus txt/md/csv/json, PDF and "
             "DOCX files today.")
     return {"brief": "\n\n".join(brief_parts),
@@ -4551,8 +5068,9 @@ def _handle_avatar_assignment(conn: sqlite3.Connection, user_id: str,
 def _studio_owner_turn(conn: sqlite3.Connection, user_id: str,
                        character_id: str, text: str,
                        attachments: list[dict] | None) -> dict | None:
-    """Hannah-only router for the studio abilities. None = not ours."""
-    if (character_id or "").strip().lower() != "hannah":
+    """Assistant-thread router for the studio abilities (Hannah and
+    Mia — see ASSISTANT_CHARACTERS). None = not ours."""
+    if not is_assistant_character(character_id):
         return None
     t = text or ""
 
@@ -4632,7 +5150,7 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         # present paste means intake (even alongside "drop your
         # login here" phrasing) unless an explicit forget/wipe verb
         # targets it, mirroring the token revoke flow.
-        sogni_login = extract_sogni_login(text)
+        sogni_login = _extract_any_sogni_login(conn, user_id, text)
         if sogni_login and not _SOGNI_FORGET_RE.search(text or ""):
             return _handle_sogni_login_intake(
                 conn, user_id, character_id, sogni_login)
@@ -4653,12 +5171,12 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if attachments:
             return analyze_chat_attachments(conn, user, text,
                                             character_id, attachments)
-        # Sogni plan lane (owner-only, Hannah's thread only) —
+        # Sogni plan lane (owner-only, assistant threads only) —
         # checked before the image lane so "make a video" never lands
         # in the picture desk. ANY Sogni mention routes here (plus
         # short confirmations while the topic is open) so the brain
         # never improvises a capability denial.
-        if (character_id or "").strip().lower() == "hannah":
+        if is_assistant_character(character_id):
             sogni_hit = _handle_sogni_lane(conn, user_id,
                                            character_id, text)
             if sogni_hit is not None:
@@ -4672,16 +5190,26 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
             return _handle_github_review(conn, user_id, character_id, gh)
         # Live app status + continuity brief (owner-only cover lane):
         # she fetches real numbers at ask-time; never from memory.
+        # Project lanes: a status ask about the OTHER girl's project
+        # (or unassigned OneFetch) gets the fixed redirect, not
+        # numbers from the wrong lane.
         if detect_app_status(text):
-            return {"brief": _status_brief()}
+            red = _status_lane_redirect(character_id, text)
+            if red is not None:
+                return red
+            return {"brief": _status_brief(conn, character_id)}
         if detect_owner_brief(text):
-            return {"brief": _owner_brief_reply()}
+            return {"brief": _owner_brief_reply(character_id)}
         # Dev-bridge dispatch: marketing-shaped asks still go to the
         # marketing brief (she writes copy in chat); only a strong
         # build verb sends a marketing-flavored sentence to the queue.
         dv = detect_dev_build(text)
         mk = detect_marketing(text)
         if mk is not None and not (dv and _DEV_STRONG_RE.search(text or "")):
+            blocked = _marketing_lane_block(character_id,
+                                             mk["product"], text)
+            if blocked is not None:
+                return blocked
             return {"brief": _marketing_brief(mk["product"])}
         if dv is not None:
             return _handle_dev_build(conn, user_id, character_id, dv)

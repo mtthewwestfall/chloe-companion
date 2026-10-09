@@ -117,7 +117,7 @@ class MergeQueueTest(EnvMixin):
     """'Let her merge and push' (2026-10-08): merge requests ride the
     queue as data; the worker enforces the gates."""
 
-    def _finish_build(self, repo="mtthewwestfall/dev-agent",
+    def _finish_build(self, repo="mtthewwestfall/roof-scout",
                       branch="agent/fix-1"):
         """A claimed build job completed WITHOUT merge; returns job id."""
         jid = assist.enqueue_dev_job(self.conn, OWNER, "hannah", repo, ASK)
@@ -141,7 +141,7 @@ class MergeQueueTest(EnvMixin):
         self.assertIsNotNone(job)
         self.assertTrue(job["merge"])
         self.assertEqual(job["merge_branch"], "agent/fix-1")
-        self.assertEqual(job["repo"], "mtthewwestfall/dev-agent")
+        self.assertEqual(job["repo"], "mtthewwestfall/roof-scout")
 
     def test_merge_result_marks_source_merged(self):
         src = self._finish_build()
@@ -169,7 +169,7 @@ class MergeQueueTest(EnvMixin):
 
     def test_build_with_merge_flag_queues_merge(self):
         jid = assist.enqueue_dev_job(self.conn, OWNER, "hannah",
-                                     "mtthewwestfall/dev-agent", ASK,
+                                     "mtthewwestfall/roof-scout", ASK,
                                      merge=True)
         job = assist.claim_dev_job(self.conn)
         self.assertTrue(job["merge"])
@@ -237,13 +237,25 @@ class MaybeAssistGateTest(EnvMixin):
         return {"user_id": uid, "tier": "basic"}
 
     def test_owner_ask_queues_real_job(self):
-        hit = assist.maybe_assist(self.conn, self._user(OWNER), ASK,
-                                  "hannah")
+        # Superseded 2026-10-09 by the project lanes: Hannah queues
+        # roof-scout builds only. The dev-agent repo is in no lane,
+        # so the same ask gets the fixed outside-my-lane redirect
+        # and queues nothing (lane suite: tests/test_project_lanes).
+        hit = assist.maybe_assist(
+            self.conn, self._user(OWNER),
+            "fix the report formatter in the roof-scout repo so it "
+            "never rotates testimonial cards onto the wrong lead",
+            "hannah")
         self.assertIsNotNone(hit)
         self.assertIn("queued build job", hit["brief"])
         job = assist.claim_dev_job(self.conn)
         self.assertIsNotNone(job)
-        self.assertEqual(job["repo"], "mtthewwestfall/dev-agent")
+        self.assertEqual(job["repo"], "mtthewwestfall/roof-scout")
+        hit = assist.maybe_assist(self.conn, self._user(OWNER), ASK,
+                                  "hannah")
+        self.assertIsNotNone(hit)
+        self.assertIn("outside my lane", hit["brief"])
+        self.assertIsNone(assist.claim_dev_job(self.conn))
 
     def test_owner_ask_no_repo_asks_one_question(self):
         hit = assist.maybe_assist(self.conn, self._user(OWNER),
@@ -255,8 +267,10 @@ class MaybeAssistGateTest(EnvMixin):
 
     def test_owner_ask_bridge_dark_without_secret(self):
         del os.environ["DEV_AGENT_SECRET"]
-        hit = assist.maybe_assist(self.conn, self._user(OWNER), ASK,
-                                  "hannah")
+        hit = assist.maybe_assist(
+            self.conn, self._user(OWNER),
+            "fix the report formatter in the roof-scout repo",
+            "hannah")
         self.assertIsNotNone(hit)
         self.assertIn("not wired", hit["brief"])
         self.assertIsNone(assist.claim_dev_job(self.conn))
@@ -331,14 +345,23 @@ class RepoNameCanonicalTest(EnvMixin):
             "update my RoofScout repo please")["repo"], "roof-scout")
 
     def test_squashed_dev_agent_and_queue(self):
+        # Detection still canonicalizes 'devagent'; the queue no
+        # longer takes it from Hannah (2026-10-09 lanes — dev-agent
+        # is in no lane). The squashed roof-scout form queues hers.
         hit = assist.maybe_assist(
             self.conn, {"user_id": OWNER, "tier": "basic"},
             "fix the formatter in my devagent repo", "hannah")
         self.assertIsNotNone(hit)
+        self.assertIn("outside my lane", hit["brief"])
+        self.assertIsNone(assist.claim_dev_job(self.conn))
+        hit = assist.maybe_assist(
+            self.conn, {"user_id": OWNER, "tier": "basic"},
+            "fix the formatter in my roofscout repo", "hannah")
+        self.assertIsNotNone(hit)
         self.assertIn("queued build job", hit["brief"])
         job = assist.claim_dev_job(self.conn)
         self.assertIsNotNone(job)
-        self.assertEqual(job["repo"], "mtthewwestfall/dev-agent")
+        self.assertEqual(job["repo"], "mtthewwestfall/roof-scout")
 
     def test_unknown_name_passes_through(self):
         dv = assist.detect_dev_build(

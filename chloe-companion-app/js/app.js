@@ -150,7 +150,7 @@
     currentGirl = girl;
     $('chatName').textContent = girl.name;
     clearPendingAttachments();
-    $('attachBtn').classList.toggle('hidden', girl.id !== 'hannah');
+    $('attachBtn').classList.toggle('hidden', !ASSISTANT_GIRLS.includes(girl.id));
     startAvatarCycle();
     // day divider + encryption note
     chatLog.innerHTML = '';
@@ -329,6 +329,9 @@
 
   const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
   const ATTACHMENT_VIDEO_MAX_BYTES = 50 * 1024 * 1024;
+  // Threads that carry the full assistant suite (Hannah + Mia, his
+  // projects keeper): the attachment paperclip lives only there.
+  const ASSISTANT_GIRLS = ['hannah', 'mia', 'jordan'];
   const ATTACHMENT_MAX_PER_MESSAGE = 4;
   const ATTACHMENT_EXTS = new Set([
     'jpg', 'jpeg', 'png', 'webp', 'gif',
@@ -454,7 +457,7 @@
     attachmentUploadsInFlight++;
     renderAttachmentPreview();
     try {
-      const attachment = await ApiClient.uploadChatAttachment(entry.file, 'hannah');
+      const attachment = await ApiClient.uploadChatAttachment(entry.file, currentGirl.id);
       entry.attachment = attachment;
       entry.status = 'ready';
       entry.extraction_status = attachment.extraction_status;
@@ -469,8 +472,8 @@
   }
 
   async function onAttachmentsPicked(files) {
-    if (currentGirl.id !== 'hannah') {
-      showToast('Attachments are only on Hannah’s chat right now', 3200);
+    if (!ASSISTANT_GIRLS.includes(currentGirl.id)) {
+      showToast('Attachments are only on Hannah’s or Mia’s chat right now', 3200);
       return;
     }
     const picked = Array.from(files || []);
@@ -481,7 +484,7 @@
       }
       const ext = (file.name.split('.').pop() || '').toLowerCase();
       if (!ATTACHMENT_EXTS.has(ext)) {
-        showToast('Hannah can take images, videos, txt/md/csv/json, pdf, or docx', 3600);
+        showToast('She can take images, videos, txt/md/csv/json, pdf, or docx', 3600);
         continue;
       }
       const isVideo = ATTACHMENT_VIDEO_EXTS.has(ext);
