@@ -248,11 +248,15 @@ class VideoAskTest(SogniPlanCase):
         self.assertEqual(self.spawned, [])
 
     def test_ask_without_subject_asks_what(self):
+        # Owner order 2026-10-09 12:33: a vague ask offers concrete
+        # situations to pick from instead of a bare "what should it
+        # show" — and still queues nothing yet.
         assist.store_sogni_session(self.conn, dict(TOKENS))
         hit = assist.maybe_assist(
             self.conn, OWNER_USER, "make a video", "hannah")
         self.assertIsNotNone(hit)
-        self.assertIn("did not say what it should show", hit["brief"])
+        self.assertIn("pick one", hit["brief"])
+        self.assertTrue(hit.get("sogni_media_options"))
         self.assertEqual(self._jobs(), [])
 
     def test_video_ask_only_in_hannah_thread(self):

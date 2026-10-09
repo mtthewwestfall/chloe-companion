@@ -400,6 +400,14 @@ def _startup():
             if n:
                 print(f"[assist] boot scrub replaced {n} stored "
                       "credential-shaped message(s)")
+            # In-flight studio flows die with the deploy (owner,
+            # 2026-10-09): a guided-creation / pending-give flow
+            # assembled by an older build must never wake up cold.
+            cleared = assist.clear_studio_flow_state(
+                conn, assist._owner_ids())
+            if cleared:
+                print(f"[assist] boot cleared {cleared} in-flight "
+                      "studio flow state row(s)")
         finally:
             conn.close()
     except Exception as e:  # noqa: BLE001 — never block boot on it

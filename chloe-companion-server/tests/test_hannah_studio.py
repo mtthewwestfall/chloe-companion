@@ -1,7 +1,8 @@
-"""Hannah studio tests (2026-10-09): owner-only add-a-give and guided
-character creation in Hannah's thread.
+"""Studio tests (2026-10-09): owner-only add-a-give and guided
+character creation. Studio is Mia's desk (Rocky keeps his own);
+Hannah/Jordan get the fixed Mia redirect for studio-shaped asks.
 
-Rules pinned here: the owner names characters (Hannah never coins);
+Rules pinned here: the owner names characters (Mia never coins);
 uploads file directly, generated images file only on his explicit add
 after he's seen them; new characters are PRIVATE by default; she never
 deletes and never touches the reserved 'chloe' id; media is only ever
@@ -101,7 +102,7 @@ class StudioBase(unittest.TestCase):
                 os.environ[k] = v
         self.conn.close()
 
-    def say(self, text, user=OWNER, cid="hannah", attachments=None):
+    def say(self, text, user=OWNER, cid="mia", attachments=None):
         return assist.maybe_assist(self.conn, user, text, cid,
                                    attachments=attachments)
 
@@ -228,10 +229,17 @@ class GiveTest(StudioBase):
         self.assertIsNone(res)
         self.assertEqual(self.gives("mara"), 0)
 
-    def test_only_in_hannahs_thread(self):
+    def test_only_in_mias_thread(self):
         res = self.say("add this as a give for Mara", cid="mara")
         self.assertIsNone(res)
         self.assertEqual(self.gives("mara"), 0)
+        # Hannah/Jordan get the fixed Mia redirect, never the filing.
+        for cid in ("hannah", "jordan"):
+            res = self.say("add this as a give for Mara", cid=cid,
+                           attachments=[_img_att()])
+            self.assertIsNotNone(res, cid)
+            self.assertIn("mia's desk", res["brief"])
+            self.assertEqual(self.gives("mara"), 0)
 
 
 class CreateTest(StudioBase):

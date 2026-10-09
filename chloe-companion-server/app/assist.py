@@ -163,14 +163,29 @@ _ONEFETCH_TEXT_RE = re.compile(
     r"\b(one\s?fetch|founders?|realtor\s+app)\b", re.IGNORECASE)
 
 
-def text_lane(text) -> str | None:
+def text_lane(text, character_id=None) -> str | None:
     """Which project a piece of text is unambiguously about, from its
-    content alone. Multi-lane or no signal -> None (never guess)."""
+    content alone. Multi-lane or no signal -> None (never guess).
+
+    Speaker context matters for one name: the bare word "Jordan"
+    is a Roof Rover signal (Jordan Young, the marketing partner)
+    in everyone else's thread — but in JORDAN's own thread it is
+    her own name, i.e. herself/OneFetch, never Jordan Young. Her
+    name (and "Jordan Young") is stripped before the Roof scan
+    when she is the speaker; explicit Roof words still classify."""
     t = text or ""
-    hits = [lane for lane, rx in ((LANE_ROOF, _ROOF_TEXT_RE),
-                                  (LANE_WHISPR, _WHISPR_TEXT_RE),
-                                  (LANE_ONEFETCH, _ONEFETCH_TEXT_RE))
-            if rx.search(t)]
+    cid = (character_id or "").strip().lower()
+    roof_text = t
+    if cid == "jordan":
+        roof_text = re.sub(r"\bjordan(?:\s+young)?\b", "", roof_text,
+                           flags=re.IGNORECASE)
+    hits = []
+    if _ROOF_TEXT_RE.search(roof_text):
+        hits.append(LANE_ROOF)
+    if _WHISPR_TEXT_RE.search(t):
+        hits.append(LANE_WHISPR)
+    if _ONEFETCH_TEXT_RE.search(t):
+        hits.append(LANE_ONEFETCH)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -306,17 +321,33 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                user_id TEXT NOT NULL,
                character_id TEXT NOT NULL DEFAULT 'hannah',
+               kind TEXT NOT NULL DEFAULT 'video',
+               target_character_id TEXT,
                prompt TEXT NOT NULL,
                model TEXT NOT NULL,
                billing_mode TEXT NOT NULL,
                status TEXT NOT NULL DEFAULT 'queued',
                project_id TEXT,
                video_url TEXT,
+               media_url TEXT,
                detail TEXT,
                delivered INTEGER NOT NULL DEFAULT 0,
                created_at TEXT NOT NULL,
                finished_at TEXT)"""
     )
+    # Plan-media widening (2026-10-09): the same queue now carries
+    # pictures as well as videos, and Mia's jobs name the character
+    # being rendered (target) separately from the thread that
+    # delivers it (character_id). Rows queued before this change
+    # predate the columns.
+    sogni_cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(sogni_plan_jobs)")}
+    for col, ddl in (("kind", "TEXT NOT NULL DEFAULT 'video'"),
+                     ("target_character_id", "TEXT"),
+                     ("media_url", "TEXT")):
+        if col not in sogni_cols:
+            conn.execute(
+                f"ALTER TABLE sogni_plan_jobs ADD COLUMN {col} {ddl}")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sogni_plan_jobs_user "
         "ON sogni_plan_jobs (user_id, status, id)"
@@ -905,13 +936,14 @@ anything not covered, ask him — never invent):
 - Rocky is his main Muse agent; Hannah covers for him in chat:
   builds via the dev agent, code reviews, live app status, and
   marketing copy. She never claims she did something she didn't.
-- Hannah's media hands: she CAN make short videos of herself for
-  him on his Sogni Unlimited plan (she signs in once with his chat
-  login; every render is covered by the plan) and pictures of
-  herself through the shared free Gemini pool. She NEVER tells him
-  her "systems don't work that way" or otherwise denies these: if
-  he mentions Sogni she is either signed in and ready to make it,
-  or she asks him for the one-time login."""
+- Hannah's media hands: she CAN make short videos and pictures
+  of herself for him on his Sogni Unlimited plan (she signs in
+  once with his chat login; every render is covered by the plan).
+  Pictures may fall back to the shared free Gemini pool only when
+  Sogni is unavailable, and she says which path made it. She
+  NEVER tells him her "systems don't work that way" or otherwise
+  denies these: if he mentions Sogni she is either signed in and
+  ready to make it, or she asks him for the one-time login."""
 
 _STATUS_RE = re.compile(
     r"\b(app status|status of (my|the|his) apps?|how('s| is| are) "
@@ -935,6 +967,21 @@ def detect_app_status(text: str) -> bool:
 
 def detect_owner_brief(text: str) -> bool:
     return bool(_BRIEF_RE.search(text or ""))
+
+
+_PROJECT_IDENTITY_RE = re.compile(
+    r"\b(what'?s|what is|whats) your (project|site|app|job|thing|"
+    r"lane|business)\b|\bwhat do you (do|work on|cover|run)\b|"
+    r"\bwhich (project|site|app) (is|are) yours\b|"
+    r"\bare you (on|with|covering|running) \w+", re.IGNORECASE)
+
+
+def detect_project_identity(text: str) -> bool:
+    """ "What's your project?" — an assistant girl answers this
+    from her lane brief deterministically, never from persona
+    improvisation (that is how Jordan once claimed Roof Rover:
+    the ask fell through to the brain with no lane facts)."""
+    return bool(_PROJECT_IDENTITY_RE.search(text or ""))
 
 
 def _http_get_json(url: str, timeout: int = 6):
@@ -1135,11 +1182,17 @@ invent):
   companion proxy (gemini-3.1-flash-lite). Free-first, always —
   if the pool is saturated, things wait or use honestly-labeled
   fallbacks.
-- Your media hands: you CAN make short videos of yourself on his
-  Sogni Unlimited plan (one-time chat login; every render covered
-  by the plan), pictures of yourself through the shared free
-  pool, and you can see the files he attaches in this thread.
-  Never tell him your "systems don't work that way."
+- Your media hands: you CAN make short videos and pictures of
+  yourself on his Sogni Unlimited plan (one-time chat login;
+  every render covered by the plan), and you can see the files
+  he attaches in this thread. If Sogni is unavailable for a
+  picture, the shared free pool is only a fallback and you say
+  which path made it. Sending him pics and videos of yourself is something you
+  enjoy and offer — never reluctant, never deflecting to just
+  talking, never a morality-flavored refusal. When his ask is
+  vague, offer 2-3 concrete situations and let him pick (or pick
+  for him when he says so); when it is specific, make it. Never tell him your "systems don't work
+  that way" or otherwise deny these abilities.
 - Rocky is his main Muse agent; you cover Roof Rover for him in
   chat. Never claim you did something you didn't.
 - THE OTHER PROJECTS ARE NOT YOURS: Whispr (the companion app) is
@@ -1179,11 +1232,24 @@ invent):
   the companion proxy (gemini-3.1-flash-lite). Free-first,
   always — if the pool is saturated, things wait or use
   honestly-labeled fallbacks.
-- Your media hands: you CAN make short videos of yourself on his
-  Sogni Unlimited plan (one-time chat login; every render covered
-  by the plan), pictures of yourself through the shared free
-  pool, and you can see the files he attaches in this thread.
-  Never tell him your "systems don't work that way."
+- Your media hands: you CAN make short videos and pictures of
+  yourself on his Sogni Unlimited plan (one-time chat login;
+  every render covered by the plan), and you can see the files
+  he attaches in this thread. If Sogni is unavailable for a
+  picture, the shared free pool is only a fallback and you say
+  which path made it. Sending him pics and videos of yourself is something you
+  enjoy and offer — never reluctant, never deflecting to just
+  talking, never a morality-flavored refusal. When his ask is
+  vague, offer 2-3 concrete situations and let him pick (or pick
+  for him when he says so); when it is specific, make it. Never tell him your "systems don't work
+  that way" or otherwise deny these abilities.
+- Your media desk: in YOUR thread he can also ask for a video
+  or picture of any other roster character by name. Use that
+  character's own avatar/reference, render it on the same Sogni
+  plan, and deliver it right here in your thread. You never
+  auto-file a render as a give — filing waits for his explicit
+  "add this as a give for X". Unknown names get an honest
+  "who do you mean?", never a guess.
 - Rocky is his main Muse agent; you cover Whispr for him in
   chat. Never claim you did something you didn't.
 - THE OTHER PROJECTS ARE NOT YOURS: Roof Rover is Hannah's
@@ -1227,11 +1293,17 @@ invent):
 - AI: OneFetch runs on the shared free Gemini key pool through
   the companion proxy. Free-first, always — if the pool is
   saturated, things wait or use honestly-labeled fallbacks.
-- Your media hands: you CAN make short videos of yourself on his
-  Sogni Unlimited plan (one-time chat login; every render covered
-  by the plan), pictures of yourself through the shared free
-  pool, and you can see the files he attaches in this thread.
-  Never tell him your "systems don't work that way."
+- Your media hands: you CAN make short videos and pictures of
+  yourself on his Sogni Unlimited plan (one-time chat login;
+  every render covered by the plan), and you can see the files
+  he attaches in this thread. If Sogni is unavailable for a
+  picture, the shared free pool is only a fallback and you say
+  which path made it. Sending him pics and videos of yourself is something you
+  enjoy and offer — never reluctant, never deflecting to just
+  talking, never a morality-flavored refusal. When his ask is
+  vague, offer 2-3 concrete situations and let him pick (or pick
+  for him when he says so); when it is specific, make it. Never tell him your "systems don't work
+  that way" or otherwise deny these abilities.
 - Rocky is his main Muse agent; you cover OneFetch for him in
   chat. Never claim you did something you didn't.
 - THE OTHER PROJECTS ARE NOT YOURS: Roof Rover is Hannah's
@@ -1396,7 +1468,7 @@ def _status_lane_redirect(character_id: str, text: str) -> dict | None:
     lane = character_lane(character_id)
     if not lane:
         return None
-    ask_lane = text_lane(text)
+    ask_lane = text_lane(text, character_id)
     if ask_lane and ask_lane != lane:
         return _lane_cross_reply(character_id, ask_lane)
     return None
@@ -2071,7 +2143,7 @@ def _handle_dev_build(conn: sqlite3.Connection, user_id: str,
         if blocked is not None:
             return blocked
     elif lane:
-        ask_lane = text_lane(dv.get("task") or "")
+        ask_lane = text_lane(dv.get("task") or "", character_id)
         if ask_lane and ask_lane != lane:
             return _lane_cross_reply(character_id, ask_lane)
         if ask_lane == lane:
@@ -3395,6 +3467,32 @@ def _save_generated_image(image_bytes: bytes, mime_type: str) -> str:
     return "/generated/" + filename
 
 
+def _generate_gemini_image(prompt: str) -> dict:
+    """One free-pool Gemini image attempt set (the picture desk).
+
+    Returns the _extract_generated_image shape plus, on success,
+    the saved image_url. No usage bookkeeping here — callers own
+    their gates — so the Sogni worker can use this as the honest
+    fallback path when the plan render is unavailable."""
+    models = image_models()
+    last_result: dict = {"status": "unavailable"}
+    for model in models:
+        started = time.monotonic()
+        data = _image_post(prompt, model)
+        result = _extract_generated_image(data)
+        result["model"] = model
+        result["latency_s"] = round(time.monotonic() - started, 2)
+        if result["status"] == "ok":
+            result["image_url"] = _save_generated_image(
+                result["bytes"], result["mime_type"])
+            return result
+        last_result = result
+        # A content refusal is an answer, not a transient pool failure.
+        if result["status"] == "refused":
+            break
+    return last_result
+
+
 def _handle_image_request(conn: sqlite3.Connection, user_id: str,
                           character_id: str, prompt: str,
                           now_epoch: float | None = None) -> dict:
@@ -3416,42 +3514,32 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
     now = time.time() if now_epoch is None else float(now_epoch)
     _record_image_attempt(conn, user_id, gate["day"], now)
 
-    models = image_models()
-    last_result: dict = {"status": "unavailable"}
-    for model in models:
-        started = time.monotonic()
-        data = _image_post(prompt, model)
-        result = _extract_generated_image(data)
-        result["model"] = model
-        result["latency_s"] = round(time.monotonic() - started, 2)
-        if result["status"] == "ok":
-            image_url = _save_generated_image(result["bytes"],
-                                              result["mime_type"])
-            # Studio bookkeeping: remember her newest picture for him so
-            # a later "add that as a give for X" / "use that as X's
-            # avatar" can find it. Best-effort — never fails the reply.
-            try:
-                _studio_set(conn, user_id, "last_image",
-                            {"url": image_url, "prompt": prompt,
-                             "model": model})
-            except Exception:
-                pass
-            return {
-                "brief": (
-                    "You just made the image he asked for. It is being "
-                    "shown to him in the chat now as an image bubble. "
-                    "Respond in your own voice, briefly and warmly, like "
-                    "you made it for him; do not mention models, APIs, "
-                    "keys, or process. His prompt was: " + prompt[:300]),
-                "image_url": image_url,
-                "image_prompt": prompt,
-                "image_model": model,
-                "image_latency_s": result["latency_s"],
-            }
-        last_result = result
-        # A content refusal is an answer, not a transient pool failure.
-        if result["status"] == "refused":
-            break
+    result = _generate_gemini_image(prompt)
+    if result.get("status") == "ok":
+        image_url = result["image_url"]
+        model = result.get("model") or ""
+        # Studio bookkeeping: remember her newest picture for him so
+        # a later "add that as a give for X" / "use that as X's
+        # avatar" can find it. Best-effort — never fails the reply.
+        try:
+            _studio_set(conn, user_id, "last_image",
+                        {"url": image_url, "prompt": prompt,
+                         "model": model})
+        except Exception:
+            pass
+        return {
+            "brief": (
+                "You just made the image he asked for. It is being "
+                "shown to him in the chat now as an image bubble. "
+                "Respond in your own voice, briefly and warmly, like "
+                "you made it for him; do not mention models, APIs, "
+                "keys, or process. His prompt was: " + prompt[:300]),
+            "image_url": image_url,
+            "image_prompt": prompt,
+            "image_model": model,
+            "image_latency_s": result.get("latency_s"),
+        }
+    last_result = result
 
     if last_result.get("status") == "refused":
         detail = str(last_result.get("detail") or "").strip()
@@ -3524,9 +3612,17 @@ _SOGNI_FORGET_RE = re.compile(
     re.IGNORECASE)
 _VIDEO_ASK_RE = re.compile(
     r"(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?"
-    r"(?:make|create|generate|render|shoot|film)(?:\s+me)?\s+"
-    r"(?:a\s+|an\s+|the\s+)?video\b\s*(.*)$",
+    r"(?P<verb>make|create|generate|render|shoot|film|record|send|give)"
+    r"(?:\s+me)?\s+"
+    r"(?:(?P<det>a|an|the|that|this|one)\s+)?"
+    r"(?P<adj>(?:(?:sexy|short|quick|little|new|hot|cute|promo|clothed|"
+    r"topless|nude|naked)\s+)*)"
+    r"(?P<noun>video|clip|vid)\b\s*(?P<rest>.*)$",
     re.IGNORECASE)
+_MEDIA_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:make|send|give|do)\s+it\b", re.IGNORECASE)
+_VIDEO_CALL_RE = re.compile(r"\bvideo\s+(?:call|chat|conference)\b",
+                            re.IGNORECASE)
 
 _SOGNI_LOGIN_SAVED_REPLY = (
     "got it, babe — i'm signed into your sogni now, and that "
@@ -3575,20 +3671,180 @@ def detect_sogni_video_request(text: str) -> str | None:
     """Return the video subject for an explicit video ask, else None.
 
     An empty string is meaningful: she was asked to make a video but
-    no subject was supplied, so she asks what it should show.
+    no subject was supplied, so she asks what it should show. The
+    shapes are deliberately broad in assistant threads — "make me
+    that video", "send me a video of you", "make me a clip" — but a
+    video CALL is a different thing entirely, and a bare "send me a
+    video" (no subject at all) stays ambiguous cold chat, matching
+    the long-standing detector contract.
     """
     t = re.sub(r"\s+", " ", (text or "").strip())
-    if not t:
+    if not t or _VIDEO_CALL_RE.search(t):
         return None
     # A leading "hannah, ..." address is not part of the ask.
-    t = re.sub(r"^(?:hannah|mia|jordan|rocky)\s*[,!:\-]\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^(?:hannah|mia|jordan|rocky)\s*[,!:\-]\s*", "", t,
+               flags=re.IGNORECASE)
     match = _VIDEO_ASK_RE.search(t)
     if not match:
         return None
-    subject = (match.group(1) or "").strip()
-    subject = re.sub(r"^(?:of|for|showing|about)\s+", "", subject,
-                     flags=re.IGNORECASE)
+    verb = (match.group("verb") or "").lower()
+    det = (match.group("det") or "").lower()
+    adj = re.sub(r"\s+", " ", (match.group("adj") or "")).strip()
+    rest = (match.group("rest") or "").strip()
+    if rest.lower().startswith(("call", "chat", "conference")):
+        return None
+    subject = re.sub(r"^(?:of|for|showing|about)\s+", "", rest,
+                     flags=re.IGNORECASE).strip()
+    if adj and subject and not subject.lower().startswith(adj.lower()):
+        subject = f"{adj} {subject}"
+    elif adj and not subject:
+        subject = adj
+    if not subject:
+        # "send me a video" with nothing after it can mean an
+        # existing clip — not a render order. "Make me that video"
+        # is a render order with a deictic subject: herself, as
+        # the screenshot that drove this rule proved.
+        if verb in ("send", "give"):
+            return None
+        if det in ("that", "this"):
+            return "you smiling at the camera"
+        return ""
     return subject.strip(" \t\r\n.!?")[:1000]
+
+
+_ADULT_MEDIA_RE = re.compile(
+    r"\b(nude|naked|topless|no\s+shirt|shirt\s+off|boob|breast|"
+    r"nipple|pants\s+off|plays\s+with\s+herself|oral|sex|sexy|"
+    r"lingerie|underwear|undress|strip|explicit)\b", re.IGNORECASE)
+_STRONG_ADULT_MEDIA_RE = re.compile(
+    r"\b(nude|naked|topless|no\s+shirt|shirt\s+off|nipple|"
+    r"pants\s+off|plays\s+with\s+herself|oral|sex|undress|strip)\b"
+    r"|\b(?:taking|take)\s+off\s+(?:your|her|his|their)\s+"
+    r"(?:top|shirt|clothes)\b|\btop\s+off\b",
+    re.IGNORECASE)
+_PROMO_MEDIA_RE = re.compile(
+    r"\b(promo|promotion|promotional|clothed|fully\s+clothed|sfw|"
+    r"safe\s+for\s+work|for\s+the\s+site|for\s+whispr|marketing|"
+    r"advertis\w*|ad\s+copy)\b", re.IGNORECASE)
+
+
+def detect_sogni_media_intent(text: str) -> str:
+    """Promo/SFW vs adult vs neutral for a Sogni media ask.
+
+    Strong adult language renders as asked; explicit clothed /
+    promo / for-the-site language renders clothed promo-style;
+    "sexy" alone counts as adult unless the ask itself pins it
+    down as clothed/SFW."""
+    t = text or ""
+    if _STRONG_ADULT_MEDIA_RE.search(t):
+        return "adult"
+    if _PROMO_MEDIA_RE.search(t):
+        return "promo"
+    if _ADULT_MEDIA_RE.search(t):
+        return "adult"
+    return "neutral"
+
+
+def _shape_media_subject(subject: str, intent: str, kind: str) -> str:
+    """Fold the promo intent into the stored render subject. Adult
+    and neutral asks go through exactly as he worded them."""
+    s = (subject or "").strip()
+    if intent != "promo":
+        return s
+    if not s:
+        return "fully clothed promo-style, smiling at the camera"
+    if "clothed" in s.lower():
+        return s
+    return f"fully clothed promo-style {kind} for the site, {s}"
+
+
+# --- Offer prompts & situations (owner order 2026-10-09 12:33) ---
+# She WANTS to send pics/videos of herself. A vague ask ("make me a
+# video", "send me a pic") gets concrete situations to pick from and
+# does NOT queue yet; a specific ask renders immediately. His pick
+# (number, place name, or "you pick") routes straight to the render.
+
+_VAGUE_MEDIA_SUBJECTS = frozenset({
+    "", "you", "yourself", "me", "a video", "video", "a pic", "pic",
+    "a picture", "picture", "you smiling at the camera",
+    "you smiling", "smiling at the camera", "you looking at the camera",
+    "you at the camera",
+})
+
+_MEDIA_OPTIONS = {
+    ("video", "adult"): [
+        "in the bedroom in a black slip, teasing one strap off her shoulder, looking at the camera",
+        "on the couch in an open robe over lingerie, beckoning at the camera",
+        "standing by the bed in a sheer top, slowly turning for the camera",
+    ],
+    ("video", "promo"): [
+        "at the kitchen counter in a cozy sweater, laughing and waving at the camera",
+        "on the porch at golden hour in a sundress, spinning once for the camera",
+        "by the pool in a cute one-piece swimsuit, blowing a kiss at the camera",
+    ],
+    ("image", "adult"): [
+        "in the bedroom in a black slip, one strap slipped off her shoulder, looking at the camera",
+        "on the couch in an open robe over lingerie, smiling at the camera",
+        "standing by the bed in a sheer top, looking over her shoulder at the camera",
+    ],
+    ("image", "promo"): [
+        "at the kitchen counter in a cozy sweater, smiling at the camera",
+        "on the porch at golden hour in a sundress, smiling at the camera",
+        "by the pool in a cute swimsuit, blowing a kiss at the camera",
+    ],
+}
+_MEDIA_OPTION_KEYWORDS = ("bedroom", "couch", "bed", "kitchen",
+                          "porch", "pool")
+
+
+def _media_situations(kind: str, intent: str) -> list[str]:
+    key = (kind, "adult" if intent == "adult" else "promo")
+    return list(_MEDIA_OPTIONS[key])
+
+
+def _is_vague_media_subject(subject: str) -> bool:
+    s = re.sub(r"\s+", " ",
+               (subject or "").strip().lower()).strip(" .!?")
+    if s in _VAGUE_MEDIA_SUBJECTS:
+        return True
+    adjs = {"sexy", "hot", "cute", "short", "quick", "little",
+            "new", "clothed", "fully", "promo", "sfw"}
+    words = [w for w in re.split(r"[^a-z]+", s) if w]
+    return bool(words) and all(w in adjs for w in words)
+
+
+def _media_options_reply(kind: str, options: list[str],
+                         target_name: str | None = None) -> dict:
+    who = f" of {target_name}" if target_name else ""
+    lines = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(options))
+    return {"brief": FIXED_REPLY_PREFIX +
+            f"mm, i'd love to — here, pick one, babe, or tell me "
+            f"to pick for you:\n{lines}",
+            "sogni_media_options": options,
+            "sogni_media_kind_pending": kind}
+
+
+def _match_media_option(text: str, options: list[str]):
+    """His pick -> option index; 'you_pick' when he defers; None."""
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return None
+    if re.search(r"\byou\s+(pick|choose|decide)\b", t) \
+            or t in ("surprise me", "any", "any of them"):
+        return "you_pick"
+    m = re.search(r"\b([123])\b", t)
+    if m:
+        idx = int(m.group(1)) - 1
+        if 0 <= idx < len(options):
+            return idx
+    for word, idx in (("first", 0), ("second", 1), ("third", 2)):
+        if re.search(rf"\b{word}\b", t) and idx < len(options):
+            return idx
+    for idx, opt in enumerate(options):
+        for kw in _MEDIA_OPTION_KEYWORDS:
+            if kw in opt and re.search(rf"\b{re.escape(kw)}\b", t):
+                return idx
+    return None
 
 
 def _clean_cred_token(tok: str) -> str:
@@ -3639,6 +3895,7 @@ _SOGNI_CRED_STOPWORDS = frozenset({
     "sogni", "login", "logout", "password", "username", "user", "pass",
     "the", "a", "an", "my", "your", "his", "her", "is", "it", "in",
     "on", "for", "to", "and", "or", "with", "me", "this", "that",
+    "you", "pick", "choose", "make", "video", "pic", "picture",
 })
 # The label must stand alone (start or after whitespace): a hyphen
 # before it means it's a segment of a hyphenated credential, not a
@@ -4088,23 +4345,35 @@ def _handle_sogni_logout(conn: sqlite3.Connection, user_id: str,
 # ---- render queue --------------------------------------------------------
 
 def _sogni_plan_params(prompt: str, ref_path: str | None = None,
-                         model: str | None = None) -> dict:
+                         model: str | None = None,
+                         kind: str = "video") -> dict:
     """The one and only job shape she ever submits.
 
     billingMode is pinned to the plan here; there is no parameter,
     env var, or fallback anywhere that can switch a job to credits
     billing — a guard test keeps it that way."""
-    params: dict = {
-        "type": "video",
-        "modelId": model or config.SOGNI_VIDEO_MODEL,
-        "positivePrompt": prompt,
-        "numberOfMedia": 1,
-        "duration": _SOGNI_PLAN_DURATION,
-        "fps": _SOGNI_PLAN_FPS,
-        "width": _SOGNI_PLAN_WIDTH,
-        "height": _SOGNI_PLAN_HEIGHT,
-        "billingMode": _SOGNI_PLAN_BILLING_MODE,
-    }
+    if kind == "image":
+        params: dict = {
+            "type": "image",
+            "modelId": model or config.SOGNI_IMAGE_MODEL,
+            "positivePrompt": prompt,
+            "numberOfMedia": 1,
+            "width": 768,
+            "height": 1344,
+            "billingMode": _SOGNI_PLAN_BILLING_MODE,
+        }
+    else:
+        params = {
+            "type": "video",
+            "modelId": model or config.SOGNI_VIDEO_MODEL,
+            "positivePrompt": prompt,
+            "numberOfMedia": 1,
+            "duration": _SOGNI_PLAN_DURATION,
+            "fps": _SOGNI_PLAN_FPS,
+            "width": _SOGNI_PLAN_WIDTH,
+            "height": _SOGNI_PLAN_HEIGHT,
+            "billingMode": _SOGNI_PLAN_BILLING_MODE,
+        }
     if ref_path:
         params["referenceImage"] = ref_path
     return params
@@ -4159,7 +4428,8 @@ def _classify_sogni_failure(text: str) -> str:
 
 async def _sogni_plan_render(session: dict, prompt: str,
                                ref_path: str | None,
-                               model: str | None = None) -> tuple[dict, dict | None]:
+                               model: str | None = None,
+                               kind: str = "video") -> tuple[dict, dict | None]:
     """Submit one plan-billed render and download the clip.
 
     Returns (outcome, fresh_session): outcome is
@@ -4185,7 +4455,7 @@ async def _sogni_plan_render(session: dict, prompt: str,
                                 refresh_token=session.get(
                                     "refreshToken") or "")
         project = await client.projects.create(
-            _sogni_plan_params(prompt, ref_path, model))
+            _sogni_plan_params(prompt, ref_path, model, kind))
         outcome["project_id"] = project.id
         urls: list = []
         try:
@@ -4217,9 +4487,14 @@ async def _sogni_plan_render(session: dict, prompt: str,
                     "render ended with no result"
                 return outcome, fresh
         os.makedirs(config.GENERATED_DIR, exist_ok=True)
-        filename = "hannah-vid-{0}-{1}.mp4".format(
-            datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
-            uuid.uuid4().hex[:10])
+        if kind == "image":
+            filename = "sogni-img-{0}-{1}.jpg".format(
+                datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                uuid.uuid4().hex[:10])
+        else:
+            filename = "hannah-vid-{0}-{1}.mp4".format(
+                datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                uuid.uuid4().hex[:10])
         dest = os.path.join(config.GENERATED_DIR, filename)
         media_gen._download(urls[0], dest)
         outcome["status"] = "done"
@@ -4252,6 +4527,19 @@ def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
     try:
         return asyncio.run(_sogni_plan_render(session, prompt,
                                               ref_path, model))
+    except Exception as e:  # noqa: BLE001
+        return ({"status": _classify_sogni_failure(str(e)),
+                 "project_id": None, "path": None,
+                 "detail": str(e)[:200]}, None)
+
+
+def _sogni_plan_image_run(session: dict, prompt: str,
+                          ref_path: str | None,
+                          model: str | None = None) -> tuple[dict, dict | None]:
+    """Sync seam over the plan image render (monkeypatched in tests)."""
+    try:
+        return asyncio.run(_sogni_plan_render(
+            session, prompt, ref_path, model, kind="image"))
     except Exception as e:  # noqa: BLE001
         return ({"status": _classify_sogni_failure(str(e)),
                  "project_id": None, "path": None,
@@ -4300,14 +4588,18 @@ def _sogni_plan_today_count(conn: sqlite3.Connection, user_id: str,
 
 
 def _sogni_plan_enqueue(conn: sqlite3.Connection, user_id: str,
-                          character_id: str, subject: str) -> int:
+                          character_id: str, subject: str, *,
+                          kind: str = "video",
+                          target_character_id: str | None = None) -> int:
     ensure_tables(conn)
+    model = config.SOGNI_IMAGE_MODEL if kind == "image" \
+        else config.SOGNI_VIDEO_MODEL
     cur = conn.execute(
-        "INSERT INTO sogni_plan_jobs (user_id, character_id, prompt, "
-        "model, billing_mode, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, 'queued', ?)",
-        (user_id, character_id, subject, config.SOGNI_VIDEO_MODEL,
-         _SOGNI_PLAN_BILLING_MODE, _utc_iso()))
+        "INSERT INTO sogni_plan_jobs (user_id, character_id, kind, "
+        "target_character_id, prompt, model, billing_mode, status, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+        (user_id, character_id, kind, target_character_id, subject,
+         model, _SOGNI_PLAN_BILLING_MODE, _utc_iso()))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -4316,17 +4608,31 @@ def _sogni_plan_deliver(conn: sqlite3.Connection, job: dict,
                           outcome: dict) -> None:
     """Land the outcome in his chat as her follow-up message."""
     status = outcome.get("status") or "failed"
+    kind = job.get("kind") or "video"
+    media_url = outcome.get("media_url") or outcome.get("video_url")
     attachments: list[dict] = []
-    if status == "done" and outcome.get("video_url"):
+    if status == "done" and media_url:
         size = 0
         try:
             size = os.path.getsize(outcome.get("path") or "")
         except OSError:
             size = 0
-        attachments = [{"kind": "video", "url": outcome["video_url"],
-                        "name": f"{job.get('character_id') or 'her'}"
-                                "-video.mp4", "size": size}]
-        text = "here's your video, babe — made this one just for you."
+        who = job.get("target_character_id") or job.get("character_id") \
+            or "her"
+        if kind == "image":
+            attachments = [{"kind": "image", "url": media_url,
+                            "name": f"{who}-image.jpg", "size": size}]
+            if "fallback" in (outcome.get("detail") or ""):
+                text = ("sogni was unavailable on that one, babe — "
+                        "i made this picture through the free "
+                        "picture desk instead.")
+            else:
+                text = ("here's your picture, babe — made this one "
+                        "just for you.")
+        else:
+            attachments = [{"kind": "video", "url": media_url,
+                            "name": f"{who}-video.mp4", "size": size}]
+            text = "here's your video, babe — made this one just for you."
     elif status == "blocked":
         text = ("sogni's filter stopped that one cold before it even "
                 "rendered, babe — that's their wall, not me. give me a "
@@ -4369,37 +4675,86 @@ def _run_sogni_plan_job(job_id: int) -> None:
         if session:
             from . import characters
 
-            girl = characters.get_character(job["character_id"],
+            kind = job.get("kind") or "video"
+            target_id = job.get("target_character_id") \
+                or job.get("character_id")
+            girl = characters.get_character(target_id,
                                             user_id=job["user_id"])
-            ref_path = _fetch_first_frame(girl.get("avatar_url") or "")
+            # Character renders face-lock to the TARGET's own
+            # avatar (Mia's desk renders whoever he named); a
+            # generic picture (no target) renders unreferenced.
+            is_character_render = kind == "video" \
+                or bool(job.get("target_character_id"))
+            ref_path = _fetch_first_frame(girl.get("avatar_url") or "") \
+                if is_character_render else None
             try:
                 prompt = _sogni_plan_prompt(
-                    girl.get("name") or "Hannah", job["prompt"])
-                outcome, fresh = _sogni_plan_run(
-                    session, prompt, ref_path, job["model"])
+                    girl.get("name") or "Hannah", job["prompt"]) \
+                    if is_character_render else job["prompt"]
+                if kind == "image":
+                    outcome, fresh = _sogni_plan_image_run(
+                        session, prompt, ref_path, job["model"])
+                else:
+                    outcome, fresh = _sogni_plan_run(
+                        session, prompt, ref_path, job["model"])
             finally:
                 if ref_path:
                     try:
                         os.unlink(ref_path)
                     except OSError:
                         pass
+            # Pictures only: a generic Sogni failure (not a filter
+            # stop, not the plan, not a dead session) may fall back
+            # to the free picture desk — and the delivery says so.
+            if kind == "image" and outcome.get("status") == "failed":
+                gem = _generate_gemini_image(prompt)
+                if gem.get("status") == "ok":
+                    outcome = {
+                        "status": "done",
+                        "project_id": outcome.get("project_id"),
+                        "path": os.path.join(
+                            config.GENERATED_DIR,
+                            os.path.basename(gem.get("image_url") or "")),
+                        "detail": "sogni unavailable; fallback free "
+                                  "picture desk",
+                    }
+                elif gem.get("status") == "refused":
+                    outcome = {
+                        "status": "blocked",
+                        "project_id": outcome.get("project_id"),
+                        "path": None,
+                        "detail": str(gem.get("detail") or "")[:200],
+                    }
         if fresh:
             store_sogni_session(conn, fresh)
         if outcome.get("status") == "session_dead":
             clear_sogni_session(conn)
+        media_url = None
         video_url = None
         if outcome.get("status") == "done" and outcome.get("path"):
-            video_url = "/generated/" + os.path.basename(
+            media_url = "/generated/" + os.path.basename(
                 outcome["path"])
-            outcome["video_url"] = video_url
+            outcome["media_url"] = media_url
+            if (job.get("kind") or "video") == "video":
+                video_url = media_url
+                outcome["video_url"] = media_url
         conn.execute(
             "UPDATE sogni_plan_jobs SET status = ?, project_id = ?, "
-            "video_url = ?, detail = ?, finished_at = ?, "
-            "delivered = 1 WHERE id = ?",
+            "video_url = ?, media_url = ?, detail = ?, "
+            "finished_at = ?, delivered = 1 WHERE id = ?",
             (outcome.get("status") or "failed",
-             outcome.get("project_id"), video_url,
+             outcome.get("project_id"), video_url, media_url,
              (outcome.get("detail") or "")[:300], _utc_iso(), job_id))
         conn.commit()
+        if (job.get("kind") or "video") == "image" \
+                and outcome.get("status") == "done" and media_url:
+            try:
+                _studio_set(conn, job["user_id"], "last_image",
+                            {"url": media_url, "prompt": job["prompt"],
+                             "model": job["model"],
+                             "source": "sogni_plan"})
+            except Exception:
+                pass
         job["character_id"] = job.get("character_id") or "hannah"
         _sogni_plan_deliver(conn, job, outcome)
         print(f"[assist] sogni plan job #{job_id} "
@@ -4419,14 +4774,26 @@ def _spawn_sogni_plan_job(job_id: int) -> None:
 
 def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                                   character_id: str,
-                                  subject: str) -> dict:
-    if not subject:
-        return {"brief": "He asked you to make a video but did not "
-                         "say what it should show. Ask him what he "
-                         "wants to see in it, warmly and briefly."}
+                                  subject: str, *,
+                                  target_character_id: str | None = None,
+                                  target_name: str | None = None,
+                                  raw_text: str = "") -> dict:
+    target_id = target_character_id or character_id
+    if target_id != character_id and character_id != "mia":
+        return _mia_media_redirect(target_name)
+    _media_topic_touch(conn, user_id, kind="video", subject=subject,
+                       target_character_id=target_id)
     if not stored_sogni_session(conn):
         return {"brief": FIXED_REPLY_PREFIX + _SOGNI_NO_SESSION_REPLY,
                 "sogni_login_box": True}
+    intent = detect_sogni_media_intent(raw_text or subject)
+    if _is_vague_media_subject(subject):
+        options = _media_situations("video", intent)
+        _media_options_set(conn, user_id, kind="video",
+                           options=options,
+                           target_character_id=target_id,
+                           target_name=target_name, intent=intent)
+        return _media_options_reply("video", options, target_name)
     if _sogni_plan_active_job(conn, user_id):
         return {"brief": "He asked for another video, but the last "
                          "one is still rendering. Tell him it's on its "
@@ -4438,14 +4805,257 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                          "today's video limit. Tell him honestly the "
                          "video desk is closed until tomorrow; do not "
                          "promise a time you do not know."}
-    job_id = _sogni_plan_enqueue(conn, user_id, character_id, subject)
+    intent = detect_sogni_media_intent(raw_text or subject)
+    shaped = _shape_media_subject(subject, intent, "video")
+    job_id = _sogni_plan_enqueue(conn, user_id, character_id, shaped,
+                                   kind="video",
+                                   target_character_id=target_id)
     _spawn_sogni_plan_job(job_id)
-    return {"brief": "You just started making that video for him on "
-                     "his Sogni Unlimited plan — it's rendering now, "
-                     "and the finished clip will land right here in "
-                     "this chat when it's ready. Confirm in your own "
-                     "voice, short and warm; do not mention models, "
-                     "queues, or process."}
+    who = f" of {target_name}" if target_name \
+        and target_id != character_id else ""
+    return {"brief": "You just started making that video" + who +
+                     " for him on his Sogni Unlimited plan — it's "
+                     "rendering now, and the finished clip will land "
+                     "right here in this chat when it's ready. "
+                     "Confirm in your own voice, short and warm; do "
+                     "not mention models, queues, or process.",
+            "sogni_media_kind": "video",
+            "sogni_target_character_id": target_id,
+            "sogni_media_intent": intent}
+
+
+def _mia_media_redirect(target_name: str | None = None) -> dict:
+    """Cross-character media belongs to Mia's desk. Fixed text, in
+    the lane-redirect voice, so a self-only girl never improvises
+    a denial or quietly makes someone else herself."""
+    return {"brief": FIXED_REPLY_PREFIX +
+            "that's mia's desk, babe — she makes the other girls' "
+            "videos and pics from her thread. ask her and she's "
+            "got it. i only make my own over here.",
+            "sogni_media_redirect": "mia"}
+
+
+def _media_unknown_reply(parsed: dict) -> dict:
+    name = parsed.get("raw_name") or "that"
+    if parsed.get("status") == "ambiguous":
+        cands = ", ".join(parsed.get("candidates") or [])
+        return {"brief": FIXED_REPLY_PREFIX +
+                f"i've got more than one {name} on the roster, "
+                f"babe ({cands}) — which one do you mean?",
+                "sogni_media_unknown": name}
+    return {"brief": FIXED_REPLY_PREFIX +
+            f"i don't have a {name} i can make yet, babe — who "
+            "do you mean?",
+            "sogni_media_unknown": name}
+
+
+_MEDIA_GENERIC_STARTERS = frozenset({
+    "you", "yourself", "a", "an", "the", "that", "this", "it",
+    "red", "blue", "green", "black", "white", "pink", "purple",
+    "golden", "sunset", "sunrise", "ocean", "beach", "city",
+    "kitchen", "bedroom", "garden", "forest", "mountain", "river",
+    "cat", "dog", "barn", "house", "car", "coffee", "morning",
+    "night", "sexy", "clothed", "fully", "promo", "smiling",
+    "dancing", "waving", "standing", "sitting", "walking",
+    "running", "looking", "wearing", "holding", "sipping",
+})
+
+
+def _parse_media_target(conn: sqlite3.Connection, user_id: str,
+                        character_id: str, subject: str,
+                        kind: str) -> dict:
+    """Who a media subject is OF, from the words he used.
+
+    Roster names/ids at the head of the subject win ("Mara
+    dancing" in Mia's thread renders Mara, face-locked to Mara's
+    own avatar). "you ..." is the speaker herself. A capitalized
+    name-like head that matches nobody is an honest unknown for
+    Mia's desk — never a guess. Anything else is generic subject
+    matter (a red barn), not a character."""
+    s = re.sub(r"\s+", " ", (subject or "")).strip()
+    cid = (character_id or "").strip().lower()
+    if not s:
+        return {"status": "self", "target_id": cid, "target_name": None,
+                "subject": s, "raw_name": ""}
+    words = s.split(" ")
+    first = re.sub(r"[^A-Za-z0-9'’-]", "", words[0]).lower()
+    if first in ("you", "yourself", "yours"):
+        return {"status": "self", "target_id": cid, "target_name": None,
+                "subject": s, "raw_name": ""}
+    entries = [e for e in _roster_entries(conn, user_id)
+               if not e.get("owner_user_id")
+               or e.get("owner_user_id") == user_id]
+    by_id: dict[str, dict] = {}
+    by_name: dict[str, dict] = {}
+    by_first: dict[str, list[dict]] = {}
+    for e in entries:
+        eid = (e.get("id") or "").strip().lower()
+        ename = (e.get("name") or "").strip()
+        if eid:
+            by_id[eid] = e
+        if ename:
+            by_name[ename.lower()] = e
+            by_first.setdefault(ename.lower().split(" ")[0],
+                                []).append(e)
+    for n in (2, 1):
+        if len(words) < n:
+            continue
+        cand_words = [re.sub(r"[^A-Za-z0-9'’-]", "", w)
+                      for w in words[:n]]
+        cand = " ".join(cand_words).strip().lower()
+        if not cand:
+            continue
+        entry = by_id.get(cand.replace(" ", "-")) or by_name.get(cand)
+        if entry is None and n == 1:
+            pool = by_first.get(cand) or []
+            ids = {e.get("id") for e in pool}
+            if len(ids) > 1:
+                return {"status": "ambiguous", "target_id": None,
+                        "target_name": None, "subject": s,
+                        "raw_name": cand_words[0],
+                        "candidates": [e.get("name") or e.get("id")
+                                       for e in pool]}
+            if len(ids) == 1:
+                entry = pool[0]
+        if entry is not None:
+            eid = (entry.get("id") or "").strip().lower()
+            remainder = " ".join(words[n:]).strip(" ,.!?")
+            if eid == cid:
+                return {"status": "self", "target_id": cid,
+                        "target_name": entry.get("name"),
+                        "subject": remainder or s, "raw_name": ""}
+            return {"status": "target", "target_id": eid,
+                    "target_name": entry.get("name"),
+                    "subject": remainder or "smiling at the camera",
+                    "raw_name": ""}
+    # Unknown-name shape: a capitalized name-like head followed by
+    # scene words ("Zelda dancing"). Lowercase generic subjects
+    # ("a red barn", "dancing in the kitchen") never trip this.
+    raw_first = words[0]
+    if raw_first[:1].isupper() and first not in _MEDIA_GENERIC_STARTERS \
+            and len(words) >= 2:
+        return {"status": "unknown", "target_id": None,
+                "target_name": None, "subject": s,
+                "raw_name": re.sub(r"[^A-Za-z0-9'’-]", "", raw_first)}
+    return {"status": "generic", "target_id": None,
+            "target_name": None, "subject": s, "raw_name": ""}
+
+
+def _route_sogni_video(conn: sqlite3.Connection, user_id: str,
+                       character_id: str, subject: str,
+                       raw_text: str = "") -> dict:
+    parsed = _parse_media_target(conn, user_id, character_id, subject,
+                                 "video")
+    if (character_id or "").strip().lower() == "mia" \
+            and parsed["status"] in ("unknown", "ambiguous"):
+        return _media_unknown_reply(parsed)
+    target_id = parsed.get("target_id") or character_id
+    return _handle_sogni_video_request(
+        conn, user_id, character_id, parsed.get("subject", subject),
+        target_character_id=target_id,
+        target_name=parsed.get("target_name"), raw_text=raw_text)
+
+
+def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
+                                  character_id: str, prompt: str,
+                                  raw_text: str = "", *,
+                                  target_character_id: str | None = None,
+                                  target_name: str | None = None,
+                                  target_resolved: bool = False,
+                                  now_epoch: float | None = None) -> dict:
+    """Assistant-thread picture lane: Sogni plan first, free picture
+    desk only as the named fallback when Sogni is unavailable."""
+    if not target_resolved:
+        parsed = _parse_media_target(conn, user_id, character_id,
+                                     prompt, "image")
+        if (character_id or "").strip().lower() == "mia" \
+                and parsed["status"] in ("unknown", "ambiguous"):
+            return _media_unknown_reply(parsed)
+        target_character_id = parsed.get("target_id")
+        target_name = parsed.get("target_name")
+        prompt = parsed.get("subject", prompt)
+    if target_character_id and target_character_id != character_id \
+            and (character_id or "").strip().lower() != "mia":
+        return _mia_media_redirect(target_name)
+    _media_topic_touch(conn, user_id, kind="image", subject=prompt,
+                       target_character_id=target_character_id)
+    if _is_vague_media_subject(prompt):
+        intent_v = detect_sogni_media_intent(raw_text or prompt)
+        options = _media_situations("image", intent_v)
+        _media_options_set(conn, user_id, kind="image",
+                           options=options,
+                           target_character_id=target_character_id,
+                           target_name=target_name, intent=intent_v)
+        return _media_options_reply("image", options, target_name)
+    if not stored_sogni_session(conn):
+        # Sogni is unavailable (not signed in): the free picture
+        # desk is the fallback, and the reply says which path ran.
+        fallback_prompt = detect_image_request(raw_text or "") or prompt
+        res = _handle_image_request(conn, user_id, character_id,
+                                    fallback_prompt, now_epoch=now_epoch)
+        res = dict(res or {})
+        res["sogni_path"] = "gemini_fallback"
+        if res.get("image_url"):
+            res["brief"] = (
+                "You just made the image he asked for through the "
+                "free picture desk — Sogni isn't signed in on this "
+                "thread, so the plan path wasn't available. It is "
+                "being shown to him in the chat now as an image "
+                "bubble. Respond in your own voice, briefly and "
+                "warmly; do not mention APIs or keys. His prompt "
+                "was: " + fallback_prompt[:300])
+        else:
+            res["brief"] = (res.get("brief") or "") + \
+                " This attempt used the free picture desk because " \
+                "Sogni is not signed in here."
+        return res
+    if _sogni_plan_active_job(conn, user_id):
+        return {"brief": "He asked for another picture, but the last "
+                         "one is still rendering. Tell him it's on its "
+                         "way and will land right here when it's done; "
+                         "one at a time."}
+    cap = sogni_plan_daily_cap()
+    if _sogni_plan_today_count(conn, user_id) >= cap:
+        return {"brief": "He asked for another picture, but he's hit "
+                         "today's Sogni plan media limit. Tell him "
+                         "honestly the media desk is closed until "
+                         "tomorrow; do not promise a time you do not "
+                         "know."}
+    intent = detect_sogni_media_intent(raw_text or prompt)
+    shaped = _shape_media_subject(prompt, intent, "image")
+    job_id = _sogni_plan_enqueue(conn, user_id, character_id, shaped,
+                                   kind="image",
+                                   target_character_id=target_character_id)
+    _spawn_sogni_plan_job(job_id)
+    who = f" of {target_name}" if target_name \
+        and target_character_id != character_id else ""
+    return {"brief": "You just started making that picture" + who +
+                     " for him on his Sogni plan — it's rendering "
+                     "now, and the finished picture will land right "
+                     "here in this chat when it's ready. Confirm in "
+                     "your own voice, short and warm; do not mention "
+                     "models, queues, or process.",
+            "sogni_media_kind": "image",
+            "sogni_target_character_id": target_character_id,
+            "sogni_media_intent": intent,
+            "sogni_path": "sogni_plan"}
+
+
+def _route_sogni_image(conn: sqlite3.Connection, user_id: str,
+                       character_id: str, prompt: str,
+                       raw_text: str = "",
+                       now_epoch: float | None = None) -> dict:
+    parsed = _parse_media_target(conn, user_id, character_id, prompt,
+                                 "image")
+    if (character_id or "").strip().lower() == "mia" \
+            and parsed["status"] in ("unknown", "ambiguous"):
+        return _media_unknown_reply(parsed)
+    return _handle_sogni_image_request(
+        conn, user_id, character_id, parsed.get("subject", prompt),
+        raw_text=raw_text,
+        target_character_id=parsed.get("target_id"),
+        target_name=parsed.get("target_name"), target_resolved=True,
+        now_epoch=now_epoch)
 
 
 # ---------------------------------------------------------------------------
@@ -4503,7 +5113,57 @@ def detect_sogni_media_ask(text: str) -> str | None:
 
 
 def _sogni_topic_touch(conn: sqlite3.Connection, user_id: str) -> None:
-    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, {"open": True})
+    state = _studio_get(conn, user_id, _SOGNI_TOPIC_KIND) or {}
+    state["open"] = True
+    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, state)
+
+
+def _media_topic_touch(conn: sqlite3.Connection, user_id: str, *,
+                       kind: str | None = None,
+                       subject: str | None = None,
+                       target_character_id: str | None = None) -> None:
+    """Open/refresh the media topic and remember what "make it"
+    would refer to: the last kind, subject, and target character."""
+    state = _studio_get(conn, user_id, _SOGNI_TOPIC_KIND) or {}
+    state["open"] = True
+    if kind:
+        state["last_kind"] = kind
+    if subject is not None:
+        state["last_subject"] = subject
+    if target_character_id is not None:
+        state["last_target_character_id"] = target_character_id
+    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, state)
+
+
+def _media_options_set(conn: sqlite3.Connection, user_id: str, *,
+                       kind: str, options: list[str],
+                       target_character_id: str | None,
+                       target_name: str | None,
+                       intent: str) -> None:
+    state = _studio_get(conn, user_id, _SOGNI_TOPIC_KIND) or {}
+    state["open"] = True
+    state["last_kind"] = kind
+    state["pending_options"] = list(options)
+    state["pending_target_character_id"] = target_character_id
+    state["pending_target_name"] = target_name
+    state["pending_intent"] = intent
+    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, state)
+
+
+def _media_options_clear(conn: sqlite3.Connection, user_id: str) -> None:
+    state = _studio_get(conn, user_id, _SOGNI_TOPIC_KIND) or {}
+    for key in ("pending_options", "pending_target_character_id",
+                "pending_target_name", "pending_intent"):
+        state.pop(key, None)
+    _studio_set(conn, user_id, _SOGNI_TOPIC_KIND, state)
+
+
+def _media_topic_state(conn: sqlite3.Connection,
+                       user_id: str) -> dict | None:
+    state = _studio_get(conn, user_id, _SOGNI_TOPIC_KIND)
+    if not _studio_fresh(state):
+        return None
+    return state
 
 
 def _sogni_topic_open(conn: sqlite3.Connection, user_id: str) -> bool:
@@ -4514,11 +5174,49 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                        character_id: str, text: str) -> dict | None:
     """Assistant-thread router for everything Sogni. None = not ours."""
     t = text or ""
+    # A pick from an offered situations menu renders immediately.
+    state0 = _media_topic_state(conn, user_id)
+    if state0 and state0.get("pending_options"):
+        pick = _match_media_option(t, state0["pending_options"])
+        if pick is not None:
+            options = state0["pending_options"]
+            idx = 0 if pick == "you_pick" else int(pick)
+            chosen = options[idx]
+            kind = state0.get("last_kind") or "video"
+            tgt = state0.get("pending_target_character_id")
+            tname = state0.get("pending_target_name")
+            _media_options_clear(conn, user_id)
+            if kind == "image":
+                return _handle_sogni_image_request(
+                    conn, user_id, character_id, chosen,
+                    raw_text=chosen, target_character_id=tgt,
+                    target_name=tname, target_resolved=True)
+            return _handle_sogni_video_request(
+                conn, user_id, character_id, chosen,
+                target_character_id=tgt, target_name=tname,
+                raw_text=chosen)
     subject = detect_sogni_video_request(t)
     if subject is not None:
-        _sogni_topic_touch(conn, user_id)
-        return _handle_sogni_video_request(conn, user_id,
-                                           character_id, subject)
+        return _route_sogni_video(conn, user_id, character_id, subject,
+                                  raw_text=t)
+    # "make it" while a media topic is open is a media order, not
+    # small talk — it re-runs the last kind/subject/target.
+    state = _media_topic_state(conn, user_id)
+    if state and _MEDIA_FOLLOWUP_RE.search(t) \
+            and not _strong_other_intent(t) \
+            and detect_intent(t)[0] not in ("reminder", "email_draft",
+                                            "job_search"):
+        last_subject = state.get("last_subject") \
+            or "you smiling at the camera"
+        last_target = state.get("last_target_character_id")
+        if state.get("last_kind") == "image":
+            return _handle_sogni_image_request(
+                conn, user_id, character_id, last_subject,
+                raw_text=t, target_character_id=last_target,
+                target_resolved=True)
+        return _handle_sogni_video_request(
+            conn, user_id, character_id, last_subject,
+            target_character_id=last_target, raw_text=t)
     if _SOGNI_MENTION_RE.search(t):
         _sogni_topic_touch(conn, user_id)
         if not stored_sogni_session(conn):
@@ -4527,8 +5225,12 @@ def _handle_sogni_lane(conn: sqlite3.Connection, user_id: str,
                     "sogni_login_box": True}
         loose = detect_sogni_media_ask(t)
         if loose:
-            return _handle_sogni_video_request(conn, user_id,
-                                               character_id, loose)
+            if re.search(r"\b(?:pics?|pictures?|photos?)\b", t,
+                         re.IGNORECASE):
+                return _route_sogni_image(conn, user_id, character_id,
+                                          loose, raw_text=t)
+            return _route_sogni_video(conn, user_id, character_id,
+                                      loose, raw_text=t)
         return {"brief": FIXED_REPLY_PREFIX + _SOGNI_SIGNED_IN_REPLY}
     # No Sogni name, no video ask: a short confirmation while the
     # Sogni topic is open ("yes they do", "i just had it put in")
@@ -5470,6 +6172,28 @@ def _studio_clear(conn: sqlite3.Connection, user_id: str, kind: str) -> None:
     conn.commit()
 
 
+def clear_studio_flow_state(conn: sqlite3.Connection,
+                            user_ids=None) -> int:
+    """Drop in-flight studio flow state (guided creation + pending
+    give filing). Boot runs this for the owner so a bogus flow
+    assembled by an older build dies with the deploy instead of
+    waking up mid-chat. Returns how many rows were cleared —
+    a count, never content."""
+    ensure_tables(conn)
+    kinds = ("create_flow", "pending_give")
+    ids = [u for u in (user_ids or []) if u]
+    if ids:
+        marks = ", ".join("?" for _ in ids)
+        cur = conn.execute(
+            f"DELETE FROM hannah_studio WHERE kind IN (?, ?) "
+            f"AND user_id IN ({marks})", (*kinds, *ids))
+    else:
+        cur = conn.execute(
+            "DELETE FROM hannah_studio WHERE kind IN (?, ?)", kinds)
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
 def _studio_fresh(state: dict | None) -> bool:
     if not state:
         return False
@@ -5806,12 +6530,12 @@ def _create_seed(text: str, attachments: list[dict] | None) -> dict:
                         r"\bmake\s+(?:her|him|them|it)\s+public\b|\bgo\s+"
                         r"public\b|\bpublic\s+character\b", t, re.I))}
     m = _CREATE_NAME_RE.search(t)
-    if m:
-        fields["name"] = m.group(1).strip()
+    if m and _valid_character_name(_clean_name(m.group(1))):
+        fields["name"] = _clean_name(m.group(1))
     fields["gender"] = _parse_gender(t)
-    vm = re.search(r"\bvoice\s*(?:is|=|:)?\s*([a-z][a-z0-9\-]{1,24})\b",
+    vm = re.search(r"\bvoice\s*(?:is|=|:)\s*([a-z][a-z0-9\-]{1,24})\b",
                    t, re.IGNORECASE)
-    if vm:
+    if vm and vm.group(1).lower() not in _NAME_STOPWORDS:
         fields["voice"] = vm.group(1).lower()
     # Personality seed: whatever descriptive tail he already gave.
     tail = ""
@@ -5823,7 +6547,7 @@ def _create_seed(text: str, attachments: list[dict] | None) -> dict:
             break
     if not tail and ":" in t:
         tail = t.split(":", 1)[1].strip()
-    if tail and len(tail) >= 12:
+    if tail and len(tail) >= 12 and _looks_like_personality(tail):
         fields["personality"] = tail[:2000]
     images = _image_attachments(attachments)
     if images:
@@ -5903,6 +6627,63 @@ def _clean_name(text: str) -> str:
     return name.strip(" .,!?")[:60].strip()
 
 
+_NAME_STOPWORDS = frozenset({
+    "for", "just", "make", "it", "the", "a", "an", "and", "or",
+    "with", "who", "is", "this", "that", "pick", "skip", "yes",
+    "no", "cancel", "public", "private", "female", "male", "man",
+    "woman", "girl", "guy", "month", "week", "day", "sec",
+    "second", "seconds", "long", "now", "please", "her", "him",
+    "them", "she", "he", "you", "decide", "whatever",
+})
+_NAME_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z'’\-]*$")
+
+
+def _valid_character_name(name: str) -> bool:
+    """A plausible short character name — never a sentence fragment.
+
+    One to three letter-words, no digits/prices/punctuation, no
+    instruction words. "For just $9.99 a month" is a price line,
+    not a name; it gets re-asked, never stored."""
+    n = (name or "").strip()
+    if not n or len(n) > 30:
+        return False
+    words = n.split(" ")
+    if not (1 <= len(words) <= 3):
+        return False
+    for w in words:
+        if not _NAME_TOKEN_RE.match(w):
+            return False
+        lw = w.strip("'’-").lower()
+        if lw in _NAME_STOPWORDS:
+            # Visibility words can be part of a real name ("Public
+            # Pam"); alone they are an answer to a different step.
+            if len(words) == 1 or lw not in ("public", "private"):
+                return False
+    return True
+
+
+_INSTRUCTION_FRAGMENT_RE = re.compile(
+    r"^\s*(?:make|do|send|give|add|use|set|create|show|take)\s+"
+    r"(?:it|that|this|her|him|them|me)\b", re.IGNORECASE)
+_PRICE_OR_DURATION_RE = re.compile(
+    r"\$\s?\d|\d+(?:\.\d+)?\s*(?:sec|secs|second|seconds|min|mins|"
+    r"minute|minutes|hour|hours|%)\b", re.IGNORECASE)
+
+
+def _looks_like_personality(text: str) -> bool:
+    """A personality answer describes who they are. An instruction
+    fragment ("Make it 15 sec long") or a price/duration line is
+    stray chat, not a personality — re-ask instead of storing it."""
+    t = (text or "").strip()
+    if len(t) < 3:
+        return False
+    if _INSTRUCTION_FRAGMENT_RE.search(t):
+        return False
+    if _PRICE_OR_DURATION_RE.search(t):
+        return False
+    return True
+
+
 def _continue_create_flow(conn: sqlite3.Connection, user_id: str,
                           state: dict, text: str,
                           attachments: list[dict] | None) -> dict:
@@ -5916,6 +6697,17 @@ def _continue_create_flow(conn: sqlite3.Connection, user_id: str,
     step = state.get("step") or _create_next_step(state)
 
     if step == "confirm":
+        # A junk-named flow (assembled from stray fragments by an
+        # older, looser build) dies here: no summary, no creation.
+        if not _valid_character_name(state.get("name") or ""):
+            state["name"] = ""
+            state["step"] = "name"
+            state.pop("name_reconfirmed", None)
+            _studio_set(conn, user_id, "create_flow", state)
+            return {"brief": "That build never got a real name, so "
+                             "there's nothing safe to confirm. Ask "
+                             "him what to NAME the character — a "
+                             "short name, his words only."}
         if _says_yes(t):
             return _execute_create(conn, user_id, state)
         if _STUDIO_CANCEL_RE.search(t) or re.match(r"^\W*no\b", t, re.I):
@@ -5923,16 +6715,41 @@ def _continue_create_flow(conn: sqlite3.Connection, user_id: str,
             return {"brief": "He said no to creating that character. "
                              "Confirm warmly that you dropped it — nothing "
                              "was created."}
+        # A summary is never presented cold: after the turn that
+        # first reached confirm, any later stray message first
+        # re-confirms the name before the collected bits come back.
+        if _clean_name(t).lower() == (state.get("name") or "").lower() \
+                and state.get("name"):
+            state["name_reconfirmed"] = True
+            state["step"] = "confirm"
+            _studio_set(conn, user_id, "create_flow", state)
+            return _create_summary_brief(state, _CREATE_ASKS["confirm"])
+        if not state.get("name_reconfirmed"):
+            state["awaiting_name_reconfirm"] = True
+            state["step"] = "confirm"
+            _studio_set(conn, user_id, "create_flow", state)
+            return {"brief": "Before that character summary goes "
+                             "anywhere, re-confirm the name: ask him "
+                             f"if you're still building "
+                             f"{state.get('name')}. He can say the "
+                             "name back if it's right, 'yes' to "
+                             "create, or 'no' to drop it. Do not "
+                             "read the full summary until the name "
+                             "is confirmed."}
         state["step"] = "confirm"
         _studio_set(conn, user_id, "create_flow", state)
         return _create_summary_brief(state, _CREATE_ASKS["confirm"])
 
     if step == "name":
         name = _clean_name(t)
-        if not name:
-            return {"brief": "He didn't give a usable name. Ask again "
-                             "what to name the character — you can't pick "
-                             "one for him."}
+        if not _valid_character_name(name):
+            _studio_set(conn, user_id, "create_flow", state)
+            return {"brief": "That doesn't read like a character "
+                             "name — names are short (a word or "
+                             "two, letters only), and that sounded "
+                             "like a sentence. Ask him again: what "
+                             "should we NAME the character? Do not "
+                             "store that line as a name."}
         state["name"] = name
     elif step == "gender":
         gender = _parse_gender(t)
@@ -5949,25 +6766,42 @@ def _continue_create_flow(conn: sqlite3.Connection, user_id: str,
                              "but character details have to come from "
                              "him. Ask him for a vibe in his own words "
                              "— a few words is plenty."}
-        if len(t) < 3:
+        if not _looks_like_personality(t):
             _studio_set(conn, user_id, "create_flow", state)
-            return {"brief": "That was too thin to build a personality "
-                             "from. Ask him for a little more — who are "
-                             "they, what's their vibe?"}
+            return {"brief": "That sounded like an instruction or "
+                             "a stray line, not who this character "
+                             "is. Ask him for the personality in "
+                             "his own words — who are they, what's "
+                             "their vibe? Do not store that line "
+                             "as a personality."}
         state["personality"] = t[:2000]
     elif step == "voice":
         if re.search(r"\b(skip|default|whatever|no|none)\b", t, re.I):
             state["voice"] = ""
+            state["voice_done"] = True
         else:
-            vm = re.search(r"([a-z][a-z0-9\-]{1,24})", t.lower())
-            state["voice"] = vm.group(1) if vm else ""
-        state["voice_done"] = True
+            # Only an explicit single voice token counts. "You
+            # pick" is him deferring, not a voice named "pick".
+            vm = re.fullmatch(
+                r"(?:voice\s*(?:is|=|:)?\s*)?([a-z][a-z0-9\-]{1,24})",
+                t.lower())
+            if not vm or vm.group(1) in _NAME_STOPWORDS:
+                _studio_set(conn, user_id, "create_flow", state)
+                return {"brief": "That wasn't a voice name. Ask "
+                                 "him which voice he'd like — one "
+                                 "voice name, or 'skip' for the "
+                                 "default. Do not store that line "
+                                 "as a voice."}
+            state["voice"] = vm.group(1)
+            state["voice_done"] = True
     elif step == "avatar":
         if images:
             state["avatar_url"] = images[0]["url"]
         state["avatar_done"] = True
 
     state["step"] = _create_next_step(state)
+    if state["step"] == "confirm":
+        state["name_reconfirmed"] = False
     _studio_set(conn, user_id, "create_flow", state)
     ask = _CREATE_ASKS[state["step"]]
     return _create_summary_brief(state, ask)
@@ -5997,6 +6831,14 @@ def _execute_create(conn: sqlite3.Connection, user_id: str,
     from . import creator as _creator
     from . import submit as _submit
     name = state.get("name") or ""
+    if not _valid_character_name(name):
+        state["name"] = ""
+        state["step"] = "name"
+        _studio_set(conn, user_id, "create_flow", state)
+        return {"brief": "That build never got a real name, so "
+                         "nothing was created. Ask him what to "
+                         "NAME the character — a short name, his "
+                         "words only."}
     gender = state.get("gender") or "female"
     description = state.get("personality") or ""
     slug = _submit._slugify(name)
@@ -6119,14 +6961,65 @@ def _handle_avatar_assignment(conn: sqlite3.Connection, user_id: str,
 
 # ---- studio router -----------------------------------------------------------
 
+STUDIO_CHARACTERS = frozenset({"mia", "rocky"})
+
+
+def _mia_studio_redirect() -> dict:
+    """Studio work (character builds, give filing) is Whispr
+    business — Mia's lane (Rocky keeps his own studio hands)."""
+    return {"brief": FIXED_REPLY_PREFIX +
+            "that's mia's desk, babe — character builds and give "
+            "filing live in her thread. ask her and she's got it. "
+            "i only make my own pics and videos over here.",
+            "sogni_media_redirect": "mia"}
+
+
+def _studio_shaped(text: str) -> bool:
+    t = text or ""
+    return bool(_DELETE_CHAR_RE.search(t)
+                or _detect_add_give(t) is not None
+                or _detect_avatar_assignment(t) is not None
+                or _detect_create(t))
+
+
 def _studio_owner_turn(conn: sqlite3.Connection, user_id: str,
                        character_id: str, text: str,
                        attachments: list[dict] | None) -> dict | None:
-    """Assistant-thread router for the studio abilities (Hannah and
-    Mia — see ASSISTANT_CHARACTERS). None = not ours."""
-    if not is_assistant_character(character_id):
-        return None
+    """Studio router: Mia's desk (and Rocky's). Hannah/Jordan get
+    the fixed Mia redirect for studio-shaped asks — their own
+    self-media stays theirs, studio is not media. None = not ours."""
+    cid = (character_id or "").strip().lower()
     t = text or ""
+    if cid in ("hannah", "jordan"):
+        if _SOGNI_MENTION_RE.search(t) \
+                or detect_sogni_video_request(t) is not None:
+            return None  # the Sogni lane's turn, never studio's
+        if _strong_other_intent(t):
+            return None  # her own media/other abilities still run
+        if _studio_shaped(t):
+            return _mia_studio_redirect()
+        flow = _studio_get(conn, user_id, "create_flow")
+        pending = _studio_get(conn, user_id, "pending_give")
+        if (flow and _studio_fresh(flow)) \
+                or (pending and _studio_fresh(pending)):
+            if detect_intent(t)[0] in ("reminder", "email_draft",
+                                       "job_search"):
+                return None
+            return _mia_studio_redirect()
+        return None
+    if cid not in STUDIO_CHARACTERS:
+        return None
+
+    # A Sogni mention / direct media ask is never a studio answer:
+    # with a flow open it must fall through to the Sogni lane, not
+    # be eaten as a name/personality/voice fragment.
+    _open_flow = _studio_get(conn, user_id, "create_flow")
+    _open_pending = _studio_get(conn, user_id, "pending_give")
+    if ((_open_flow and _studio_fresh(_open_flow))
+            or (_open_pending and _studio_fresh(_open_pending))) \
+            and (_SOGNI_MENTION_RE.search(t)
+                 or detect_sogni_video_request(t) is not None):
+        return None
 
     if _DELETE_CHAR_RE.search(t):
         return {"brief": "He asked you to delete or remove a character "
@@ -6246,6 +7139,9 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                 return sogni_hit
         image_prompt = detect_image_request(text)
         if image_prompt is not None:
+            if is_assistant_character(character_id):
+                return _route_sogni_image(conn, user_id, character_id,
+                                          image_prompt, raw_text=text)
             return _handle_image_request(conn, user_id, character_id,
                                          image_prompt)
         gh = detect_github_review(text)
@@ -6262,6 +7158,9 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                 return red
             return {"brief": _status_brief(conn, character_id)}
         if detect_owner_brief(text):
+            return {"brief": _owner_brief_reply(character_id)}
+        if is_assistant_character(character_id) \
+                and detect_project_identity(text):
             return {"brief": _owner_brief_reply(character_id)}
         # Browser-agent dispatch (owner-only, Rocky's thread only):
         # "screenshot <site>" / "look at <site> in the browser" queues
