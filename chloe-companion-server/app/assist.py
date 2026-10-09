@@ -2213,13 +2213,14 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
 # ---------------------------------------------------------------------------
 # Chat attachments — owner-only Hannah image/file intake (2026-10-09).
 #
-# The owner can attach images plus readable text documents to a Hannah
+# The owner can attach images plus readable documents to a Hannah
 # message. Images are sent to a free-pool Gemini vision model as
-# inlineData; txt/md/csv/json are extracted server-side and included in
-# her context. PDF/DOCX may be attached and shown in the thread, but no
-# text extractor is bundled, so she says plainly that she cannot read
-# those yet instead of pretending. Uploaded bytes are never sent to a
-# paid key: every model call here uses free_only=True.
+# inlineData; txt/md/csv/json and PDF/DOCX are text-extracted
+# server-side (pypdf / python-docx) and included in her context.
+# Documents she genuinely cannot read (password-locked, corrupt, or a
+# PDF with no text layer) produce an honest status, never fake content.
+# Uploaded bytes are never sent to a paid key: every model call here
+# uses free_only=True.
 # ---------------------------------------------------------------------------
 ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 ATTACHMENT_MAX_PER_MESSAGE = 4
@@ -2238,7 +2239,7 @@ _TEXT_MIME_BY_EXT = {
     ".csv": "text/csv",
     ".json": "application/json",
 }
-_STORED_ONLY_MIME_BY_EXT = {
+_DOC_MIME_BY_EXT = {
     ".pdf": "application/pdf",
     ".docx": ("application/vnd.openxmlformats-officedocument."
               "wordprocessingml.document"),
@@ -2246,12 +2247,12 @@ _STORED_ONLY_MIME_BY_EXT = {
 _ATTACHMENT_KIND_BY_EXT = {
     **{ext: "image" for ext in _IMAGE_MIME_BY_EXT},
     **{ext: "file" for ext in _TEXT_MIME_BY_EXT},
-    **{ext: "file" for ext in _STORED_ONLY_MIME_BY_EXT},
+    **{ext: "file" for ext in _DOC_MIME_BY_EXT},
 }
 _ATTACHMENT_MIME_BY_EXT = {
     **_IMAGE_MIME_BY_EXT,
     **_TEXT_MIME_BY_EXT,
-    **_STORED_ONLY_MIME_BY_EXT,
+    **_DOC_MIME_BY_EXT,
 }
 ATTACHMENT_ACCEPTED_EXTS = tuple(sorted(_ATTACHMENT_MIME_BY_EXT))
 _ATTACHMENT_MODEL_URL = ("https://generativelanguage.googleapis.com/"
@@ -2314,18 +2315,91 @@ def classify_attachment(filename: str, content_type: str = "",
             "mime_type": _ATTACHMENT_MIME_BY_EXT[ext]}
 
 
-def extract_attachment_text(filename: str, data: bytes) -> dict:
-    """Extract readable text from txt/md/csv/json uploads.
+def _cap_extracted(raw: str) -> dict:
+    raw = (raw or "").replace("\x00", "")
+    return {"text": raw[:ATTACHMENT_TEXT_LIMIT], "status": "ok",
+            "chars": len(raw),
+            "truncated": len(raw) > ATTACHMENT_TEXT_LIMIT}
 
-    Returns the text to put in Hannah's context (truncated at
-    ATTACHMENT_TEXT_LIMIT with the truncation recorded, never silent).
-    PDF/DOCX return status="unsupported": accepted and displayed, but
-    not readable by her yet.
-    """
-    ext = os.path.splitext(_sanitize_attachment_name(filename))[1].lower()
-    if ext in _STORED_ONLY_MIME_BY_EXT:
+
+def _extract_pdf_text(data: bytes) -> dict:
+    """PDF text via pypdf. Honest statuses: ok / encrypted / no_text /
+    corrupt — never invented content for a file she cannot read."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
         return {"text": "", "status": "unsupported", "chars": 0,
                 "truncated": False}
+    import io
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            try:
+                unlocked = reader.decrypt("")
+            except Exception:
+                unlocked = 0
+            if not unlocked:
+                return {"text": "", "status": "encrypted", "chars": 0,
+                        "truncated": False}
+        pages_text: list[str] = []
+        for page in reader.pages:
+            pages_text.append(page.extract_text() or "")
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}".lower()
+        if "password" in detail or "decrypt" in detail \
+                or "encrypted" in detail:
+            return {"text": "", "status": "encrypted", "chars": 0,
+                    "truncated": False}
+        return {"text": "", "status": "corrupt", "chars": 0,
+                "truncated": False}
+    raw = "\n".join(pages_text).strip()
+    if not raw:
+        # Valid PDF but no text layer (scanned images, or blank pages).
+        return {"text": "", "status": "no_text", "chars": 0,
+                "truncated": False}
+    return _cap_extracted(raw)
+
+
+def _extract_docx_text(data: bytes) -> dict:
+    """DOCX text via python-docx (paragraphs + tables). Honest
+    statuses: ok / empty / corrupt."""
+    try:
+        import docx as docx_lib
+    except ImportError:
+        return {"text": "", "status": "unsupported", "chars": 0,
+                "truncated": False}
+    import io
+    try:
+        document = docx_lib.Document(io.BytesIO(data))
+        chunks: list[str] = [p.text for p in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    chunks.append(cell.text)
+    except Exception:
+        return {"text": "", "status": "corrupt", "chars": 0,
+                "truncated": False}
+    raw = "\n".join(c for c in chunks if c and c.strip()).strip()
+    if not raw:
+        return {"text": "", "status": "empty", "chars": 0,
+                "truncated": False}
+    return _cap_extracted(raw)
+
+
+def extract_attachment_text(filename: str, data: bytes) -> dict:
+    """Extract readable text from an uploaded document.
+
+    txt/md/csv/json decode directly; PDF goes through pypdf; DOCX
+    through python-docx. Returns the text to put in Hannah's context
+    (truncated at ATTACHMENT_TEXT_LIMIT with the truncation recorded,
+    never silent) or an honest non-ok status she relays instead of
+    pretending she read it.
+    """
+    ext = os.path.splitext(_sanitize_attachment_name(filename))[1].lower()
+    if ext == ".pdf":
+        return _extract_pdf_text(data)
+    if ext == ".docx":
+        return _extract_docx_text(data)
     if ext not in _TEXT_MIME_BY_EXT:
         return {"text": "", "status": "image", "chars": 0,
                 "truncated": False}
@@ -2333,10 +2407,7 @@ def extract_attachment_text(filename: str, data: bytes) -> dict:
         raw = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ValueError("That text file is not valid UTF-8 text.") from exc
-    raw = raw.replace("\x00", "")
-    return {"text": raw[:ATTACHMENT_TEXT_LIMIT], "status": "ok",
-            "chars": len(raw),
-            "truncated": len(raw) > ATTACHMENT_TEXT_LIMIT}
+    return _cap_extracted(raw)
 
 
 def _attachment_dir() -> str:
@@ -2518,6 +2589,7 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
     missing_images: list[str] = []
     text_sections: list[str] = []
     unsupported: list[str] = []
+    unreadable: list[tuple[str, str]] = []
     for record in attachments:
         name = record.get("filename") or "attachment"
         if record.get("kind") == "image":
@@ -2544,6 +2616,10 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
                        + (record.get("extracted_text") or ""))
             text_sections.append(section)
             parts.append({"text": section})
+        elif record.get("extraction_status") in (
+                "encrypted", "no_text", "corrupt", "empty"):
+            unreadable.append(
+                (name, str(record.get("extraction_status"))))
         else:
             unsupported.append(name)
 
@@ -2600,13 +2676,37 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             "could NOT actually inspect the image this time. Tell him "
             "honestly and ask him to send it again shortly; never claim "
             "you saw it.")
+    for bad_name, bad_status in unreadable:
+        if bad_status == "encrypted":
+            brief_parts.append(
+                f"{bad_name} is password-protected, so you could NOT "
+                "open it. Tell him honestly it is locked and you cannot "
+                "read it without the password; do not guess at its "
+                "contents.")
+        elif bad_status == "no_text":
+            brief_parts.append(
+                f"{bad_name} opened, but it has no readable text layer "
+                "(scanned pages or images, most likely), so you could "
+                "NOT actually read it. Tell him honestly, and mention "
+                "he can send the pages as images if he wants you to "
+                "read them that way; never invent what it says.")
+        elif bad_status == "empty":
+            brief_parts.append(
+                f"{bad_name} came through with no text in it at all. "
+                "Tell him honestly the document looks empty; do not "
+                "invent contents for it.")
+        else:
+            brief_parts.append(
+                f"{bad_name} looks corrupt or unreadable, so you could "
+                "NOT read it. Tell him honestly it did not come through "
+                "as a readable document; never make up what it might "
+                "say.")
     if unsupported:
         brief_parts.append(
             "These files were attached and saved, but their text cannot "
-            "be extracted yet: " + ", ".join(unsupported) +
-            ". Tell him plainly Hannah can read images and "
-            "txt/md/csv/json today; pdf/docx are stored but not readable "
-            "by her yet.")
+            "be extracted: " + ", ".join(unsupported) +
+            ". Tell him plainly Hannah can read images plus "
+            "txt/md/csv/json, PDF and DOCX files today.")
     return {"brief": "\n\n".join(brief_parts),
             "attachment_model": model_used,
             "attachment_status": analysis_status}

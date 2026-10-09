@@ -506,16 +506,121 @@ class AttachmentTest(unittest.TestCase):
         self.assertIn("could NOT actually inspect", result["brief"])
         self.assertEqual(result["attachment_status"], "unavailable")
 
-    def test_pdf_is_stored_but_not_read(self):
+    @staticmethod
+    def _pdf_bytes(text=None):
+        """Build a tiny real PDF (with a text layer when text is given)."""
+        if text is None:
+            content = b""
+        else:
+            safe = (text.replace("\\", " ").replace("(", " ")
+                    .replace(")", " ").replace("\n", " "))
+            content = (b"BT /F1 12 Tf 72 720 Td (" + safe.encode()
+                       + b") Tj ET")
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+             b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"),
+            (b"<< /Length " + str(len(content)).encode()
+             + b" >>\nstream\n" + content + b"\nendstream"),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ]
+        out = [b"%PDF-1.4\n"]
+        offsets = []
+        pos = len(out[0])
+        for idx, body in enumerate(objects, start=1):
+            offsets.append(pos)
+            chunk = (str(idx).encode() + b" 0 obj\n" + body + b"\nendobj\n")
+            out.append(chunk)
+            pos += len(chunk)
+        xref = pos
+        table = (b"xref\n0 6\n0000000000 65535 f \n" + b"".join(
+            (("%010d" % off) + " 00000 n \n").encode() for off in offsets))
+        out.append(table + b"trailer\n<< /Size 6 /Root 1 0 R >>\n"
+                     + b"startxref\n" + str(xref).encode() + b"\n%%EOF")
+        return b"".join(out)
+
+    @staticmethod
+    def _docx_bytes(text=""):
+        import io
+        import docx as docx_lib
+        document = docx_lib.Document()
+        if text:
+            document.add_paragraph(text)
+        buf = io.BytesIO()
+        document.save(buf)
+        return buf.getvalue()
+
+    def test_pdf_text_reaches_brief(self):
         saved = assist.save_chat_attachment(
             self.conn, "owner_1", "hannah", "report.pdf",
-            "application/pdf", b"%PDF-fake")
+            "application/pdf",
+            self._pdf_bytes("Invoice total is 499 dollars for roof leads."))
         row = assist.get_chat_attachments(
             self.conn, "owner_1", "hannah", [saved["id"]])[0]
-        self.assertEqual(row["extraction_status"], "unsupported")
+        self.assertEqual(row["extraction_status"], "ok")
+        self.assertIn("499 dollars", row["extracted_text"])
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "what does this say?", "hannah", [row])
+        self.assertIn("Invoice total is 499 dollars", result["brief"])
+        self.assertEqual(result["attachment_status"], "not_needed")
+
+    def test_docx_text_reaches_brief(self):
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "memo.docx",
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document",
+            self._docx_bytes("The launch meeting moved to Friday."))
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        self.assertEqual(row["extraction_status"], "ok")
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "summarize this", "hannah", [row])
+        self.assertIn("launch meeting moved to Friday", result["brief"])
+
+    def test_long_docx_truncates(self):
+        old_limit = assist.ATTACHMENT_TEXT_LIMIT
+        assist.ATTACHMENT_TEXT_LIMIT = 10
+        try:
+            extracted = assist.extract_attachment_text(
+                "long.docx", self._docx_bytes("abcdefghij" * 5))
+        finally:
+            assist.ATTACHMENT_TEXT_LIMIT = old_limit
+        self.assertEqual(len(extracted["text"]), 10)
+        self.assertTrue(extracted["truncated"])
+        self.assertEqual(extracted["status"], "ok")
+
+    def test_unreadable_documents_are_honest(self):
+        corrupt = assist.extract_attachment_text(
+            "broken.pdf", b"%PDF-1.4 this is not really a pdf at all")
+        self.assertEqual(corrupt["status"], "corrupt")
+        blank = assist.extract_attachment_text(
+            "blank.pdf", self._pdf_bytes(None))
+        self.assertEqual(blank["status"], "no_text")
+        empty_docx = assist.extract_attachment_text(
+            "empty.docx", self._docx_bytes(""))
+        self.assertEqual(empty_docx["status"], "empty")
+
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "broken.pdf",
+            "application/pdf", b"%PDF-1.4 this is not really a pdf")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
         result = assist.analyze_chat_attachments(
             self.conn, self.owner, "read this", "hannah", [row])
-        self.assertIn("not readable", result["brief"])
+        self.assertIn("corrupt or unreadable", result["brief"])
+
+    def test_encrypted_pdf_is_honest(self):
+        import io
+        from pypdf import PdfWriter
+        writer = PdfWriter()
+        writer.add_blank_page(612, 792)
+        writer.encrypt("secret-password")
+        buf = io.BytesIO()
+        writer.write(buf)
+        extracted = assist.extract_attachment_text(
+            "locked.pdf", buf.getvalue())
+        self.assertEqual(extracted["status"], "encrypted")
 
     def test_message_attachment_limit(self):
         ids = []

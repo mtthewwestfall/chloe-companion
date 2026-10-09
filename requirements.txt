@@ -5,3 +5,5 @@ python-multipart>=0.0.9
 # Media requests (2026-10-01): server-side Sogni generation.
 sogni-client>=5.56
 websockets>=14
+pypdf>=5.0
+python-docx>=1.1
