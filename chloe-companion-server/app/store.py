@@ -79,6 +79,22 @@ def consume_message(conn: sqlite3.Connection, user_id: str) -> bool:
     return True
 
 
+def note_message_sent(conn: sqlite3.Connection, user_id: str) -> None:
+    """Advance only the lifetime message counter (owner accounts).
+
+    Owner accounts (ASSIST_OWNER_IDS) chat without a bank — see the owner
+    bypass in the chat endpoint. messages_used_total still advances so
+    cadence features keyed to it (photo drops) behave exactly as if the
+    message had been banked."""
+    conn.execute(
+        """UPDATE users SET messages_used_total = messages_used_total + 1,
+                              updated_at = datetime('now')
+           WHERE user_id = ?""",
+        (user_id,),
+    )
+    conn.commit()
+
+
 def consume_voice_note(conn: sqlite3.Connection, user_id: str) -> bool:
     row = conn.execute(
         "SELECT voice_notes_remaining FROM users WHERE user_id = ?", (user_id,)
