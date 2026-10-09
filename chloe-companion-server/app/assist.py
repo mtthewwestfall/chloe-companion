@@ -38,6 +38,7 @@ import asyncio
 import base64
 import hmac
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -371,6 +372,37 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                      ("merged_sha", "TEXT")):
         if col not in dev_cols:
             conn.execute(f"ALTER TABLE dev_jobs ADD COLUMN {col} {ddl}")
+    # Browser-agent bridge (2026-10-09): Rocky (the owner's in-app
+    # agent character) gets real browser hands. He queues a browse job
+    # from chat; a worker on the owner's VM polls with the same shared
+    # secret as the dev bridge, loads the page in real headless
+    # Chromium, and posts the rendered text / a full-page screenshot
+    # back. Read-only by design: no logins, no forms, no clicks beyond
+    # dismissing a cookie banner; public http/https URLs only.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS browse_jobs (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               character_id TEXT NOT NULL DEFAULT 'rocky',
+               url TEXT NOT NULL,
+               action TEXT NOT NULL DEFAULT 'read',
+               question TEXT,
+               status TEXT NOT NULL DEFAULT 'queued',
+               title TEXT,
+               final_url TEXT,
+               result_text TEXT,
+               image_url TEXT,
+               image_name TEXT,
+               error TEXT,
+               created_at TEXT NOT NULL,
+               claimed_at TEXT,
+               finished_at TEXT,
+               delivered INTEGER NOT NULL DEFAULT 0)"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_browse_jobs_status "
+        "ON browse_jobs (status, id)"
+    )
     conn.commit()
 
 
@@ -2054,6 +2086,398 @@ def _run_dev_delivery(job: dict) -> None:
     except Exception:
         pass
     print(f"[assist] dev job #{job['id']} result delivered "
+          f"({job['status']})", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Browser-agent bridge (2026-10-09, owner-directed): the owner asked
+# for Rocky to have "your browser or one like it". Rocky's thread
+# queues browse jobs; a worker on the owner's VM polls with the SAME
+# shared secret as the dev bridge (DEV_AGENT_SECRET), claims one job
+# at a time, loads the page in real headless Chromium (JS rendered),
+# and posts back the rendered text or a full-page screenshot, which
+# lands in the thread as Rocky's follow-up message (store.log_turn,
+# the same delivery primitive as the dev bridge). Read-only v1: the
+# worker never logs in, never fills or submits forms, and its only
+# click is dismissing a cookie banner. Owner-only + Rocky-only, like
+# the other power tools: customers and the other characters never
+# see this lane. Rocky reads nothing himself — he queues, the worker
+# loads, and he delivers only the real posted-back result
+# (HONESTY_RULE).
+# ---------------------------------------------------------------------------
+_BROWSE_URL_RE = re.compile(
+    r"((?:https?://)?(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}"
+    r"|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:/[^\s]*)?)",
+    re.IGNORECASE)
+_BROWSE_LINK_HINT_RE = re.compile(
+    r"\b(that|this|the\s+(page|site|link|tab)|page|site|link|tab)\b"
+    r"|\bit\b(?!')",  # "open it" yes; "it's yours" no
+    re.IGNORECASE)
+_BROWSE_SHOT_RE = re.compile(r"\bscreen\s?shots?\b", re.IGNORECASE)
+_BROWSE_BROWSER_RE = re.compile(
+    r"\bbrowser\b|\brender(?:ed|ing)?\b|\bjavascript\b|\bheadless\b",
+    re.IGNORECASE)
+_BROWSE_MAX_ACTIVE = 3
+_BROWSE_TEXT_CAP = 20000
+_BROWSE_IMAGE_MAX_BYTES = 6 * 1024 * 1024
+
+
+def detect_browse_request(text: str) -> dict | None:
+    """Rocky wants a real browser load. Deterministic on purpose:
+    needs an explicit browser/screenshot signal AND a URL (or the
+    signal alone, so the handler can ask him for the link). A miss
+    just means normal chat — never a fake browse."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    shot = bool(_BROWSE_SHOT_RE.search(t))
+    if not (shot or _BROWSE_BROWSER_RE.search(t)):
+        return None
+    m = _BROWSE_URL_RE.search(t)
+    if not m:
+        # Signal but no link: only ask him for the URL when he is
+        # plainly pointing at one ("open that in the browser") —
+        # figurative uses ("screenshot of my heart") stay chat.
+        if _BROWSE_LINK_HINT_RE.search(t):
+            return {"url": None,
+                    "action": "screenshot" if shot else "read",
+                    "question": None}
+        return None
+    url = m.group(1).rstrip(".,);]")
+    rest = (t[:m.start()] + " " + t[m.end():]).strip()
+    rest = _BROWSE_SHOT_RE.sub(" ", rest)
+    rest = _BROWSE_BROWSER_RE.sub(" ", rest)
+    rest = re.sub(
+        r"\b(look at|pull up|open|load|read|check out|check|visit|"
+        r"show me|use|using|with|in the|of|the|a|an|please|for me|"
+        r"this|that|page|site|link)\b", " ", rest, flags=re.IGNORECASE)
+    question = re.sub(r"\s+", " ", rest).strip(" -—:,.") or None
+    if question and len(question) < 4:
+        question = None
+    return {"url": url, "action": "screenshot" if shot else "read",
+            "question": (question[:500] if question else None)}
+
+
+def _browse_url_ok(url: str) -> bool:
+    """Public http/https only. Literal IPs must be public addresses;
+    localhost/*.local/*.internal names are refused. (The worker
+    re-checks, and refuses private final URLs after redirects.)"""
+    try:
+        p = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").strip().lower().rstrip(".")
+    if not host or host == "localhost":
+        return False
+    if host.endswith(".local") or host.endswith(".internal"):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return True
+
+
+def enqueue_browse_job(conn: sqlite3.Connection, user_id: str,
+                       character_id: str, url: str, action: str,
+                       question: str | None) -> int:
+    ensure_tables(conn)
+    cur = conn.execute(
+        "INSERT INTO browse_jobs (user_id, character_id, url, action, "
+        "question, status, created_at) VALUES (?, ?, ?, ?, ?, "
+        "'queued', ?)",
+        (user_id, character_id, url, action, question, _utc_iso()))
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def active_browse_job_count(conn: sqlite3.Connection,
+                            user_id: str) -> int:
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM browse_jobs WHERE user_id = ? "
+        "AND status IN ('queued', 'claimed')", (user_id,)).fetchone()
+    return int(row[0] or 0)
+
+
+def _handle_browse_request(conn: sqlite3.Connection, user_id: str,
+                           character_id: str, det: dict) -> dict:
+    if not det.get("url"):
+        return {"brief": "He asked you to open a page in your browser "
+                         "but did not include the link. Ask him for "
+                         "the URL, short and direct."}
+    url = det["url"]
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url.lstrip("/")
+    if not _browse_url_ok(url):
+        return {"brief": FIXED_REPLY_PREFIX +
+                "that address is off limits for my browser — I only "
+                "open public web pages. Give me a normal http/https "
+                "link and I'm on it."}
+    if active_browse_job_count(conn, user_id) >= _BROWSE_MAX_ACTIVE:
+        return {"brief": FIXED_REPLY_PREFIX +
+                "my browser is already on a couple of pages for you — "
+                "let those land first, then give me the next one."}
+    jid = enqueue_browse_job(conn, user_id, character_id, url,
+                             det.get("action") or "read",
+                             det.get("question"))
+    action_word = ("screenshot" if det.get("action") == "screenshot"
+                   else "read")
+    return {"brief":
+            f"You just queued a REAL browser job (#{jid}) to "
+            f"{action_word} {url}. A browser worker on his machine "
+            "will load the actual page (JavaScript and all) and the "
+            "result will arrive HERE as your follow-up message. Tell "
+            "him it's queued, briefly and in your own voice. Do NOT "
+            "describe the page, guess what it says, or promise when "
+            "it will land."}
+
+
+# ---------------------------------------------------------------------------
+# Browser-agent bridge — worker side. The VM worker polls with the
+# same shared secret as the dev bridge (env DEV_AGENT_SECRET here, a
+# 0600 config file on the worker VM). The secret is never echoed in
+# any response; when unset, every bridge call fails closed and the
+# chat intent stays dark.
+# ---------------------------------------------------------------------------
+def claim_browse_job(conn: sqlite3.Connection) -> dict | None:
+    """Atomically claim the oldest queued browse job for the worker."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT id FROM browse_jobs WHERE status = 'queued' "
+        "ORDER BY id LIMIT 1").fetchone()
+    if not row:
+        return None
+    cur = conn.execute(
+        "UPDATE browse_jobs SET status = 'claimed', claimed_at = ? "
+        "WHERE id = ? AND status = 'queued'", (_utc_iso(), row[0]))
+    conn.commit()
+    if cur.rowcount == 0:
+        return None  # lost a claim race; worker polls again shortly
+    r = conn.execute(
+        "SELECT id, url, action, question, created_at FROM browse_jobs "
+        "WHERE id = ?", (row[0],)).fetchone()
+    return {"id": r[0], "url": r[1], "action": r[2], "question": r[3],
+            "created_at": r[4]}
+
+
+def _save_browse_image(image_bytes: bytes, image_format: str) -> str:
+    """Save a worker screenshot under /generated (same store the
+    image desk uses); returns its public path."""
+    ext = "jpg" if (image_format or "").lower() in ("jpeg", "jpg") \
+        else "png"
+    os.makedirs(config.GENERATED_DIR, exist_ok=True)
+    filename = "browse-{0}-{1}.{2}".format(
+        datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+        uuid.uuid4().hex[:10], ext)
+    path = os.path.join(config.GENERATED_DIR, filename)
+    with open(path, "wb") as fh:
+        fh.write(image_bytes)
+    return "/generated/" + filename
+
+
+def complete_browse_job(conn: sqlite3.Connection,
+                        payload: dict) -> dict | None:
+    """Record a browser-worker result. Spawns delivery into the
+    owner's chat. Returns the job row, or None when no such claimed
+    job — a duplicate/late result returns the row without
+    re-delivering."""
+    ensure_tables(conn)
+    try:
+        job_id = int(payload.get("job_id"))
+    except (TypeError, ValueError):
+        return None
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in ("done", "failed"):
+        return None
+    row = conn.execute(
+        "SELECT id, user_id, character_id, url, action, question, "
+        "status, title, final_url, result_text, image_url, image_name, "
+        "error, delivered FROM browse_jobs WHERE id = ?",
+        (job_id,)).fetchone()
+    if not row:
+        return None
+    cols = ("id", "user_id", "character_id", "url", "action",
+            "question", "status", "title", "final_url", "result_text",
+            "image_url", "image_name", "error", "delivered")
+    job = dict(zip(cols, row))
+    if job["status"] != "claimed":
+        return job  # already finished (or never claimed): no re-delivery
+    job.update({
+        "status": status,
+        "title": str(payload.get("title") or "")[:300] or None,
+        "final_url": str(payload.get("final_url") or "")[:1000] or None,
+        "result_text": str(payload.get("text") or "")[:_BROWSE_TEXT_CAP]
+                       or None,
+        "error": str(payload.get("error") or "")[:1000] or None,
+    })
+    image_b64 = str(payload.get("image_b64") or "")
+    if status == "done" and image_b64:
+        try:
+            raw = base64.b64decode(image_b64, validate=True)
+        except Exception:
+            raw = b""
+        if raw and len(raw) <= _BROWSE_IMAGE_MAX_BYTES:
+            try:
+                job["image_url"] = _save_browse_image(
+                    raw, str(payload.get("image_format") or ""))
+                host = (urllib.parse.urlparse(
+                    job["final_url"] or job["url"]).hostname
+                    or "page")
+                job["image_name"] = f"{host} screenshot"
+            except Exception:
+                job["image_url"] = None  # text still delivers below
+    conn.execute(
+        "UPDATE browse_jobs SET status = ?, title = ?, final_url = ?, "
+        "result_text = ?, image_url = ?, image_name = ?, error = ?, "
+        "finished_at = ? WHERE id = ? AND status = 'claimed'",
+        (job["status"], job["title"], job["final_url"],
+         job["result_text"], job["image_url"], job.get("image_name"),
+         job["error"], _utc_iso(), job_id))
+    conn.commit()
+    threading.Thread(target=_run_browse_delivery, args=(job,),
+                     daemon=True).start()
+    return job
+
+
+def _browse_result_fallback(job: dict) -> tuple[str, list]:
+    """Deterministic delivery (text, attachments) when the voice call
+    is unavailable — built only from the job's real recorded fields,
+    in Rocky's direct register (he is the agent, not a character
+    performing a part)."""
+    jid = job["id"]
+    attachments: list = []
+    if job["status"] == "failed":
+        why = (job.get("error") or "the page wouldn't load.").strip()
+        return (f"Browser job #{jid} didn't get there — {why}", [])
+    where = job.get("final_url") or job["url"]
+    if job.get("image_url"):
+        attachments = [{"kind": "image", "url": job["image_url"],
+                        "name": job.get("image_name")
+                                or "page screenshot", "size": 0}]
+        return (f"Here's the screenshot of {where} "
+                f"(browser job #{jid}, attached).", attachments)
+    title = (job.get("title") or "").strip()
+    head = f"Done — {title} ({where}):" if title else f"Done — {where}:"
+    body = (job.get("result_text") or "").strip()
+    return (head + ("\n" + body[:1200] if body else ""), attachments)
+
+
+def _voice_browse_result(job: dict) -> str | None:
+    """Rewrite the browser worker's REAL result in Rocky's voice."""
+    name = "Rocky"
+    try:
+        from . import characters as _chars
+        name = (_chars.get_character(job["character_id"], job["user_id"])
+                .get("name") or name)
+    except Exception:
+        pass
+    status_word = {"done": "LOADED", "failed": "FAILED"}.get(
+        job["status"], job["status"])
+    facts = [f"outcome: {status_word}",
+             f"page he asked for: {job['url']}",
+             f"action: {job['action']}"]
+    if job.get("final_url") and job["final_url"] != job["url"]:
+        facts.append(f"it landed on: {job['final_url']}")
+    if job.get("title"):
+        facts.append(f"page title: {job['title']}")
+    if job.get("question"):
+        facts.append(f"what he wants to know: {job['question'][:300]}")
+    if job["status"] == "failed":
+        facts.append(f"what went wrong: {(job.get('error') or '')[:500]}")
+    elif job.get("image_url"):
+        facts.append(
+            "a full-page screenshot of the page is ATTACHED to this "
+            "message. You cannot see it yourself — tell him it's "
+            "attached and name the page; do not describe the image's "
+            "contents beyond its title.")
+    elif job.get("result_text"):
+        facts.append("the page's actual rendered text (the ONLY "
+                     "content you may draw on):\n"
+                     + job["result_text"][:1500])
+    payload = {
+        "system_instruction": {"parts": [{"text":
+            f"You are {name}, his agent, texting him. Your browser "
+            "worker just finished a page load, and these are the "
+            "ONLY true facts about it:\n\n" + "\n".join(facts) +
+            "\n\nBring him the result as your own message: direct, "
+            "short, no fluff. If he asked a question, answer it ONLY "
+            "from the page text above. Failed means say so plainly "
+            "with the reason. Never claim you personally browsed "
+            "anything — the worker loaded the page; you queued it "
+            "and you're bringing him the outcome. Add NOTHING that "
+            "is not in the facts."}]},
+        "contents": [{"role": "user", "parts": [
+            {"text": "what did the page say?"}]}],
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 500},
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+             "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HARASSMENT",
+             "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH",
+             "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+             "threshold": "BLOCK_ONLY_HIGH"},
+        ],
+    }
+    data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=45,
+                                 source="whispr-browser-bridge")
+    if not data:
+        return None
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts
+                       if p.get("text")).strip()
+        return text or None
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _run_browse_delivery(job: dict) -> None:
+    """Background: deliver a browser result as Rocky's follow-up
+    message. Claims the delivery slot first so a duplicate result
+    post can never double-deliver."""
+    try:
+        conn = db.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE browse_jobs SET delivered = 1 WHERE id = ? "
+                "AND delivered = 0", (job["id"],))
+            conn.commit()
+            claimed = cur.rowcount > 0
+        finally:
+            conn.close()
+        if not claimed:
+            return
+        text = _voice_browse_result(job)
+        attachments: list = []
+        if job.get("image_url"):
+            attachments = [{"kind": "image", "url": job["image_url"],
+                            "name": job.get("image_name")
+                                    or "page screenshot", "size": 0}]
+        if not text:
+            text, attachments = _browse_result_fallback(job)
+        conn = db.connect()
+        try:
+            store.log_turn(conn, job["user_id"], job["character_id"],
+                           text, job["character_id"], attachments)
+        except Exception:
+            conn2 = db.connect()
+            try:
+                conn2.execute(
+                    "UPDATE browse_jobs SET delivered = 0 WHERE id = ?",
+                    (job["id"],))
+                conn2.commit()
+            finally:
+                conn2.close()
+            raise
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    print(f"[assist] browse job #{job['id']} result delivered "
           f"({job['status']})", flush=True)
 
 
@@ -5450,6 +5874,15 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
             return {"brief": _status_brief(conn, character_id)}
         if detect_owner_brief(text):
             return {"brief": _owner_brief_reply(character_id)}
+        # Browser-agent dispatch (owner-only, Rocky's thread only):
+        # "screenshot <site>" / "look at <site> in the browser" queues
+        # a real Chromium job on the owner's VM worker. Deterministic
+        # trigger; a miss just means normal chat.
+        if (character_id or "").strip().lower() == "rocky":
+            bd = detect_browse_request(text)
+            if bd is not None:
+                return _handle_browse_request(conn, user_id,
+                                              character_id, bd)
         # Dev-bridge dispatch: marketing-shaped asks still go to the
         # marketing brief (she writes copy in chat); only a strong
         # build verb sends a marketing-flavored sentence to the queue.

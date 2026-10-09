@@ -454,6 +454,46 @@ def dev_agent_result(body: DevAgentResultIn, request: Request):
     return {"ok": True, "status": job["status"]}
 
 
+class BrowserAgentResultIn(BaseModel):
+    job_id: int
+    status: str
+    title: str = ""
+    final_url: str = ""
+    text: str = ""
+    error: str = ""
+    image_b64: str = ""
+    image_format: str = ""
+
+
+@app.get("/api/v1/browser-agent/poll")
+def browser_agent_poll(request: Request):
+    # Same shared secret as the dev-agent bridge (DEV_AGENT_SECRET);
+    # the VM browser worker is a sibling of the dev agent.
+    if not assist.dev_agent_secret_ok(
+            request.headers.get("x-dev-agent-secret")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    conn = _conn()
+    try:
+        return {"ok": True, "job": assist.claim_browse_job(conn)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/browser-agent/result")
+def browser_agent_result(body: BrowserAgentResultIn, request: Request):
+    if not assist.dev_agent_secret_ok(
+            request.headers.get("x-dev-agent-secret")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    conn = _conn()
+    try:
+        job = assist.complete_browse_job(conn, body.model_dump())
+    finally:
+        conn.close()
+    if job is None:
+        raise HTTPException(status_code=404, detail="no_such_claimed_job")
+    return {"ok": True, "status": job["status"]}
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "chloe-companion", "phase": "3-multichar"}
