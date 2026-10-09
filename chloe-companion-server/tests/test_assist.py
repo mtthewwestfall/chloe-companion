@@ -679,3 +679,237 @@ class AttachmentTest(unittest.TestCase):
             self.assertEqual(history[0]["attachments"][0]["id"], "att_test")
         finally:
             conn.close()
+
+
+class AttachmentVideoTest(unittest.TestCase):
+    """Videos: accepted types, frame sampling, ordered vision brief,
+    audio honesty. Fixtures are real clips built with the same ffmpeg
+    the server samples with (assist._ffmpeg_exe())."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        cls.exe = assist._ffmpeg_exe()
+        if not cls.exe:
+            raise unittest.SkipTest("no ffmpeg toolchain available")
+        cls.fixture_dir = tempfile.mkdtemp(prefix="hannah-vidfix-")
+        cards = os.path.join(cls.fixture_dir, "cards.mp4")
+
+        def run(args):
+            proc = subprocess.run(args, capture_output=True, text=True,
+                                  timeout=120)
+            if proc.returncode != 0:
+                raise unittest.SkipTest(
+                    "ffmpeg fixture build failed: " + proc.stderr[-300:])
+
+        # 6-second clip: blue (2s) -> red (2s) -> green (2s).
+        run([cls.exe, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i",
+             "color=c=0x1d4ed8:size=160x120:duration=2:rate=5",
+             "-f", "lavfi", "-i",
+             "color=c=0xb91c1c:size=160x120:duration=2:rate=5",
+             "-f", "lavfi", "-i",
+             "color=c=0x15803d:size=160x120:duration=2:rate=5",
+             "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[out]",
+             "-map", "[out]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             cards])
+        run([cls.exe, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", cards, "-c", "copy",
+             os.path.join(cls.fixture_dir, "cards.mov")])
+        run([cls.exe, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", cards, "-c:v", "libvpx-vp9", "-b:v", "150k", "-an",
+             os.path.join(cls.fixture_dir, "cards.webm")])
+        # Same clip with an audible tone track (she still can't hear).
+        run([cls.exe, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", cards, "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=6",
+             "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+             "-shortest", os.path.join(cls.fixture_dir, "cards_audio.mp4")])
+        # 30-second clip: the frame budget must not grow with length.
+        run([cls.exe, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i",
+             "color=c=0x334155:size=160x120:duration=30:rate=5",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             os.path.join(cls.fixture_dir, "long.mp4")])
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.fixture_dir, ignore_errors=True)
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        assist.ensure_tables(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_generated = assist.config.GENERATED_DIR
+        assist.config.GENERATED_DIR = self.tmp.name
+        self.old_post = assist._attachment_post
+        self.old_env = {k: os.environ.get(k) for k in (
+            "ASSIST_OWNER_IDS", "HANNAH_VISION_MODEL",
+            "HANNAH_VISION_FALLBACK_MODEL")}
+        os.environ["ASSIST_OWNER_IDS"] = "owner_1"
+        os.environ["HANNAH_VISION_MODEL"] = "gemini-test-vision"
+        os.environ["HANNAH_VISION_FALLBACK_MODEL"] = "gemini-test-vision"
+        self.owner = {"user_id": "owner_1", "tier": "basic"}
+
+    def tearDown(self):
+        assist._attachment_post = self.old_post
+        assist.config.GENERATED_DIR = self.old_generated
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _fixture(self, name):
+        with open(os.path.join(self.fixture_dir, name), "rb") as fh:
+            return fh.read()
+
+    def _save(self, name, mime):
+        return assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", name, mime,
+            self._fixture(name))
+
+    def test_video_types_accepted_and_saved(self):
+        saved = self._save("cards.mp4", "video/mp4")
+        self.assertEqual(saved["kind"], "video")
+        self.assertEqual(saved["extraction_status"], "video")
+        self.assertTrue(saved["url"].endswith(".mp4"))
+        # A poster frame is captured at upload for the thread card.
+        self.assertTrue(saved["poster_url"].endswith(".poster.jpg"))
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        self.assertEqual(row["kind"], "video")
+
+        for name, mime in (("cards.mov", "video/quicktime"),
+                           ("cards.webm", "video/webm")):
+            info = assist.classify_attachment(name, mime,
+                                              self._fixture(name))
+            self.assertEqual(info["kind"], "video")
+            self.assertEqual(info["mime_type"], mime)
+
+    def test_video_validation_and_caps(self):
+        with self.assertRaises(ValueError):
+            assist.save_chat_attachment(
+                self.conn, "owner_1", "hannah", "clip.avi",
+                "video/avi", self._fixture("cards.mp4"))
+        with self.assertRaises(ValueError):
+            assist.save_chat_attachment(
+                self.conn, "owner_1", "hannah", "fake.mp4", "video/mp4",
+                b"this is not really an mp4 file at all")
+        old_cap = assist.ATTACHMENT_VIDEO_MAX_BYTES
+        assist.ATTACHMENT_VIDEO_MAX_BYTES = 8
+        try:
+            with self.assertRaises(ValueError):
+                self._save("cards.mp4", "video/mp4")
+        finally:
+            assist.ATTACHMENT_VIDEO_MAX_BYTES = old_cap
+        # The 10 MB document cap is separate and unchanged.
+        self.assertEqual(assist.ATTACHMENT_MAX_BYTES, 10 * 1024 * 1024)
+
+    def test_frame_sampling_count_order_budget(self):
+        import base64
+        sampled = assist.sample_video_frames(
+            os.path.join(self.fixture_dir, "cards.mp4"))
+        self.assertEqual(sampled["status"], "ok")
+        frames = sampled["frames"]
+        self.assertGreaterEqual(len(frames), 3)
+        self.assertLessEqual(len(frames), assist.ATTACHMENT_VIDEO_FRAMES)
+        stamps = [f["stamp"] for f in frames]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertEqual(stamps[0], 0.0)
+        self.assertLessEqual(stamps[-1], sampled["duration"])
+        for frame in frames:
+            raw = base64.b64decode(frame["data"])
+            self.assertTrue(raw.startswith(b"\xff\xd8"))  # JPEG
+        # First and last frames show different cards.
+        self.assertNotEqual(frames[0]["data"], frames[-1]["data"])
+        self.assertFalse(sampled["has_audio"])
+
+        long_sampled = assist.sample_video_frames(
+            os.path.join(self.fixture_dir, "long.mp4"))
+        self.assertEqual(long_sampled["status"], "ok")
+        self.assertLessEqual(len(long_sampled["frames"]),
+                             assist.ATTACHMENT_VIDEO_FRAMES)
+
+    def test_video_brief_feeds_ordered_frames(self):
+        saved = self._save("cards.mp4", "video/mp4")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        seen = {}
+
+        def fake_post(parts, model):
+            seen["parts"] = parts
+            return {"candidates": [{"content": {"parts": [{
+                "text": "Three title cards in order: blue, red, green."
+            }]}}]}
+
+        assist._attachment_post = fake_post
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "what happens in this?", "hannah",
+            [row])
+        self.assertIn("actually watched", result["brief"])
+        self.assertIn("blue, red, green", result["brief"])
+        self.assertEqual(result["attachment_model"], "gemini-test-vision")
+        inline = [p for p in seen["parts"] if p.get("inlineData")]
+        labels = [p.get("text", "") for p in seen["parts"]
+                  if p.get("text", "").startswith("[Video frame ")]
+        self.assertEqual(len(inline), len(labels))
+        self.assertGreaterEqual(len(labels), 3)
+        numbers = [int(lbl.split("/")[0].rsplit(" ", 1)[1])
+                   for lbl in labels]
+        self.assertEqual(numbers, sorted(numbers))
+        self.assertEqual(numbers[0], 1)
+
+    def test_video_audio_is_honest(self):
+        saved = self._save("cards_audio.mp4", "video/mp4")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        assist._attachment_post = lambda parts, model: {
+            "candidates": [{"content": {"parts": [{
+                "text": "Colored cards, no visible people."}]}}]}
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "what do you hear?", "hannah", [row])
+        self.assertIn("can't hear audio", result["brief"])
+        self.assertIn("muted", result["brief"])
+
+    def test_video_vision_unavailable_is_honest(self):
+        saved = self._save("cards.mp4", "video/mp4")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        assist._attachment_post = lambda parts, model: None
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "watch this", "hannah", [row])
+        self.assertIn("could NOT actually watch the video",
+                      result["brief"])
+        self.assertEqual(result["attachment_status"], "unavailable")
+
+    def test_corrupt_video_rejected_at_upload(self):
+        # Right container magic, garbage inside: ffmpeg finds no video
+        # stream, so the upload fails cleanly instead of mid-chat.
+        bogus = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
+        with self.assertRaises(ValueError) as ctx:
+            assist.save_chat_attachment(
+                self.conn, "owner_1", "hannah", "broken.mp4",
+                "video/mp4", bogus)
+        self.assertIn("playable", str(ctx.exception))
+
+    def test_unreadable_video_is_honest_in_brief(self):
+        saved = self._save("cards.mp4", "video/mp4")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        # Trash the stored bytes after upload (kept the ftyp header so
+        # it still routes as the same attachment record).
+        path = os.path.join(assist._attachment_dir(),
+                            row["storage_name"])
+        with open(path, "wb") as fh:
+            fh.write(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)
+        assist._attachment_post = lambda parts, model: {
+            "candidates": [{"content": {"parts": [{"text": "x"}]}}]}
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "watch this", "hannah", [row])
+        self.assertIn("did not come through as a playable video",
+                      result["brief"])
