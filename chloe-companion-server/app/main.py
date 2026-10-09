@@ -795,7 +795,15 @@ def chat(body: ChatIn, request: Request):
         # explicit action, save it as a preset for this girl's give system.
         _maybe_save_requested_action(conn, cid, body.message)
 
-        if not store.consume_message(conn, user_id):
+        # Owner bypass (2026-10-09): the owner never drains a message bank
+        # and never sees the paywall upsell — the same ASSIST_OWNER_IDS gate
+        # as the media-request owner bypass. Only the lifetime counter
+        # advances (photo-drop cadence); the bank itself is untouched.
+        # Customers take the exact path they always have.
+        is_owner = user_id in assist._owner_ids()
+        if is_owner:
+            store.note_message_sent(conn, user_id)
+        elif not store.consume_message(conn, user_id):
             return _empty_bank_reply(user, character,
                                      unpaid=not store.has_paid(conn, user_id))
 
@@ -831,7 +839,7 @@ def chat(body: ChatIn, request: Request):
         voice_note_url = None
         tier_cfg = config.TIERS[user["tier"]]
         if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
-            if store.consume_voice_note(conn, user_id):
+            if is_owner or store.consume_voice_note(conn, user_id):
                 voice_note_url = voice.maybe_generate_voice_note(
                     reply_text, user_id, character.get("companion_voice") or "liora")
 
