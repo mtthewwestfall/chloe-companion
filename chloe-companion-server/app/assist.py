@@ -39,7 +39,10 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -2951,18 +2954,25 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
 # ---------------------------------------------------------------------------
 # Chat attachments — owner-only Hannah image/file intake (2026-10-09).
 #
-# The owner can attach images plus readable documents to a Hannah
-# message. Images are sent to a free-pool Gemini vision model as
-# inlineData; txt/md/csv/json and PDF/DOCX are text-extracted
+# The owner can attach images, videos, and readable documents to a
+# Hannah message. Images are sent to a free-pool Gemini vision model
+# as inlineData; videos are watched as frames sampled across the clip
+# (ffmpeg, up to ATTACHMENT_VIDEO_FRAMES stills in order) through the
+# same vision path; txt/md/csv/json and PDF/DOCX are text-extracted
 # server-side (pypdf / python-docx) and included in her context.
 # Documents she genuinely cannot read (password-locked, corrupt, or a
-# PDF with no text layer) produce an honest status, never fake content.
-# Uploaded bytes are never sent to a paid key: every model call here
-# uses free_only=True.
+# PDF with no text layer) and videos she cannot open produce an honest
+# status, never fake content. Uploaded bytes are never sent to a paid
+# key: every model call here uses free_only=True.
 # ---------------------------------------------------------------------------
 ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+ATTACHMENT_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+# The upload endpoint reads at most this many bytes before the
+# per-kind cap in save_chat_attachment decides (video is the largest).
+ATTACHMENT_READ_LIMIT = ATTACHMENT_VIDEO_MAX_BYTES
 ATTACHMENT_MAX_PER_MESSAGE = 4
 ATTACHMENT_TEXT_LIMIT = 20000
+ATTACHMENT_VIDEO_FRAMES = 8
 
 _IMAGE_MIME_BY_EXT = {
     ".jpg": "image/jpeg",
@@ -2982,15 +2992,22 @@ _DOC_MIME_BY_EXT = {
     ".docx": ("application/vnd.openxmlformats-officedocument."
               "wordprocessingml.document"),
 }
+_VIDEO_MIME_BY_EXT = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
 _ATTACHMENT_KIND_BY_EXT = {
     **{ext: "image" for ext in _IMAGE_MIME_BY_EXT},
     **{ext: "file" for ext in _TEXT_MIME_BY_EXT},
     **{ext: "file" for ext in _DOC_MIME_BY_EXT},
+    **{ext: "video" for ext in _VIDEO_MIME_BY_EXT},
 }
 _ATTACHMENT_MIME_BY_EXT = {
     **_IMAGE_MIME_BY_EXT,
     **_TEXT_MIME_BY_EXT,
     **_DOC_MIME_BY_EXT,
+    **_VIDEO_MIME_BY_EXT,
 }
 ATTACHMENT_ACCEPTED_EXTS = tuple(sorted(_ATTACHMENT_MIME_BY_EXT))
 _ATTACHMENT_MODEL_URL = ("https://generativelanguage.googleapis.com/"
@@ -3043,6 +3060,10 @@ def _looks_like_attachment(ext: str, data: bytes) -> bool:
         return data.startswith(b"%PDF-")
     if ext == ".docx":
         return data.startswith(b"PK")
+    if ext in (".mp4", ".mov"):
+        return len(data) >= 12 and data[4:8] == b"ftyp"
+    if ext == ".webm":
+        return data.startswith(b"\x1a\x45\xdf\xa3")
     return True
 
 
@@ -3148,6 +3169,11 @@ def extract_attachment_text(filename: str, data: bytes) -> dict:
     pretending she read it.
     """
     ext = os.path.splitext(_sanitize_attachment_name(filename))[1].lower()
+    if ext in _VIDEO_MIME_BY_EXT:
+        # Videos carry no extractable text; Hannah watches sampled
+        # frames instead (see sample_video_frames).
+        return {"text": "", "status": "video", "chars": 0,
+                "truncated": False}
     if ext == ".pdf":
         return _extract_pdf_text(data)
     if ext == ".docx":
@@ -3162,6 +3188,145 @@ def extract_attachment_text(filename: str, data: bytes) -> dict:
     return _cap_extracted(raw)
 
 
+# ---------------------------------------------------------------------------
+# Video watching — frame sampling via ffmpeg (2026-10-09).
+#
+# Hannah cannot play a video; she watches up to ATTACHMENT_VIDEO_FRAMES
+# stills sampled in order across the clip (first frame, evenly spaced,
+# last frame) through the same free-pool vision path as photos. The
+# ffmpeg binary comes from the imageio-ffmpeg wheel in requirements
+# (a static binary pip installs into the deployment image — Nixpacks
+# has no system ffmpeg), with a PATH ffmpeg as a local-dev fallback.
+# She has no way to hear a clip: if it has an audio track the brief
+# says she watched it muted. There is no speech-to-text in this
+# codebase today, so nothing fakes listening.
+# ---------------------------------------------------------------------------
+_FFMPEG_EXE_CACHE: str | None = None
+
+
+def _ffmpeg_exe() -> str | None:
+    """Resolve an ffmpeg binary once per process (None = unavailable)."""
+    global _FFMPEG_EXE_CACHE
+    if _FFMPEG_EXE_CACHE is not None:
+        return _FFMPEG_EXE_CACHE or None
+    exe: str | None = None
+    try:
+        import imageio_ffmpeg
+        candidate = imageio_ffmpeg.get_ffmpeg_exe()
+        if candidate and os.path.exists(candidate):
+            exe = candidate
+    except Exception:
+        exe = None
+    if not exe:
+        exe = shutil.which("ffmpeg")
+    _FFMPEG_EXE_CACHE = exe or ""
+    return exe
+
+
+def _probe_video(path: str) -> dict | None:
+    """Container facts via `ffmpeg -i`. None = no toolchain; a dict
+    with has_video False = ffmpeg could not find a video stream."""
+    exe = _ffmpeg_exe()
+    if not exe:
+        return None
+    try:
+        proc = subprocess.run([exe, "-hide_banner", "-i", path],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    err = proc.stderr or ""
+    duration = None
+    match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", err)
+    if match:
+        duration = (int(match.group(1)) * 3600 + int(match.group(2)) * 60
+                    + float(match.group(3)))
+    return {
+        "duration": duration,
+        "has_video": bool(re.search(r"Stream\s+#\S+:\s*Video:", err)),
+        "has_audio": bool(re.search(r"Stream\s+#\S+:\s*Audio:", err)),
+    }
+
+
+def _grab_frame(exe: str, path: str, stamp: float, out_path: str,
+                width: int) -> bool:
+    try:
+        proc = subprocess.run(
+            [exe, "-hide_banner", "-loglevel", "error",
+             "-ss", f"{max(0.0, stamp):.3f}", "-i", path,
+             "-frames:v", "1", "-vf", f"scale='min({width},iw)':-2",
+             "-q:v", "5", "-y", out_path],
+            capture_output=True, timeout=45)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (proc.returncode == 0 and os.path.exists(out_path)
+            and os.path.getsize(out_path) > 0)
+
+
+def _stamp_label(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def sample_video_frames(path: str,
+                        max_frames: int = ATTACHMENT_VIDEO_FRAMES) -> dict:
+    """Sample up to max_frames JPEG frames in order across the clip.
+
+    Returns {"status": "ok" | "no_toolchain" | "unreadable",
+    "frames": [{"stamp": float, "label": "M:SS", "data": <base64>}],
+    "duration": float | None, "has_audio": bool}. Very long clips get
+    the same frame budget spread wider — never more frames.
+    """
+    exe = _ffmpeg_exe()
+    if not exe:
+        return {"status": "no_toolchain", "frames": [],
+                "duration": None, "has_audio": False}
+    info = _probe_video(path)
+    if not info or not info["has_video"]:
+        return {"status": "unreadable", "frames": [],
+                "duration": None, "has_audio": False}
+    duration = info["duration"] or 0.0
+    if duration > 0 and max_frames > 1:
+        stamps = [duration * i / (max_frames - 1)
+                  for i in range(max_frames)]
+        stamps[-1] = max(0.0, duration - 0.1)
+    else:
+        stamps = [0.0]
+    deduped: list[float] = []
+    for stamp in stamps:
+        if not deduped or stamp - deduped[-1] > 0.05:
+            deduped.append(stamp)
+    frames: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="hannah-frames-") as tmp:
+        for idx, stamp in enumerate(deduped):
+            out = os.path.join(tmp, f"frame-{idx}.jpg")
+            ok = _grab_frame(exe, path, stamp, out, 768)
+            if not ok and stamp > 0.5:
+                ok = _grab_frame(exe, path, stamp - 0.5, out, 768)
+            if not ok:
+                continue
+            try:
+                with open(out, "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            frames.append({
+                "stamp": stamp,
+                "label": _stamp_label(stamp),
+                "data": base64.b64encode(raw).decode("ascii"),
+            })
+    if not frames:
+        return {"status": "unreadable", "frames": [],
+                "duration": info["duration"],
+                "has_audio": info["has_audio"]}
+    return {"status": "ok", "frames": frames,
+            "duration": info["duration"],
+            "has_audio": info["has_audio"]}
+
+
 def _attachment_dir() -> str:
     path = os.path.join(config.GENERATED_DIR, "hannah-uploads")
     os.makedirs(path, exist_ok=True)
@@ -3170,6 +3335,15 @@ def _attachment_dir() -> str:
 
 def public_attachment(record: dict) -> dict:
     """The metadata safe to return to the client and persist on a turn."""
+    poster_url = ""
+    if record.get("kind") == "video":
+        storage_name = record.get("storage_name") or ""
+        if storage_name:
+            poster_path = os.path.join(
+                _attachment_dir(), storage_name + ".poster.jpg")
+            if os.path.exists(poster_path):
+                poster_url = ("/generated/hannah-uploads/" + storage_name
+                              + ".poster.jpg")
     return {
         "id": record.get("id", ""),
         "kind": record.get("kind", "file"),
@@ -3177,6 +3351,7 @@ def public_attachment(record: dict) -> dict:
         "mime_type": record.get("mime_type", ""),
         "size": int(record.get("size") or 0),
         "url": record.get("url", ""),
+        "poster_url": poster_url,
         "extraction_status": record.get("extraction_status", ""),
     }
 
@@ -3186,15 +3361,40 @@ def save_chat_attachment(conn: sqlite3.Connection, user_id: str,
                          content_type: str, data: bytes) -> dict:
     """Persist one owner upload. Returns its public attachment record."""
     ensure_tables(conn)
-    if len(data or b"") > ATTACHMENT_MAX_BYTES:
-        limit_mb = ATTACHMENT_MAX_BYTES // (1024 * 1024)
-        raise ValueError(f"That file is too big — {limit_mb} MB max.")
     info = classify_attachment(filename, content_type, data or b"")
+    cap = (ATTACHMENT_VIDEO_MAX_BYTES if info["kind"] == "video"
+           else ATTACHMENT_MAX_BYTES)
+    if len(data or b"") > cap:
+        limit_mb = cap // (1024 * 1024)
+        raise ValueError(f"That file is too big — {limit_mb} MB max.")
     extracted = extract_attachment_text(info["filename"], data or b"")
     attachment_id = "att_" + uuid.uuid4().hex[:20]
     storage_name = attachment_id + info["ext"]
-    with open(os.path.join(_attachment_dir(), storage_name), "wb") as fh:
+    storage_path = os.path.join(_attachment_dir(), storage_name)
+    with open(storage_path, "wb") as fh:
         fh.write(data or b"")
+    if info["kind"] == "video":
+        # Open it once now: a video ffmpeg cannot find a video stream
+        # in is rejected here so the client shows a clean upload error
+        # instead of Hannah discovering a dead file mid-conversation.
+        # When it opens, keep a poster frame for the thread card. With
+        # no toolchain in this image we accept the file and let the
+        # chat turn report honestly instead of blocking the upload.
+        probe = _probe_video(storage_path)
+        if probe is not None and not probe["has_video"]:
+            try:
+                os.unlink(storage_path)
+            except OSError:
+                pass
+            raise ValueError(
+                "That video doesn't look playable — Hannah couldn't "
+                "open it. Try an mp4, mov, or webm clip.")
+        if probe is not None:
+            exe = _ffmpeg_exe()
+            if exe:
+                stamp = min(0.5, (probe["duration"] or 1.0) / 4)
+                _grab_frame(exe, storage_path, stamp,
+                            storage_path + ".poster.jpg", 480)
     created_at = datetime.now(timezone.utc).isoformat()
     record = {
         "id": attachment_id,
@@ -3309,11 +3509,13 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
                              attachments: list[dict]) -> dict | None:
     """Give Hannah real eyes/context for the attachments on this turn.
 
-    Images go to a free-pool vision model as inlineData. Readable text
-    files are included excerpt-first (first ATTACHMENT_TEXT_LIMIT
-    characters) directly in her brief. Unsupported files and pool
-    failures produce an honest brief — she never claims she saw
-    something she did not.
+    Images go to a free-pool vision model as inlineData. Videos are
+    watched as frames sampled in order across the clip through the
+    same vision call (she sees stills, never hears audio). Readable
+    text files are included excerpt-first (first
+    ATTACHMENT_TEXT_LIMIT characters) directly in her brief.
+    Unsupported files and pool failures produce an honest brief — she
+    never claims she saw something she did not.
     """
     if not attachments:
         return None
@@ -3332,19 +3534,55 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             "His message: " + prompt + "\n\n"
             "Inspect ONLY the attached content included with this "
             "request. For images, actually look at the image data. For "
-            "text files, use the excerpt provided. Transcribe visible "
-            "text exactly, especially prices, names and URLs. Answer "
-            "his request factually and concisely. If something is "
-            "unreadable, say what part is unreadable.")
+            "a video, the stills are frames sampled in order across "
+            "the clip — describe what happens across them in order, "
+            "frame by frame where they differ. For text files, use "
+            "the excerpt provided. Transcribe visible text exactly, "
+            "especially prices, names and URLs. Answer his request "
+            "factually and concisely. If something is unreadable, say "
+            "what part is unreadable.")
     }]
     has_image = False
+    has_video = False
     missing_images: list[str] = []
+    missing_videos: list[str] = []
+    bad_videos: list[tuple[str, str]] = []
+    video_notes: list[dict] = []
     text_sections: list[str] = []
     unsupported: list[str] = []
     unreadable: list[tuple[str, str]] = []
     for record in attachments:
         name = record.get("filename") or "attachment"
-        if record.get("kind") == "image":
+        if record.get("kind") == "video":
+            path = os.path.join(_attachment_dir(),
+                                record.get("storage_name") or "")
+            if not os.path.exists(path):
+                missing_videos.append(name)
+                continue
+            sampled = sample_video_frames(path)
+            if sampled["status"] != "ok":
+                bad_videos.append((name, sampled["status"]))
+                continue
+            has_video = True
+            frames = sampled["frames"]
+            video_notes.append({
+                "name": name,
+                "frame_count": len(frames),
+                "duration": sampled.get("duration"),
+                "has_audio": bool(sampled.get("has_audio")),
+            })
+            parts.append({
+                "text": f"[Attached video: {name} — {len(frames)} "
+                        "frames sampled in order from the clip]"})
+            for idx, frame in enumerate(frames):
+                parts.append({
+                    "text": f"[Video frame {idx + 1}/{len(frames)} "
+                            f"at {frame['label']} from {name}]"})
+                parts.append({"inlineData": {
+                    "mimeType": "image/jpeg",
+                    "data": frame["data"],
+                }})
+        elif record.get("kind") == "image":
             path = os.path.join(_attachment_dir(),
                                 record.get("storage_name") or "")
             try:
@@ -3378,7 +3616,7 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
     analysis = ""
     model_used = ""
     analysis_status = "not_needed"
-    if has_image:
+    if has_image or has_video:
         last: dict = {"status": "unavailable"}
         for model in attachment_models():
             data = _attachment_post(parts, model)
@@ -3399,12 +3637,33 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
     brief_parts = [
         f"He attached {names} to this message for Hannah. The attachment "
         "is visible in his thread."]
-    if analysis:
+    if analysis and has_image:
         brief_parts.append(
             "You actually inspected the image attachment. Factual "
             "vision result:\n" + analysis +
             "\nAnswer his message in your own voice using that result. "
             "Do not invent details beyond it.")
+    if analysis and has_video:
+        watched = "; ".join(
+            f"{note['name']} ({note['frame_count']} frames in order"
+            + (f", full clip {_stamp_label(note['duration'])}"
+               if note["duration"] else "")
+            + ")" for note in video_notes)
+        brief_parts.append(
+            "You actually watched frames sampled in order from the "
+            f"video: {watched}. You saw stills spread across the "
+            "clip, not every second of it. Factual vision result:\n"
+            + analysis +
+            "\nAnswer his message in your own voice from those "
+            "frames, in order. Do not invent moments between frames.")
+        for note in video_notes:
+            if note["has_audio"]:
+                brief_parts.append(
+                    f"{note['name']} has an audio track, but you "
+                    "can't hear audio yet — you watched it muted, "
+                    "frames only. If he asks what was said or what "
+                    "anything sounds like, tell him honestly you "
+                    "can't hear it yet.")
     if text_sections:
         brief_parts.append(
             "You actually received the readable text file content below "
@@ -3417,6 +3676,26 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             + ", ".join(missing_images) +
             ". Say honestly that the upload did not come through "
             "readably; do not pretend you saw them.")
+    if missing_videos:
+        brief_parts.append(
+            "These video files could not be reopened on the server: "
+            + ", ".join(missing_videos) +
+            ". Say honestly that the upload did not come through "
+            "readably; do not pretend you watched them.")
+    for bad_video, video_status in bad_videos:
+        if video_status == "no_toolchain":
+            brief_parts.append(
+                f"{bad_video} arrived fine, but video watching is "
+                "not available on the server right now, so you could "
+                "NOT watch it. Tell him honestly; do not pretend you "
+                "saw it.")
+        else:
+            brief_parts.append(
+                f"{bad_video} did not come through as a playable "
+                "video, so you could NOT watch it. Tell him honestly "
+                "it looks corrupt or unreadable and ask him to send "
+                "it again (mp4 works best); never make up what it "
+                "shows.")
     if has_image and analysis_status == "refused":
         brief_parts.append(
             "The vision reader refused or blocked that image. Tell him "
@@ -3430,6 +3709,20 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
             "not say the upload vanished. Tell him honestly that the "
             "reader is unavailable right now and ask him to send it "
             "again shortly; never claim you saw it.")
+    if has_video and analysis_status == "refused":
+        brief_parts.append(
+            "The vision reader refused or blocked the frames from "
+            "that video. Tell him honestly that you could not watch "
+            "that one; do not guess what it shows.")
+    elif has_video and analysis_status != "ok":
+        brief_parts.append(
+            "The video DID reach the server, but the vision reader "
+            "returned no readable result from its frames, so you "
+            "could NOT actually watch the video this time. Do not "
+            "call it a blank space and do not say the upload "
+            "vanished. Tell him honestly that the reader is "
+            "unavailable right now and ask him to send it again "
+            "shortly; never claim you watched it.")
     for bad_name, bad_status in unreadable:
         if bad_status == "encrypted":
             brief_parts.append(
@@ -3459,8 +3752,9 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
         brief_parts.append(
             "These files were attached and saved, but their text cannot "
             "be extracted: " + ", ".join(unsupported) +
-            ". Tell him plainly Hannah can read images plus "
-            "txt/md/csv/json, PDF and DOCX files today.")
+            ". Tell him plainly Hannah can watch videos as sampled "
+            "frames and read images plus txt/md/csv/json, PDF and "
+            "DOCX files today.")
     return {"brief": "\n\n".join(brief_parts),
             "attachment_model": model_used,
             "attachment_status": analysis_status}
