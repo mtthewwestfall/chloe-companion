@@ -417,6 +417,14 @@ PROFILE_PALETTES: list[dict[str, Any]] = [
                 "early coffee in a bright high-rise apartment before work, "
                 "smart blazer, laptop open on the counter",
                 "coffee before the first meeting, already in work mode"),
+            "gym": (
+                "early session in a quiet gym, focused, headphones in, "
+                "city still asleep outside",
+                "gym before the city wakes up, non-negotiable"),
+            "cooking": (
+                "cooking a real dinner in a sleek apartment kitchen, "
+                "sleeves rolled up, music on",
+                "actually cooking tonight, no takeout"),
             "out_and_about": (
                 "walking between meetings downtown, tailored coat, phone "
                 "in hand, city towers behind",
@@ -455,6 +463,10 @@ PROFILE_PALETTES: list[dict[str, Any]] = [
                 "cooking in a farmhouse kitchen, sleeves rolled up, "
                 "garden vegetables on the counter",
                 "supper from the garden tonight"),
+            "getting_ready": (
+                "pulling on boots and a clean shirt by the farmhouse "
+                "door, ready for a trip to town",
+                "boots on, one trip to town today"),
             "bedtime": (
                 "porch swing at dusk, wrapped in a blanket, last light "
                 "over the fields",
@@ -481,6 +493,14 @@ PROFILE_PALETTES: list[dict[str, Any]] = [
                 "morning run along the shoreline, athletic wear, sand "
                 "and surf in the background",
                 "shoreline miles before the crowds"),
+            "cooking": (
+                "grilling fish on a beach-house deck, sea breeze, "
+                "friends' laughter off-camera",
+                "catch of the day, cooked the simple way"),
+            "getting_ready": (
+                "shaking sand out of everything in a bright beach "
+                "bathroom, easy summer clothes",
+                "rinsing the day off, round two later"),
             "bedtime": (
                 "sitting on the sand at dusk watching the light go, "
                 "cozy hoodie",
@@ -503,6 +523,14 @@ PROFILE_PALETTES: list[dict[str, Any]] = [
                 "wandering a gallery district with a sketchbook, "
                 "stylish casual outfit, street art behind",
                 "out collecting things to steal for the work"),
+            "gym": (
+                "stretching on a mat in a sunlit studio space, "
+                "sketchbook open beside the water bottle",
+                "moving so the ideas unstuck themselves"),
+            "cooking": (
+                "cooking something experimental in a tiny art-covered "
+                "kitchen, tasting as it goes",
+                "tonight's experiment, edible or not"),
             "getting_ready": (
                 "trying on outfits in a cluttered, art-covered room, "
                 "mirror selfie",
@@ -533,6 +561,14 @@ PROFILE_PALETTES: list[dict[str, Any]] = [
                 "meal-prepping in a bright kitchen, protein and greens "
                 "lined up on the counter",
                 "fuel first, everything else after"),
+            "getting_ready": (
+                "tying shoes by the door, training gear on, water "
+                "bottle in hand",
+                "gear on, door, done — no negotiating"),
+            "bedtime": (
+                "foam-rolling on the living-room floor in warm light, "
+                "tomorrow already planned",
+                "recovery counts as training too"),
         },
         "fallback": "strong day, stronger tomorrow",
     },
@@ -555,15 +591,57 @@ def _profile_palette(character: dict[str, Any]) -> dict[str, Any] | None:
     return best
 
 
+# Default personal scenes when no profile palette matches: the stock
+# solo scenes are written for the roster girls, so a user's own
+# character (any gender, any life) gets these neutral everyday ones.
+_DEFAULT_PERSONAL_SCENES: dict[str, tuple[str, str]] = {
+    "morning_coffee": (
+        "morning coffee in a quiet kitchen, comfortable clothes, "
+        "the day just starting",
+        "coffee first, then the day can start"),
+    "gym": (
+        "a good workout in a bright local gym, athletic wear, water "
+        "bottle in hand",
+        "got the workout in, day's already better"),
+    "cooking": (
+        "cooking something simple in a home kitchen, sleeves rolled up",
+        "home cooking tonight, nothing fancy"),
+    "out_and_about": (
+        "out running errands in the neighborhood, casual clothes, "
+        "sun out",
+        "out and about, small errands, good air"),
+    "getting_ready": (
+        "getting ready in front of the bathroom mirror, easy morning "
+        "light",
+        "getting ready, almost human"),
+    "bedtime": (
+        "winding down in a warm living room, lights low, phone down",
+        "winding down, lights low"),
+}
+
+# Text/voice caption briefs for personal sets (the stock ones say
+# "her day" — a user's character can be anybody).
+_PERSONAL_TEXT_DESCS: dict[str, str] = {
+    "voice_rant": "voice note venting about the day",
+    "shower_thought": "a random shower thought from today",
+    "craving": "something they're craving right now",
+}
+
+
 def _personal_moment_def(palette: dict[str, Any] | None, moment_key: str):
     """(post_type, sfw_scene, caption_desc) for a personal-set moment:
     palette override when the palette has one for this key, else the
-    stock moment definition."""
+    neutral personal default for visual moments / neutral brief for
+    text moments. The stock roster scenes stay roster-only."""
     post_type, scene, desc = _moment_def(moment_key)
+    if scene is None:  # text / voice moment
+        return (post_type, None, _PERSONAL_TEXT_DESCS.get(moment_key, desc))
     if palette:
         override = (palette.get("moments") or {}).get(moment_key)
         if override:
-            scene, desc = override
+            return (post_type, override[0], override[1])
+    if moment_key in _DEFAULT_PERSONAL_SCENES:
+        scene, desc = _DEFAULT_PERSONAL_SCENES[moment_key]
     return (post_type, scene, desc)
 
 

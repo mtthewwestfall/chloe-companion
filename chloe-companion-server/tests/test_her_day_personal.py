@@ -163,6 +163,13 @@ class PersonalHerDayTest(unittest.TestCase):
         self.assertTrue(any("high-rise" in (s or "") for s in ceo_scenes))
         self.assertTrue(any("porch" in (s or "") for s in farm_scenes))
         self.assertNotEqual(ceo_scenes, farm_scenes)
+        # No roster stock scene (written for the girls) may leak into a
+        # personal set — palettes and the neutral defaults cover them.
+        stock_scenes = {v[1] for v in her_day.SOLO_MOMENTS.values()}
+        self.assertFalse((ceo_scenes | farm_scenes) & stock_scenes)
+        default_scenes = {her_day._personal_moment_def(None, k)[1]
+                          for k in her_day.SOLO_MOMENTS}
+        self.assertFalse(default_scenes & stock_scenes)
 
     def test_unknown_persona_gets_everyday_default(self):
         palette = her_day._profile_palette(
