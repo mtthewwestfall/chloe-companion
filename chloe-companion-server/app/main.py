@@ -405,6 +405,7 @@ class DevAgentResultIn(BaseModel):
     branch: str | None = None
     summary: str = ""
     detail: str = ""
+    merged_sha: str | None = None
     report: str = ""
 
 

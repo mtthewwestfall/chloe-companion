@@ -82,6 +82,99 @@ class DetectDevBuildTest(EnvMixin):
         self.assertIsNone(assist.detect_dev_build(
             "change my github token please"))
 
+    def test_merge_flag_only_on_explicit_merge_words(self):
+        # Default build ask: branch-only, merge flag off.
+        dv = assist.detect_dev_build(ASK)
+        self.assertIsNotNone(dv)
+        self.assertFalse(dv["merge"])
+        # "fix the deploy script" names a thing to fix — not a ship order.
+        dv = assist.detect_dev_build(
+            "fix the deploy script in the dev-agent repo")
+        self.assertIsNotNone(dv)
+        self.assertFalse(dv["merge"])
+        # Explicit ship order in the ask itself.
+        dv = assist.detect_dev_build(
+            "fix the report formatter in the dev-agent repo and merge it")
+        self.assertIsNotNone(dv)
+        self.assertTrue(dv["merge"])
+        dv = assist.detect_dev_build(
+            "update mtthewwestfall/roof-scout then push to main")
+        self.assertIsNotNone(dv)
+        self.assertTrue(dv["merge"])
+
+    def test_detect_merge_ask(self):
+        self.assertTrue(assist.detect_merge_ask("merge it"))
+        self.assertTrue(assist.detect_merge_ask("ship that branch"))
+        self.assertTrue(assist.detect_merge_ask(
+            "push it to main when you can"))
+        self.assertFalse(assist.detect_merge_ask("fix me a sandwich"))
+        self.assertFalse(assist.detect_merge_ask(
+            "the merge conflict in my roof-scout pull request is "
+            "honestly the most annoying thing this week"))
+
+
+class MergeQueueTest(EnvMixin):
+    """'Let her merge and push' (2026-10-08): merge requests ride the
+    queue as data; the worker enforces the gates."""
+
+    def _finish_build(self, repo="mtthewwestfall/dev-agent",
+                      branch="agent/fix-1"):
+        """A claimed build job completed WITHOUT merge; returns job id."""
+        jid = assist.enqueue_dev_job(self.conn, OWNER, "hannah", repo, ASK)
+        assist.claim_dev_job(self.conn)
+        orig = assist._run_dev_delivery
+        assist._run_dev_delivery = lambda job: None
+        try:
+            assist.complete_dev_job(self.conn, {
+                "job_id": jid, "status": "done", "branch": branch,
+                "summary": "tests pass", "detail": "", "report": "rpt"})
+        finally:
+            assist._run_dev_delivery = orig
+        return jid
+
+    def test_claim_carries_merge_fields(self):
+        src = self._finish_build()
+        out = assist._handle_dev_merge(self.conn, OWNER, "hannah",
+                                       "merge it")
+        self.assertIn("brief", out)
+        job = assist.claim_dev_job(self.conn)
+        self.assertIsNotNone(job)
+        self.assertTrue(job["merge"])
+        self.assertEqual(job["merge_branch"], "agent/fix-1")
+        self.assertEqual(job["repo"], "mtthewwestfall/dev-agent")
+
+    def test_merge_result_marks_source_merged(self):
+        src = self._finish_build()
+        assist._handle_dev_merge(self.conn, OWNER, "hannah", "merge it")
+        job = assist.claim_dev_job(self.conn)
+        orig = assist._run_dev_delivery
+        assist._run_dev_delivery = lambda job: None
+        try:
+            done = assist.complete_dev_job(self.conn, {
+                "job_id": job["id"], "status": "done",
+                "branch": "agent/fix-1", "summary": "merged",
+                "detail": "", "report": "rpt",
+                "merged_sha": "a" * 40})
+        finally:
+            assist._run_dev_delivery = orig
+        self.assertEqual(done["merged_sha"], "a" * 40)
+        # Source build now counts as merged: nothing left to offer.
+        self.assertIsNone(assist.last_mergeable_job(self.conn, OWNER))
+
+    def test_merge_with_nothing_finished_queues_nothing(self):
+        out = assist._handle_dev_merge(self.conn, OWNER, "hannah",
+                                       "merge it")
+        self.assertIn("nothing to merge", out["brief"])
+        self.assertIsNone(assist.claim_dev_job(self.conn))
+
+    def test_build_with_merge_flag_queues_merge(self):
+        jid = assist.enqueue_dev_job(self.conn, OWNER, "hannah",
+                                     "mtthewwestfall/dev-agent", ASK,
+                                     merge=True)
+        job = assist.claim_dev_job(self.conn)
+        self.assertTrue(job["merge"])
+        self.assertIsNone(job["merge_branch"])
+
 
 class QueueLifecycleTest(EnvMixin):
     def test_enqueue_claim_complete(self):

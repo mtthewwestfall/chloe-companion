@@ -149,12 +149,23 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                created_at TEXT NOT NULL,
                claimed_at TEXT,
                finished_at TEXT,
+               merge INTEGER NOT NULL DEFAULT 0,
+               merge_branch TEXT,
+               merged_sha TEXT,
                delivered INTEGER NOT NULL DEFAULT 0)"""
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dev_jobs_status "
         "ON dev_jobs (status, id)"
     )
+    # Merge grant (2026-10-08, owner: "let her merge and push"): rows
+    # queued before the grant predate these columns.
+    dev_cols = {r[1] for r in conn.execute("PRAGMA table_info(dev_jobs)")}
+    for col, ddl in (("merge", "INTEGER NOT NULL DEFAULT 0"),
+                     ("merge_branch", "TEXT"),
+                     ("merged_sha", "TEXT")):
+        if col not in dev_cols:
+            conn.execute(f"ALTER TABLE dev_jobs ADD COLUMN {col} {ddl}")
     conn.commit()
 
 
@@ -634,9 +645,13 @@ anything not covered, ask him — never invent):
   branding inside Roof Rover.
 - Whispr AI: this companion app, $9.99/mo (see the Whispr brief).
 - His builder: when he asks Hannah to build/fix code, she queues a
-  dev-agent job. The builder works ONLY on agent/* branches, never
-  pushes main (allowlist is empty), never deploys production, and
-  reports back through Hannah in chat.
+  dev-agent job. The builder works on agent/* branches by default.
+  Only when he explicitly tells her to merge/push/ship does the job
+  carry a merge request; the builder then merges to main only after
+  checks pass, only for allowlisted repos, fast-forward only (a
+  moved main blocks the merge — never forced). Merging to main on a
+  Railway-connected repo means a production deploy follows. She
+  reports the merged commit or the blocked reason back in chat.
 - AI: every app shares one free Gemini key pool through the
   companion proxy (gemini-3.1-flash-lite). If the pool is saturated,
   apps wait or use honestly-labeled template fallbacks — his cost
@@ -1043,14 +1058,58 @@ def _extract_dev_repo(t: str) -> str | None:
     return None
 
 
+# Merge intent (2026-10-08, owner: "let her merge and push"). A merge
+# is requested ONLY by an explicit merge/push/ship/deploy word — never
+# inferred from a build ask alone, and never by the builder on its own.
+# "fix the deploy script" names a thing to fix, not a ship order, so a
+# merge word immediately followed by a build-noun doesn't count.
+_DEV_MERGE_VERB_RE = re.compile(
+    r"\b(merge|merges|merging|merged|push|pushes|pushing|pushed|"
+    r"ship|ships|shipping|shipped|deploy|deploys|deploying|deployed)\b",
+    re.IGNORECASE)
+_DEV_MERGE_NOUN_RE = re.compile(
+    r"\b(merge|push|ship|deploy)\s+(script|pipeline|config|file|"
+    r"key|command|step|docs?)\b", re.IGNORECASE)
+_DEV_MERGE_OBJ_RE = re.compile(
+    r"\b(merge|push|ship|deploy)\w*\s+"
+    r"(it|that|this|them|the\s+\w*\s*branch|my\s+branch|"
+    r"to\s+(main|prod(uction)?))\b", re.IGNORECASE)
+_DEV_MERGE_TOMAIN_RE = re.compile(
+    r"\b(to|into|onto)\s+(main|prod(uction)?)\b", re.IGNORECASE)
+
+
+def detect_merge_ask(text: str) -> bool:
+    """Explicit owner order to merge/push/ship. The merge word must be
+    there AND point at something ('merge it', 'push to main', 'ship
+    that branch', or a bare imperative like 'merge!'). Talking ABOUT a
+    merge ('the merge conflict ... this week') is not an order, and
+    'fix the deploy script' names a thing to fix. Without an explicit
+    merge word, builds stay branch-only — that default does not move."""
+    t = (text or "").strip()
+    if not t or _DEV_SECRET_GUARD_RE.search(t):
+        return False
+    if not _DEV_MERGE_VERB_RE.search(t):
+        return False
+    if _DEV_MERGE_NOUN_RE.search(t):
+        return False
+    if _DEV_MERGE_OBJ_RE.search(t):
+        return True
+    if _DEV_MERGE_TOMAIN_RE.search(t):
+        return True
+    if t.endswith("?"):
+        return False
+    return len(t.split()) <= 4
+
+
 def detect_dev_build(text: str) -> dict | None:
     """Owner wants the dev builder to change one of his repos.
 
     Conservative on purpose: needs an actual change verb AND a target
     (a named repo, an explicit dev-bot mention, or repo-ish framing).
     A miss just means normal chat — never a fake build. Returns
-    {"repo": name|None, "task": full ask} — repo None means he didn't
-    name it, and the handler asks him one clarifying question.
+    {"repo": name|None, "task": full ask, "merge": bool} — repo None
+    means he didn't name it, and the handler asks him one clarifying
+    question. merge is True only on his explicit merge/push/ship word.
     """
     t = (text or "").strip()
     if not t or not _DEV_BUILD_RE.search(t):
@@ -1066,17 +1125,22 @@ def detect_dev_build(text: str) -> dict | None:
                 or repo in _GH_STOPWORDS or repo in ("repo", "github")):
             repo = None
     if repo or _DEV_BOT_RE.search(t) or _DEV_REPOISH_RE.search(t):
-        return {"repo": repo, "task": t[:1000]}
+        return {"repo": repo, "task": t[:1000],
+                "merge": detect_merge_ask(t)}
     return None
 
 
 def enqueue_dev_job(conn: sqlite3.Connection, user_id: str,
-                    character_id: str, repo: str, task: str) -> int:
+                    character_id: str, repo: str, task: str,
+                    merge: bool = False,
+                    merge_branch: str | None = None) -> int:
     ensure_tables(conn)
     cur = conn.execute(
         "INSERT INTO dev_jobs (user_id, character_id, repo, task, "
-        "status, created_at) VALUES (?, ?, ?, ?, 'queued', ?)",
-        (user_id, character_id, repo, task, _utc_iso()))
+        "status, created_at, merge, merge_branch) "
+        "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)",
+        (user_id, character_id, repo, task, _utc_iso(),
+         1 if merge else 0, merge_branch))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -1092,12 +1156,13 @@ def active_dev_job(conn: sqlite3.Connection, user_id: str, repo: str,
     ensure_tables(conn)
     norm = _dev_task_norm(task)
     rows = conn.execute(
-        "SELECT id, repo, task FROM dev_jobs WHERE user_id = ? "
+        "SELECT id, repo, task, merge FROM dev_jobs WHERE user_id = ? "
         "AND status IN ('queued', 'claimed') ORDER BY id",
         (user_id,)).fetchall()
     for r in rows:
         if r[1] == repo and _dev_task_norm(r[2]) == norm:
-            return {"id": r[0], "repo": r[1], "task": r[2]}
+            return {"id": r[0], "repo": r[1], "task": r[2],
+                    "merge": bool(r[3])}
     return None
 
 
@@ -1130,13 +1195,19 @@ def _handle_dev_build(conn: sqlite3.Connection, user_id: str,
                 "was queued, and you will not pretend otherwise."}
     existing = active_dev_job(conn, user_id, repo_full, dv["task"])
     if existing:
+        extra = ""
+        if dv.get("merge") and not existing.get("merge"):
+            extra = (" He also asked for this one to be merged — the "
+                     "queued job doesn't carry that yet, so tell him "
+                     "once it lands he can just say 'merge it' and "
+                     "you'll have the branch merged then.")
         return {"brief":
                 f"He's asking for the same build you already queued "
                 f"as job #{existing['id']} on his repo '{repo}' — it "
                 "is still with the builder and hasn't reported back "
-                "yet. Tell him it's already in the builder's hands, "
-                "no need to queue it twice. No new claims about its "
-                "progress."}
+                f"yet.{extra} Tell him it's already in the builder's "
+                "hands, no need to queue it twice. No new claims about "
+                "its progress."}
     if active_dev_job_count(conn, user_id) >= _DEV_MAX_ACTIVE:
         return {"brief":
                 "He wants another thing built, but you already have "
@@ -1145,17 +1216,122 @@ def _handle_dev_build(conn: sqlite3.Connection, user_id: str,
                 "sweetly the queue is full and to let those land "
                 "first. Nothing new was queued."}
     jid = enqueue_dev_job(conn, user_id, character_id, repo_full,
-                          dv["task"])
+                          dv["task"], merge=bool(dv.get("merge")))
+    if dv.get("merge"):
+        return {"brief":
+                f"You just REALLY queued build job #{jid} for your dev "
+                f"builder: repo '{repo_full}', task: "
+                f"\"{dv['task'][:200]}\" — AND he explicitly asked for "
+                "it to be merged to main, so the merge request is on "
+                "the job. The builder only merges after its checks "
+                "pass, only into repos cleared for main merges, and "
+                "only if main hasn't moved meanwhile; merging to main "
+                "means a production deploy follows on Railway-"
+                "connected repos. You will bring him the REAL result "
+                "here when it lands — merged commit or the plain "
+                "reason it was blocked. Tell him you're on it, warm "
+                "and brief. Promise NOTHING about outcome or timing; "
+                "invent no file names, commits or progress you haven't "
+                "been given."}
     return {"brief":
             f"You just REALLY queued build job #{jid} for your dev "
             f"builder: repo '{repo_full}', task: "
             f"\"{dv['task'][:200]}\". It is genuinely queued now — "
             "the builder picks jobs up by itself, works on its own "
-            "branch (never main, never live deploys), and you will "
-            "bring him the real result here when it lands. Tell him "
+            "branch (never main unless he explicitly tells you to "
+            "merge, never deploys on its own), and you will bring "
+            "him the real result here when it lands. Tell him "
             "you're on it, warm and brief. Promise NOTHING about the "
             "outcome or timing; invent no file names, branches or "
             "progress you haven't been given."}
+
+
+def last_mergeable_job(conn: sqlite3.Connection, user_id: str,
+                       repo_full: str | None = None) -> dict | None:
+    """His most recent FINISHED builder job whose branch is not merged
+    yet — what a bare 'merge it' refers to."""
+    ensure_tables(conn)
+    q = ("SELECT id, repo, task, branch FROM dev_jobs "
+         "WHERE user_id = ? AND status = 'done' AND branch IS NOT NULL "
+         "AND (merged_sha IS NULL OR merged_sha = '')")
+    args: list = [user_id]
+    if repo_full:
+        q += " AND repo = ?"
+        args.append(repo_full)
+    q += " ORDER BY id DESC LIMIT 1"
+    r = conn.execute(q, args).fetchone()
+    if not r:
+        return None
+    return {"id": r[0], "repo": r[1], "task": r[2], "branch": r[3]}
+
+
+def _handle_dev_merge(conn: sqlite3.Connection, user_id: str,
+                      character_id: str, text: str) -> dict:
+    """Owner said merge/push/ship with no new build attached: merge the
+    branch of his latest finished, unmerged builder job. Same gates as
+    everything else here — the queue row carries merge=1 + merge_branch
+    and the WORKER enforces allowlist + fast-forward-only; she never
+    merges anything herself."""
+    if not dev_agent_secret():
+        return {"brief":
+                "He asked you to have a finished build merged to "
+                "main, but the bridge between you and your builder is "
+                "not wired on your end right now, so you honestly "
+                "cannot queue it. Tell him straight and short: the "
+                "builder link is down on your side, nothing was "
+                "queued, and you will not pretend otherwise."}
+    named = _extract_dev_repo(text)
+    repo_full = None
+    if named:
+        named = _canonical_repo(named.strip().strip("/").lower())
+        if named:
+            repo_full = (named if "/" in named
+                         else f"{_GH_OWNER}/{named}")
+    src = last_mergeable_job(conn, user_id, repo_full)
+    if src is None:
+        scope = f" for repo '{repo_full}'" if repo_full else ""
+        return {"brief":
+                f"He asked you to merge something to main, but there "
+                f"is no finished, unmerged builder job{scope} waiting "
+                "— nothing has landed on a branch that still needs "
+                "merging. Tell him plainly there's nothing to merge "
+                "right now; if he names a build he means something "
+                "else by, to say which one. Nothing was queued."}
+    rows = conn.execute(
+        "SELECT id FROM dev_jobs WHERE user_id = ? "
+        "AND status IN ('queued', 'claimed') AND merge_branch = ?",
+        (user_id, src["branch"])).fetchall()
+    if rows:
+        return {"brief":
+                f"A merge of branch {src['branch']} is already with "
+                f"the builder as job #{rows[0][0]}. Tell him it's "
+                "already in the builder's hands and you'll bring him "
+                "the real result when it lands — merged commit or the "
+                "plain reason it was blocked. Nothing new was queued."}
+    if active_dev_job_count(conn, user_id) >= _DEV_MAX_ACTIVE:
+        return {"brief":
+                "He wants a finished build merged, but you already "
+                f"have three jobs queued or running for him "
+                f"({_DEV_MAX_ACTIVE} is your plate limit). Tell him "
+                "sweetly the queue is full and to let those land "
+                "first. Nothing new was queued."}
+    task = (f"Merge branch {src['branch']} into main (finished builder "
+            f"job #{src['id']}: {src['task'][:80]})")
+    jid = enqueue_dev_job(conn, user_id, character_id, src["repo"], task,
+                          merge=True, merge_branch=src["branch"])
+    return {"brief":
+            f"You just REALLY queued merge job #{jid} for your dev "
+            f"builder: merge branch {src['branch']} of "
+            f"{src['repo']} into main. That branch already passed "
+            "its checks when it was built; the builder merges only "
+            "if the repo is cleared for main merges and only as a "
+            "clean fast-forward — if main has moved it stops and "
+            "says so, never forcing anything. Merging to main means "
+            "a production deploy follows on Railway-connected "
+            "repos. You will bring him the REAL outcome here when "
+            "it lands — the merged commit or the plain blocked "
+            "reason. Tell him you're on it, warm and brief; promise "
+            "nothing about timing."}
 
 
 # ---------------------------------------------------------------------------
@@ -1190,9 +1366,10 @@ def claim_dev_job(conn: sqlite3.Connection) -> dict | None:
     if cur.rowcount == 0:
         return None  # lost a claim race; worker polls again shortly
     r = conn.execute(
-        "SELECT id, repo, task, created_at FROM dev_jobs WHERE id = ?",
-        (row[0],)).fetchone()
-    return {"id": r[0], "repo": r[1], "task": r[2], "created_at": r[3]}
+        "SELECT id, repo, task, created_at, merge, merge_branch "
+        "FROM dev_jobs WHERE id = ?", (row[0],)).fetchone()
+    return {"id": r[0], "repo": r[1], "task": r[2], "created_at": r[3],
+            "merge": bool(r[4]), "merge_branch": r[5]}
 
 
 def complete_dev_job(conn: sqlite3.Connection,
@@ -1212,30 +1389,43 @@ def complete_dev_job(conn: sqlite3.Connection,
         return None
     row = conn.execute(
         "SELECT id, user_id, character_id, repo, task, status, branch, "
-        "summary, detail, report, delivered FROM dev_jobs WHERE id = ?",
-        (job_id,)).fetchone()
+        "summary, detail, report, delivered, merged_sha, merge, "
+        "merge_branch FROM dev_jobs WHERE id = ?", (job_id,)).fetchone()
     if not row:
         return None
     cols = ("id", "user_id", "character_id", "repo", "task", "status",
-            "branch", "summary", "detail", "report", "delivered")
+            "branch", "summary", "detail", "report", "delivered",
+            "merged_sha", "merge", "merge_branch")
     job = dict(zip(cols, row))
     if job["status"] != "claimed":
         return job  # already finished (or never claimed): no re-delivery
+    merged_sha = (str(payload.get("merged_sha") or "").strip()[:64]
+                  or None)
     conn.execute(
         "UPDATE dev_jobs SET status = ?, branch = ?, summary = ?, "
-        "detail = ?, report = ?, finished_at = ? "
+        "detail = ?, report = ?, finished_at = ?, merged_sha = ? "
         "WHERE id = ? AND status = 'claimed'",
         (status, (str(payload.get("branch") or ""))[:200] or None,
          str(payload.get("summary") or "")[:4000],
          str(payload.get("detail") or "")[:2000],
          str(payload.get("report") or "")[:60000],
-         _utc_iso(), job_id))
+         _utc_iso(), merged_sha, job_id))
+    if merged_sha and job.get("merge_branch"):
+        # A merge-only job finishing marks its SOURCE build merged too,
+        # so a later bare "merge it" moves on instead of re-offering
+        # the same branch.
+        conn.execute(
+            "UPDATE dev_jobs SET merged_sha = ? WHERE user_id = ? "
+            "AND branch = ? AND status = 'done' "
+            "AND (merged_sha IS NULL OR merged_sha = '')",
+            (merged_sha, job["user_id"], job["merge_branch"]))
     conn.commit()
     job.update({"status": status,
                 "branch": (str(payload.get("branch") or ""))[:200] or None,
                 "summary": str(payload.get("summary") or "")[:4000],
                 "detail": str(payload.get("detail") or "")[:2000],
-                "report": str(payload.get("report") or "")[:60000]})
+                "report": str(payload.get("report") or "")[:60000],
+                "merged_sha": merged_sha})
     threading.Thread(target=_run_dev_delivery, args=(job,),
                      daemon=True).start()
     return job
@@ -1250,14 +1440,19 @@ def _dev_result_fallback(job: dict) -> str:
     if job["status"] == "done":
         head = (f"done, babe — that build on {repo} actually finished. "
                 f"\"{task}\"")
-        if job.get("branch"):
+        if job.get("merged_sha"):
+            head += (f" and it got MERGED to main at "
+                     f"{job['merged_sha'][:8]} — merged to main means "
+                     "a production deploy follows on Railway-"
+                     "connected repos.")
+        elif job.get("branch"):
             head += f" it's sitting on branch {job['branch']}."
         tail = f" {summary}" if summary else ""
         return head + tail + (f" (builder job #{jid} — the full report "
                               "is saved on my end.)")
     if job["status"] == "blocked":
-        return (f"I'm stuck on that one, babe — the build on {repo} "
-                f"stopped before it could start. {detail or summary} "
+        return (f"I'm stuck on that one, babe — that job on {repo} "
+                f"got blocked. {detail or summary} "
                 "tell me how you want to handle it.")
     return (f"that build didn't land, babe — \"{task}\" on {repo} ran "
             f"out of tries. {summary or detail} nothing fake about it.")
@@ -1279,6 +1474,13 @@ def _voice_dev_result(job: dict) -> str | None:
              f"what he asked for: {job['task'][:300]}"]
     if job.get("branch"):
         facts.append(f"branch it worked on: {job['branch']}")
+    if job.get("merged_sha"):
+        facts.append(
+            f"IT WAS MERGED to main at commit {job['merged_sha']} — "
+            "merged to main means a production deploy will follow on "
+            "Railway-connected repos. Tell him it merged and that "
+            "the deploy follows; do not say it is live until the "
+            "detail says so.")
     if job.get("summary"):
         facts.append(f"what actually happened: {job['summary'][:1200]}")
     if job.get("detail"):
@@ -1290,7 +1492,9 @@ def _voice_dev_result(job: dict) -> str | None:
             "the ONLY true facts about it:\n\n" + "\n".join(facts) +
             "\n\nBring him the result as your own message: warm, "
             "direct, short texts. Done means tell him what landed and "
-            "the branch; failed or blocked means say so plainly, say "
+            "the branch — and if the facts say it was MERGED to main, "
+            "say exactly that with the commit; failed or blocked means "
+            "say so plainly, say "
             "what the detail says is needed, and never dress it up. "
             "Never claim YOU personally wrote, committed or deployed "
             "anything — the builder did the work; you queued it and "
@@ -1756,6 +1960,10 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
             return {"brief": _marketing_brief(mk["product"])}
         if dv is not None:
             return _handle_dev_build(conn, user_id, character_id, dv)
+        # Merge-only order ("merge it", "ship that branch"): no new
+        # build attached — merge his latest finished, unmerged job.
+        if detect_merge_ask(text):
+            return _handle_dev_merge(conn, user_id, character_id, text)
     intent, args = detect_intent(text)
     if not intent:
         return None
