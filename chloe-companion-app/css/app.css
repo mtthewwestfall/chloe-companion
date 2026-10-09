@@ -267,6 +267,9 @@ body {
 .attachment-card img {
   width: 100%; max-height: 240px; object-fit: cover; display: block;
 }
+.attachment-card video {
+  width: 100%; max-height: 320px; display: block; background: #000;
+}
 .attachment-card.file {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
 }
