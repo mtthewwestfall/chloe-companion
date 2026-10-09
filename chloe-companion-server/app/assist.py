@@ -527,8 +527,42 @@ _GH_IN_RE = re.compile(r"\bin\s+(?:my\s+)?([A-Za-z][\w.-]{1,60})\b",
 _GH_STOPWORDS = {"the", "my", "this", "that", "your", "his", "her", "their",
                  "our", "it", "there", "here", "bed", "trouble"}
 
+# His real repos under mtthewwestfall (canonical GitHub names). Chat
+# arrives squashed or spaced — "roofscout", "roof scout" — and the
+# queue takes the name verbatim, so a spoken squash 404s on GitHub and
+# the job blocks (live 2026-10-08: his storage ask queued the
+# nonexistent "roofscout"). Canonicalize ONLY on an exact squash match
+# (name with separators stripped) against this table; anything else
+# passes through untouched — never a guessed repo.
+_GH_KNOWN_REPOS = (
+    "roof-scout", "chloe-companion", "dev-agent", "Sorority-house",
+    "Creator-bot-telegram", "creator-bot", "Keyhole-site",
+    "Thoughtspace", "Telegram-Bot", "gods-town", "OntheFarm",
+    "gemini-key-manager", "the-devinatorbot", "bot-reverse-engineer",
+    "mia-bot", "snaptap", "Godprint", "godtown2", "castagne",
+)
 
-def _extract_repo(text: str) -> str | None:
+
+def _repo_squash(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+_GH_REPO_ALIASES = {_repo_squash(n): n for n in _GH_KNOWN_REPOS}
+
+
+def _canonical_repo(name: str | None) -> str | None:
+    """Real repo name for a chatted one, or the name unchanged.
+
+    Exact squash match against _GH_KNOWN_REPOS ("roofscout" ->
+    "roof-scout"); no match returns the input byte-identical, so an
+    unknown name still surfaces as itself (queue -> GitHub says no ->
+    honest blocked reply), never as a silently guessed repo."""
+    if not name:
+        return name
+    return _GH_REPO_ALIASES.get(_repo_squash(name), name)
+
+
+def _extract_repo_raw(text: str) -> str | None:
     """Best-effort repo name out of a chat sentence ('roof scout repo'
     -> 'roof-scout'). None when he didn't name one."""
     t = text or ""
@@ -550,6 +584,11 @@ def _extract_repo(text: str) -> str | None:
     return None
 
 
+def _extract_repo(text: str) -> str | None:
+    """Extracted name, canonicalized — see _canonical_repo."""
+    return _canonical_repo(_extract_repo_raw(text))
+
+
 def detect_github_review(text: str) -> dict | None:
     """Does he want a real look at one of his repos? Narrow on purpose:
     a miss just means normal chat, never a fake review."""
@@ -566,7 +605,7 @@ def detect_github_review(text: str) -> dict | None:
     if m and "." not in m.group(1) and re.search(
             r"\b(look|check|review|audit|scan|find|inspect|dig|broken|"
             r"wrong)\b", t, re.IGNORECASE):
-        return {"repo": m.group(2)}
+        return {"repo": _canonical_repo(m.group(2))}
     return None
 
 
@@ -832,6 +871,7 @@ def detect_dev_build(text: str) -> dict | None:
     repo = _extract_dev_repo(t)
     if repo is not None:
         repo = repo.strip().strip("/").lower()
+        repo = _canonical_repo(repo)
         if (not re.fullmatch(r"[a-z0-9][\w.-]{0,99}", repo)
                 or repo in _GH_STOPWORDS or repo in ("repo", "github")):
             repo = None
