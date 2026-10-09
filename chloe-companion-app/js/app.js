@@ -149,6 +149,8 @@
     const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[1];
     currentGirl = girl;
     $('chatName').textContent = girl.name;
+    clearPendingAttachments();
+    $('attachBtn').classList.toggle('hidden', girl.id !== 'hannah');
     startAvatarCycle();
     // day divider + encryption note
     chatLog.innerHTML = '';
@@ -175,7 +177,10 @@
         hasHistory = turns.length > 0;
         turns.forEach(t => {
           const who = t.role === 'user' ? 'him' : 'her';
-          addText(who, t.text || '');
+          if (Array.isArray(t.attachments) && t.attachments.length) {
+            addAttachments(who, t.attachments);
+          }
+          if ((t.text || '').trim()) addText(who, t.text || '');
         });
         scrollBottom();
       } catch (e) {}
@@ -320,15 +325,200 @@
     scrollBottom();
   }
 
+  /* ---------- Hannah attachments ---------- */
+
+  const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+  const ATTACHMENT_MAX_PER_MESSAGE = 4;
+  const ATTACHMENT_EXTS = new Set([
+    'jpg', 'jpeg', 'png', 'webp', 'gif',
+    'txt', 'md', 'csv', 'json', 'pdf', 'docx',
+  ]);
+  let pendingAttachments = [];
+  let attachmentUploadsInFlight = 0;
+
+  const escAttr = (s) => esc(String(s || '')).replace(/"/g, '&quot;');
+
+  function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function attachmentIcon(att) {
+    const name = (att.name || att.filename || '').toLowerCase();
+    if (att.kind === 'image') return '🖼️';
+    if (name.endsWith('.pdf')) return '📕';
+    if (name.endsWith('.docx')) return '📘';
+    if (name.endsWith('.csv')) return '📊';
+    if (name.endsWith('.json')) return '🧾';
+    return '📄';
+  }
+
+  function attachmentCard(att) {
+    const name = att.name || att.filename || 'attachment';
+    const url = att.url || att.previewUrl || '';
+    if (att.kind === 'image' && url) {
+      return `
+        <div class="attachment-card image">
+          <img src="${escAttr(url)}" alt="${escAttr(name)}">
+          <div class="attachment-meta"><span>${esc(name)}</span><small>${formatBytes(att.size)}</small></div>
+        </div>`;
+    }
+    const unreadable = att.extraction_status === 'unsupported'
+      ? '<small class="attachment-note">stored — Hannah can’t read this type yet</small>' : '';
+    return `
+      <div class="attachment-card file">
+        <div class="attachment-icon">${attachmentIcon(att)}</div>
+        <div class="attachment-meta"><span>${esc(name)}</span><small>${formatBytes(att.size)}</small>${unreadable}</div>
+      </div>`;
+  }
+
+  function addAttachments(who, attachments) {
+    if (!Array.isArray(attachments) || !attachments.length) return;
+    const wrap = addMsg(who, '', {
+      bubbleClass: 'attachment-bubble',
+      caption: who === 'her' ? currentGirl.name + ' · ' + timeNow() : timeNow(),
+    });
+    wrap.firstChild.innerHTML = attachments.map(attachmentCard).join('');
+    scrollBottom();
+  }
+
+  function renderAttachmentPreview() {
+    const box = $('attachmentPreview');
+    if (!pendingAttachments.length) {
+      box.innerHTML = '';
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    box.innerHTML = pendingAttachments.map((entry) => {
+      const att = entry.attachment || {
+        kind: entry.kind,
+        name: entry.file.name,
+        size: entry.file.size,
+        url: entry.previewUrl,
+        extraction_status: entry.extraction_status,
+      };
+      const state = entry.status === 'uploading'
+        ? '<small class="attachment-note">uploading…</small>'
+        : (entry.status === 'error'
+          ? `<small class="attachment-error">${esc(entry.error || 'upload failed')}</small>` : '');
+      return `
+        <div class="attachment-chip ${entry.status}">
+          ${attachmentCard(att)}
+          ${state}
+          <button class="attachment-remove" data-remove="${entry.localId}" aria-label="Remove attachment">✕</button>
+        </div>`;
+    }).join('');
+    box.querySelectorAll('[data-remove]').forEach((btn) => {
+      btn.addEventListener('click', () => removePendingAttachment(btn.dataset.remove));
+    });
+    scrollBottom();
+  }
+
+  function removePendingAttachment(localId) {
+    const idx = pendingAttachments.findIndex((entry) => entry.localId === localId);
+    if (idx < 0) return;
+    const [entry] = pendingAttachments.splice(idx, 1);
+    if (entry.previewUrl && entry.previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(entry.previewUrl);
+    }
+    renderAttachmentPreview();
+  }
+
+  function clearPendingAttachments() {
+    pendingAttachments.forEach((entry) => {
+      if (entry.previewUrl && entry.previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(entry.previewUrl);
+      }
+    });
+    pendingAttachments = [];
+    attachmentUploadsInFlight = 0;
+    renderAttachmentPreview();
+  }
+
+  async function uploadPendingAttachment(entry) {
+    attachmentUploadsInFlight++;
+    renderAttachmentPreview();
+    try {
+      const attachment = await ApiClient.uploadChatAttachment(entry.file, 'hannah');
+      entry.attachment = attachment;
+      entry.status = 'ready';
+      entry.extraction_status = attachment.extraction_status;
+    } catch (e) {
+      entry.status = 'error';
+      entry.error = e.message || 'upload failed';
+      showToast(entry.error, 3600);
+    } finally {
+      attachmentUploadsInFlight = Math.max(0, attachmentUploadsInFlight - 1);
+      renderAttachmentPreview();
+    }
+  }
+
+  async function onAttachmentsPicked(files) {
+    if (currentGirl.id !== 'hannah') {
+      showToast('Attachments are only on Hannah’s chat right now', 3200);
+      return;
+    }
+    const picked = Array.from(files || []);
+    for (const file of picked) {
+      if (pendingAttachments.length >= ATTACHMENT_MAX_PER_MESSAGE) {
+        showToast('Four attachments max per message', 3200);
+        break;
+      }
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+      if (!ATTACHMENT_EXTS.has(ext)) {
+        showToast('Hannah can take images, txt/md/csv/json, pdf, or docx', 3600);
+        continue;
+      }
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        showToast('That file is too big — 10 MB max', 3200);
+        continue;
+      }
+      const entry = {
+        localId: 'local-' + Date.now() + '-' + Math.random().toString(16).slice(2),
+        file,
+        kind: ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext) ? 'image' : 'file',
+        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : '',
+        status: 'uploading',
+        extraction_status: '',
+      };
+      pendingAttachments.push(entry);
+      renderAttachmentPreview();
+      uploadPendingAttachment(entry);
+    }
+  }
+
+  $('attachBtn').addEventListener('click', () => $('attachmentInput').click());
+  $('attachmentInput').addEventListener('change', (e) => {
+    onAttachmentsPicked(e.target.files);
+    e.target.value = '';
+  });
+
   /* ---------- chat flow ---------- */
 
   let sending = false;
 
   async function sendMessage(text) {
     text = (text || '').trim();
-    if (!text || sending) return;
+    if (sending) return;
+    if (attachmentUploadsInFlight > 0) {
+      showToast('Wait for the upload to finish', 2600);
+      return;
+    }
+    const readyAttachments = pendingAttachments
+      .filter((entry) => entry.status === 'ready' && entry.attachment)
+      .map((entry) => entry.attachment);
+    if (pendingAttachments.some((entry) => entry.status === 'error')) {
+      showToast('Remove the failed upload before sending', 3200);
+      return;
+    }
+    if (!text && !readyAttachments.length) return;
     sending = true;
-    addText('him', text);
+    if (readyAttachments.length) addAttachments('him', readyAttachments);
+    if (text) addText('him', text);
+    clearPendingAttachments();
     msgInput.value = '';
     typingRow.classList.remove('hidden');
     scrollBottom();
@@ -337,7 +527,8 @@
     await new Promise((r) => setTimeout(r, 900 + Math.random() * 900));
 
     try {
-      const res = await ApiClient.chat(text, currentGirl.id);
+      const res = await ApiClient.chat(
+        text, currentGirl.id, readyAttachments.map((att) => att.id));
       typingRow.classList.add('hidden');
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);

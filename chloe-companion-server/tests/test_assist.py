@@ -343,3 +343,207 @@ class ImageGenerationTest(unittest.TestCase):
         self.assertIn("free image keys are resting", result["brief"])
         gate = assist.image_gate(self.conn, "owner_1", now_epoch=2001)
         self.assertEqual(gate["attempts"], 1)
+
+
+class AttachmentTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        assist.ensure_tables(self.conn)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_generated = assist.config.GENERATED_DIR
+        assist.config.GENERATED_DIR = self.tmp.name
+        self.old_post = assist._attachment_post
+        self.old_env = {k: os.environ.get(k) for k in (
+            "ASSIST_OWNER_IDS", "HANNAH_VISION_MODEL",
+            "HANNAH_VISION_FALLBACK_MODEL")}
+        os.environ["ASSIST_OWNER_IDS"] = "owner_1"
+        os.environ["HANNAH_VISION_MODEL"] = "gemini-test-vision"
+        os.environ["HANNAH_VISION_FALLBACK_MODEL"] = "gemini-test-vision"
+        self.owner = {"user_id": "owner_1", "tier": "basic"}
+        self.png = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+
+    def tearDown(self):
+        assist._attachment_post = self.old_post
+        assist.config.GENERATED_DIR = self.old_generated
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_save_and_scope_attachments(self):
+        image = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "promo.png", "image/png",
+            self.png)
+        self.assertEqual(image["kind"], "image")
+        self.assertTrue(image["url"].startswith(
+            "/generated/hannah-uploads/att_"))
+        rows = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [image["id"]])
+        self.assertEqual(rows[0]["filename"], "promo.png")
+        with self.assertRaises(ValueError):
+            assist.get_chat_attachments(
+                self.conn, "someone_else", "hannah", [image["id"]])
+        with self.assertRaises(ValueError):
+            assist.get_chat_attachments(
+                self.conn, "owner_1", "chloe", [image["id"]])
+
+    def test_upload_validation(self):
+        with self.assertRaises(ValueError):
+            assist.save_chat_attachment(
+                self.conn, "owner_1", "hannah", "payload.exe",
+                "application/octet-stream", b"MZ")
+        with self.assertRaises(ValueError):
+            assist.save_chat_attachment(
+                self.conn, "owner_1", "hannah", "fake.png",
+                "image/png", b"not-a-png")
+        old_max = assist.ATTACHMENT_MAX_BYTES
+        assist.ATTACHMENT_MAX_BYTES = 4
+        try:
+            with self.assertRaises(ValueError):
+                assist.save_chat_attachment(
+                    self.conn, "owner_1", "hannah", "notes.txt",
+                    "text/plain", b"12345")
+        finally:
+            assist.ATTACHMENT_MAX_BYTES = old_max
+
+    def test_text_extraction_and_truncation(self):
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "notes.md", "text/markdown",
+            ("alpha " * 10).encode())
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        self.assertEqual(row["extraction_status"], "ok")
+        self.assertIn("alpha", row["extracted_text"])
+
+        old_limit = assist.ATTACHMENT_TEXT_LIMIT
+        assist.ATTACHMENT_TEXT_LIMIT = 5
+        try:
+            extracted = assist.extract_attachment_text(
+                "long.txt", b"123456789")
+        finally:
+            assist.ATTACHMENT_TEXT_LIMIT = old_limit
+        self.assertEqual(extracted["text"], "12345")
+        self.assertEqual(extracted["chars"], 9)
+        self.assertTrue(extracted["truncated"])
+
+    def test_text_file_brief_includes_content_without_vision_call(self):
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "brief.txt", "text/plain",
+            b"Alpha bravo. The secret word is pineapple.")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+
+        def forbidden(parts, model):
+            raise AssertionError("text-only files must not call vision")
+
+        assist._attachment_post = forbidden
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "summarize this", "hannah", [row])
+        self.assertIn("pineapple", result["brief"])
+        self.assertEqual(result["attachment_status"], "not_needed")
+
+    def test_image_brief_uses_inline_vision(self):
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "promo.png", "image/png",
+            self.png)
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        seen = {}
+
+        def fake_post(parts, model):
+            seen["parts"] = parts
+            seen["model"] = model
+            return {"candidates": [{"content": {"parts": [{
+                "text": "It says $4.99 PER LEAD and tryroofrover.com/store."
+            }]}}]}
+
+        assist._attachment_post = fake_post
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "what does this say?", "hannah", [row])
+        self.assertIn("$4.99 PER LEAD", result["brief"])
+        self.assertEqual(result["attachment_model"], "gemini-test-vision")
+        inline = [p.get("inlineData") for p in seen["parts"]
+                  if p.get("inlineData")]
+        self.assertEqual(len(inline), 1)
+        self.assertEqual(inline[0]["mimeType"], "image/png")
+
+    def test_mixed_image_and_text_parts(self):
+        image = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "promo.png", "image/png",
+            self.png)
+        note = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "notes.txt", "text/plain",
+            b"Alpha bravo.")
+        rows = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [image["id"], note["id"]])
+        seen = {}
+
+        def fake_post(parts, model):
+            seen["parts"] = parts
+            return {"candidates": [{"content": {"parts": [{
+                "text": "A promo image."}]}}]}
+
+        assist._attachment_post = fake_post
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "use both", "hannah", rows)
+        all_text = "\n".join(p.get("text", "") for p in seen["parts"])
+        self.assertIn("Alpha bravo", all_text)
+        self.assertIn("A promo image", result["brief"])
+
+    def test_vision_unavailable_is_honest(self):
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "promo.png", "image/png",
+            self.png)
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        assist._attachment_post = lambda parts, model: None
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "what is this?", "hannah", [row])
+        self.assertIn("could NOT actually inspect", result["brief"])
+        self.assertEqual(result["attachment_status"], "unavailable")
+
+    def test_pdf_is_stored_but_not_read(self):
+        saved = assist.save_chat_attachment(
+            self.conn, "owner_1", "hannah", "report.pdf",
+            "application/pdf", b"%PDF-fake")
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "hannah", [saved["id"]])[0]
+        self.assertEqual(row["extraction_status"], "unsupported")
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "read this", "hannah", [row])
+        self.assertIn("not readable", result["brief"])
+
+    def test_message_attachment_limit(self):
+        ids = []
+        for idx in range(5):
+            saved = assist.save_chat_attachment(
+                self.conn, "owner_1", "hannah", f"n{idx}.txt",
+                "text/plain", b"x")
+            ids.append(saved["id"])
+        with self.assertRaises(ValueError):
+            assist.get_chat_attachments(
+                self.conn, "owner_1", "hannah", ids)
+
+    def test_history_persists_attachment_metadata(self):
+        from app import db, store
+        path = os.path.join(self.tmp.name, "history.db")
+        db.init_db(path)
+        conn = db.connect(path)
+        try:
+            attachment = {"id": "att_test", "kind": "image",
+                          "name": "promo.png", "url": "/generated/x.png",
+                          "mime_type": "image/png", "size": 12,
+                          "extraction_status": ""}
+            turn_id = store.log_turn(
+                conn, "owner_1", "user", "what does this say?", "hannah",
+                attachments=[attachment])
+            self.assertGreater(turn_id, 0)
+            history = store.conversation_history(
+                conn, "owner_1", character_id="hannah")
+            self.assertEqual(history[0]["attachments"][0]["id"], "att_test")
+        finally:
+            conn.close()

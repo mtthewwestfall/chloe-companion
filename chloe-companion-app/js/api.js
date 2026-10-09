@@ -58,7 +58,7 @@ const ApiClient = (() => {
     return connected;
   }
 
-  async function chat(message, characterId) {
+  async function chat(message, characterId, attachmentIds) {
     // Real chat — requires login token. No demo fallback: if it fails,
     // the caller shows the reconnect message.
     // Chat generation can take a while when the Gemini key pool is
@@ -67,9 +67,29 @@ const ApiClient = (() => {
     const data = await request('POST', '/api/v1/chat', {
       message,
       character_id: characterId || 'chloe',
+      attachment_ids: attachmentIds || [],
     }, 120000);
     setConnected(true);
     return data;
+  }
+
+  async function uploadChatAttachment(file, characterId) {
+    const form = new FormData();
+    form.append('character_id', characterId || 'hannah');
+    form.append('file', file);
+    const token = localStorage.getItem('whispr_token') || '';
+    const headers = {};
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const resp = await withTimeout(fetch(
+      CONFIG.API_BASE_URL + '/api/v1/chat/attachments',
+      { method: 'POST', headers, body: form }), 120000);
+    let data = null;
+    try { data = await resp.json(); } catch (e) {}
+    if (!resp.ok) {
+      throw new Error((data && data.detail) || ('upload failed (' + resp.status + ')'));
+    }
+    setConnected(true);
+    return data.attachment;
   }
 
   async function me() {
@@ -156,6 +176,6 @@ const ApiClient = (() => {
     return resp;
   }
 
-  return { probe, chat, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, createCompanion, onStatus, isConnected: () => connected };
+  return { probe, chat, uploadChatAttachment, me, shows, characters, requestPreset, requestCustomVideo, customVideos, herDay, herDayView, herDayGenerate, publicHerDay, createCompanion, onStatus, isConnected: () => connected };
 })();
 

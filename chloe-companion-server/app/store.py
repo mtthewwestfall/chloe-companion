@@ -479,20 +479,35 @@ def delete_all_memories(conn: sqlite3.Connection, user_id: str,
 # Conversation log (per user, for recall of "last conversation")
 # ---------------------------------------------------------------------------
 def log_turn(conn: sqlite3.Connection, user_id: str, role: str, text: str,
-             character_id: str = "chloe") -> None:
-    conn.execute(
-        "INSERT INTO conversation (user_id, character_id, role, text) VALUES (?, ?, ?, ?)",
-        (user_id, character_id, role, text),
+             character_id: str = "chloe",
+             attachments: list[dict[str, Any]] | None = None) -> int:
+    cur = conn.execute(
+        "INSERT INTO conversation (user_id, character_id, role, text, attachments) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (user_id, character_id, role, text,
+         json.dumps(attachments or [], separators=(",", ":"))),
     )
     conn.commit()
+    return int(cur.lastrowid)
+
+
+def _turn_dict(row: sqlite3.Row) -> dict[str, Any]:
+    d = dict(row)
+    try:
+        attachments = json.loads(d.get("attachments") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        attachments = []
+    d["attachments"] = attachments if isinstance(attachments, list) else []
+    return d
 
 
 def recent_turns(conn: sqlite3.Connection, user_id: str, limit: int = 12,
                  character_id: str = "chloe") -> list[dict[str, Any]]:
     return [
-        dict(r)
+        _turn_dict(r)
         for r in conn.execute(
-            "SELECT role, text FROM conversation WHERE user_id = ? AND character_id = ? "
+            "SELECT role, text, attachments FROM conversation "
+            "WHERE user_id = ? AND character_id = ? "
             "ORDER BY id DESC LIMIT ?",
             (user_id, character_id, limit),
         ).fetchall()
@@ -505,9 +520,9 @@ def conversation_history(conn: sqlite3.Connection, user_id: str, limit: int = 50
     timestamps. Backs GET /api/v1/chat/history — this is what keeps the chat
     from resetting on every login."""
     return [
-        dict(r)
+        _turn_dict(r)
         for r in conn.execute(
-            "SELECT role, text, created_at FROM conversation "
+            "SELECT role, text, created_at, attachments FROM conversation "
             "WHERE user_id = ? AND character_id = ? "
             "ORDER BY id DESC LIMIT ?",
             (user_id, character_id, limit),

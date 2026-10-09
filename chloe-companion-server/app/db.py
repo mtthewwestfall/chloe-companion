@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS conversation (
     character_id TEXT NOT NULL DEFAULT 'chloe',
     role       TEXT NOT NULL,   -- user | <character_id>
     text       TEXT NOT NULL,
+    attachments TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_user ON conversation(user_id);
@@ -529,6 +530,16 @@ def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_conversation_attachments(conn: sqlite3.Connection) -> None:
+    """2026-10-09: chat turns can carry image/file attachments."""
+    if _table_exists(conn, "conversation") and not _column_exists(
+            conn, "conversation", "attachments"):
+        conn.execute(
+            "ALTER TABLE conversation ADD COLUMN attachments "
+            "TEXT NOT NULL DEFAULT '[]'")
+    conn.commit()
+
+
 def _migrate_girl_media_stage(conn: sqlite3.Connection) -> None:
     """Give stages (2026-10-06): add stage column to girl_media."""
     try:
@@ -564,6 +575,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_creator_columns(conn)
         _migrate_owner_column(conn)
         _migrate_referral_columns(conn)
+        _migrate_conversation_attachments(conn)
         _migrate_girl_media_stage(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)

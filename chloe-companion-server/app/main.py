@@ -66,7 +66,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -90,8 +90,9 @@ WELCOME_LINE = ("Well hello there handsome, did it hurt when you fell from "
 # ---------------------------------------------------------------------------
 class ChatIn(BaseModel):
     user_id: str = ""  # legacy: ignored — the Bearer token identifies the user
-    message: str
+    message: str = ""
     character_id: str = "chloe"
+    attachment_ids: list[str] = []
 
 
 class UserIdIn(BaseModel):
@@ -770,6 +771,37 @@ def auth_telegram(body: dict):
     finally:
         conn.close()
 
+@app.post("/api/v1/chat/attachments")
+async def upload_chat_attachment(request: Request,
+                                 character_id: str = Form("hannah"),
+                                 file: UploadFile = File(...)):
+    """Owner-only Hannah attachment intake.
+
+    The file is validated, size-capped, stored under /generated/
+    hannah-uploads, and returned as metadata the client then binds to
+    one chat message via attachment_ids. Text extraction happens at
+    upload time in app.assist; images are inspected on the chat turn.
+    """
+    user_id = _current_user_id(request)
+    cid = (character_id or "").strip().lower()
+    if cid != "hannah" or user_id not in assist._owner_ids():
+        raise HTTPException(status_code=403,
+                            detail="attachments are owner-only for Hannah")
+    data = await file.read(assist.ATTACHMENT_MAX_BYTES + 1)
+    conn = _conn()
+    try:
+        store.get_or_create_user(conn, user_id)
+        try:
+            attachment = assist.save_chat_attachment(
+                conn, user_id, cid, file.filename or "attachment",
+                file.content_type or "", data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "attachment": attachment}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/chat")
 
 def chat(body: ChatIn, request: Request):
@@ -782,7 +814,33 @@ def chat(body: ChatIn, request: Request):
         cid = character["id"]
 
         user = store.get_or_create_user(conn, user_id)
-        store.log_turn(conn, user_id, "user", body.message, cid)
+        attachment_records: list[dict[str, Any]] = []
+        public_attachments: list[dict[str, Any]] = []
+        if body.attachment_ids:
+            if cid != "hannah" or user_id not in assist._owner_ids():
+                raise HTTPException(
+                    status_code=403,
+                    detail="attachments are owner-only for Hannah")
+            try:
+                attachment_records = assist.get_chat_attachments(
+                    conn, user_id, cid, body.attachment_ids)
+            except ValueError as exc:
+                raise HTTPException(status_code=400,
+                                    detail=str(exc)) from exc
+            public_attachments = [
+                assist.public_attachment(record)
+                for record in attachment_records
+            ]
+
+        message_text = body.message or ""
+        effective_message = message_text.strip() or (
+            "What do you see in this?" if attachment_records else "")
+        turn_id = store.log_turn(conn, user_id, "user", message_text, cid,
+                                 attachments=public_attachments)
+        if attachment_records:
+            assist.mark_chat_attachments_used(
+                conn, [record["id"] for record in attachment_records],
+                turn_id)
 
         # Referral activation (2026-10-06): check if this message activates
         # a pending referral (3 messages + email verified)
@@ -815,24 +873,30 @@ def chat(body: ChatIn, request: Request):
         # Brain context: 3-layer memory stack (recent turns -> rolling
         # digest -> pinned facts + relevant memories) + trust posture line.
         # Memory is namespaced per character: each one remembers separately.
-        context = brain.build_brain_context(conn, user_id, user, body.message,
-                                            character)
+        context = brain.build_brain_context(conn, user_id, user,
+                                            effective_message, character)
 
         # Assistant capabilities ("her hands"): web search, reminders, email
         # drafts, job lookup. Tier-gated, owner-only until rollout. Never
         # raises — fail open. Credential rule: user logins never touch us;
         # they live on the user's device (see js/assist.js).
-        assist_hit = assist.maybe_assist(conn, user, body.message, cid)
+        if attachment_records:
+            assist_hit = assist.maybe_assist(
+                conn, user, effective_message, cid,
+                attachments=attachment_records)
+        else:
+            assist_hit = assist.maybe_assist(
+                conn, user, effective_message, cid)
         if assist_hit and assist_hit.get("brief"):
             context["assist_result"] = assist_hit["brief"]
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
-        reply_text = brain.compose_reply(body.message, context, cid)
+        reply_text = brain.compose_reply(effective_message, context, cid)
         store.log_turn(conn, user_id, cid, reply_text, cid)
 
         # Slower brain path: learn durable typed memories from his message
         # and refresh the rolling digest. Runs after the reply is sent.
-        brain.learn_from_turn(conn, user_id, body.message, cid)
+        brain.learn_from_turn(conn, user_id, effective_message, cid)
 
         # Voice note: stubbed/disabled by default -> null. Uses the
         # character's xAI voice (Chloe: liora).
@@ -860,6 +924,7 @@ def chat(body: ChatIn, request: Request):
             "photo_url": photo_url,
             "messages_remaining": user["messages_remaining"],
             "character_id": cid,
+            "attachments": public_attachments,
         }
         # Email drafts are composed server-side but created on the user's
         # device (Gmail API from the browser) — the token never reaches us.

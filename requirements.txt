@@ -1,6 +1,7 @@
 fastapi>=0.115
 uvicorn>=0.30
 pydantic>=2
+python-multipart>=0.0.9
 # Media requests (2026-10-01): server-side Sogni generation.
 sogni-client>=5.56
 websockets>=14

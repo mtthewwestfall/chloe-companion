@@ -143,6 +143,32 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
                value TEXT NOT NULL,
                updated_at TEXT)"""
     )
+    # Owner chat attachments for Hannah (2026-10-09). Files live under
+    # GENERATED_DIR/hannah-uploads and are served via /generated/...;
+    # this table keeps ownership, message binding and extracted text.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS chat_attachments (
+               id TEXT PRIMARY KEY,
+               user_id TEXT NOT NULL,
+               character_id TEXT NOT NULL DEFAULT 'hannah',
+               filename TEXT NOT NULL,
+               mime_type TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               size INTEGER NOT NULL,
+               url TEXT NOT NULL,
+               storage_name TEXT NOT NULL,
+               extracted_text TEXT NOT NULL DEFAULT '',
+               extraction_status TEXT NOT NULL DEFAULT '',
+               extracted_chars INTEGER NOT NULL DEFAULT 0,
+               truncated INTEGER NOT NULL DEFAULT 0,
+               conversation_id INTEGER,
+               created_at TEXT NOT NULL,
+               used_at TEXT)"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_attachments_user "
+        "ON chat_attachments (user_id, character_id, created_at)"
+    )
     # Dev-agent bridge (2026-10-08): owner build jobs Hannah queues for
     # the dev agent to claim over the authenticated poll endpoint.
     conn.execute(
@@ -2162,16 +2188,420 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
                      "image is attached."}
 
 
-def maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
-                 character_id: str) -> dict | None:
+# ---------------------------------------------------------------------------
+# Chat attachments — owner-only Hannah image/file intake (2026-10-09).
+#
+# The owner can attach images plus readable text documents to a Hannah
+# message. Images are sent to a free-pool Gemini vision model as
+# inlineData; txt/md/csv/json are extracted server-side and included in
+# her context. PDF/DOCX may be attached and shown in the thread, but no
+# text extractor is bundled, so she says plainly that she cannot read
+# those yet instead of pretending. Uploaded bytes are never sent to a
+# paid key: every model call here uses free_only=True.
+# ---------------------------------------------------------------------------
+ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+ATTACHMENT_MAX_PER_MESSAGE = 4
+ATTACHMENT_TEXT_LIMIT = 20000
+
+_IMAGE_MIME_BY_EXT = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+_TEXT_MIME_BY_EXT = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+}
+_STORED_ONLY_MIME_BY_EXT = {
+    ".pdf": "application/pdf",
+    ".docx": ("application/vnd.openxmlformats-officedocument."
+              "wordprocessingml.document"),
+}
+_ATTACHMENT_KIND_BY_EXT = {
+    **{ext: "image" for ext in _IMAGE_MIME_BY_EXT},
+    **{ext: "file" for ext in _TEXT_MIME_BY_EXT},
+    **{ext: "file" for ext in _STORED_ONLY_MIME_BY_EXT},
+}
+_ATTACHMENT_MIME_BY_EXT = {
+    **_IMAGE_MIME_BY_EXT,
+    **_TEXT_MIME_BY_EXT,
+    **_STORED_ONLY_MIME_BY_EXT,
+}
+ATTACHMENT_ACCEPTED_EXTS = tuple(sorted(_ATTACHMENT_MIME_BY_EXT))
+_ATTACHMENT_MODEL_URL = ("https://generativelanguage.googleapis.com/"
+                         "v1beta/models/{model}:generateContent")
+
+
+def attachment_models() -> list[str]:
+    """Vision models in probe order (at most two, free pool only)."""
+    models = [os.environ.get("HANNAH_VISION_MODEL", "gemini-2.5-flash"),
+              os.environ.get("HANNAH_VISION_FALLBACK_MODEL",
+                             "gemini-2.0-flash")]
+    out: list[str] = []
+    for model in models:
+        model = (model or "").strip()
+        if model and model not in out:
+            out.append(model)
+    return out[:2]
+
+
+def _sanitize_attachment_name(filename: str) -> str:
+    name = os.path.basename((filename or "attachment").replace("\\", "/"))
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name).strip() or "attachment"
+    return name[:120]
+
+
+def _looks_like_attachment(ext: str, data: bytes) -> bool:
+    if ext in (".jpg", ".jpeg"):
+        return data.startswith(b"\xff\xd8\xff")
+    if ext == ".png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext == ".gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if ext == ".webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    if ext == ".pdf":
+        return data.startswith(b"%PDF-")
+    if ext == ".docx":
+        return data.startswith(b"PK")
+    return True
+
+
+def classify_attachment(filename: str, content_type: str = "",
+                        data: bytes = b"") -> dict:
+    """Validate a prospective upload and return its normalized type.
+
+    Raises ValueError with a user-facing message; the upload endpoint
+    turns that into a 400 and the client shows it instead of failing
+    quietly.
+    """
+    name = _sanitize_attachment_name(filename)
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _ATTACHMENT_MIME_BY_EXT:
+        accepted = ", ".join(ATTACHMENT_ACCEPTED_EXTS)
+        raise ValueError(
+            "Hannah can take images and files of these types: " + accepted)
+    if data and not _looks_like_attachment(ext, data):
+        raise ValueError(f"That file does not look like a real {ext} file.")
+    return {"filename": name, "ext": ext,
+            "kind": _ATTACHMENT_KIND_BY_EXT[ext],
+            "mime_type": _ATTACHMENT_MIME_BY_EXT[ext]}
+
+
+def extract_attachment_text(filename: str, data: bytes) -> dict:
+    """Extract readable text from txt/md/csv/json uploads.
+
+    Returns the text to put in Hannah's context (truncated at
+    ATTACHMENT_TEXT_LIMIT with the truncation recorded, never silent).
+    PDF/DOCX return status="unsupported": accepted and displayed, but
+    not readable by her yet.
+    """
+    ext = os.path.splitext(_sanitize_attachment_name(filename))[1].lower()
+    if ext in _STORED_ONLY_MIME_BY_EXT:
+        return {"text": "", "status": "unsupported", "chars": 0,
+                "truncated": False}
+    if ext not in _TEXT_MIME_BY_EXT:
+        return {"text": "", "status": "image", "chars": 0,
+                "truncated": False}
     try:
-        return _maybe_assist(conn, user, text, character_id)
+        raw = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("That text file is not valid UTF-8 text.") from exc
+    raw = raw.replace("\x00", "")
+    return {"text": raw[:ATTACHMENT_TEXT_LIMIT], "status": "ok",
+            "chars": len(raw),
+            "truncated": len(raw) > ATTACHMENT_TEXT_LIMIT}
+
+
+def _attachment_dir() -> str:
+    path = os.path.join(config.GENERATED_DIR, "hannah-uploads")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def public_attachment(record: dict) -> dict:
+    """The metadata safe to return to the client and persist on a turn."""
+    return {
+        "id": record.get("id", ""),
+        "kind": record.get("kind", "file"),
+        "name": record.get("filename") or record.get("name") or "attachment",
+        "mime_type": record.get("mime_type", ""),
+        "size": int(record.get("size") or 0),
+        "url": record.get("url", ""),
+        "extraction_status": record.get("extraction_status", ""),
+    }
+
+
+def save_chat_attachment(conn: sqlite3.Connection, user_id: str,
+                         character_id: str, filename: str,
+                         content_type: str, data: bytes) -> dict:
+    """Persist one owner upload. Returns its public attachment record."""
+    ensure_tables(conn)
+    if len(data or b"") > ATTACHMENT_MAX_BYTES:
+        limit_mb = ATTACHMENT_MAX_BYTES // (1024 * 1024)
+        raise ValueError(f"That file is too big — {limit_mb} MB max.")
+    info = classify_attachment(filename, content_type, data or b"")
+    extracted = extract_attachment_text(info["filename"], data or b"")
+    attachment_id = "att_" + uuid.uuid4().hex[:20]
+    storage_name = attachment_id + info["ext"]
+    with open(os.path.join(_attachment_dir(), storage_name), "wb") as fh:
+        fh.write(data or b"")
+    created_at = datetime.now(timezone.utc).isoformat()
+    record = {
+        "id": attachment_id,
+        "user_id": user_id,
+        "character_id": character_id or "hannah",
+        "filename": info["filename"],
+        "mime_type": info["mime_type"],
+        "kind": info["kind"],
+        "size": len(data or b""),
+        "url": "/generated/hannah-uploads/" + storage_name,
+        "storage_name": storage_name,
+        "extracted_text": extracted["text"],
+        "extraction_status": extracted["status"],
+        "extracted_chars": extracted["chars"],
+        "truncated": 1 if extracted["truncated"] else 0,
+        "created_at": created_at,
+        "used_at": None,
+        "conversation_id": None,
+    }
+    conn.execute(
+        """INSERT INTO chat_attachments
+           (id, user_id, character_id, filename, mime_type, kind, size,
+            url, storage_name, extracted_text, extraction_status,
+            extracted_chars, truncated, conversation_id, created_at,
+            used_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (record["id"], record["user_id"], record["character_id"],
+         record["filename"], record["mime_type"], record["kind"],
+         record["size"], record["url"], record["storage_name"],
+         record["extracted_text"], record["extraction_status"],
+         record["extracted_chars"], record["truncated"],
+         record["conversation_id"], record["created_at"],
+         record["used_at"]))
+    conn.commit()
+    return public_attachment(record)
+
+
+def get_chat_attachments(conn: sqlite3.Connection, user_id: str,
+                         character_id: str,
+                         attachment_ids: list[str]) -> list[dict]:
+    """Fetch uploaded attachments for one message, owner-scoped."""
+    ensure_tables(conn)
+    ids: list[str] = []
+    for raw in attachment_ids or []:
+        value = str(raw or "").strip()
+        if value and value not in ids:
+            ids.append(value)
+    if len(ids) > ATTACHMENT_MAX_PER_MESSAGE:
+        raise ValueError(
+            f"Too many attachments — {ATTACHMENT_MAX_PER_MESSAGE} max "
+            "per message.")
+    records: list[dict] = []
+    for attachment_id in ids:
+        row = conn.execute(
+            "SELECT * FROM chat_attachments WHERE id=? AND user_id=? "
+            "AND character_id=?", (attachment_id, user_id, character_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("One of those attachments could not be found.")
+        records.append(dict(row))
+    return records
+
+
+def mark_chat_attachments_used(conn: sqlite3.Connection,
+                               attachment_ids: list[str],
+                               conversation_id: int) -> None:
+    if not attachment_ids:
+        return
+    used_at = datetime.now(timezone.utc).isoformat()
+    conn.executemany(
+        "UPDATE chat_attachments SET conversation_id=?, used_at=? "
+        "WHERE id=?",
+        [(conversation_id, used_at, attachment_id)
+         for attachment_id in attachment_ids])
+    conn.commit()
+
+
+def _attachment_post(parts: list[dict], model: str) -> dict | None:
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1200},
+    }
+    return gemini_keys.post_json(
+        _ATTACHMENT_MODEL_URL.format(model=model), payload, timeout=60,
+        source="hannah-attachments", free_only=True, max_attempts=1)
+
+
+def _extract_attachment_analysis(data: dict | None) -> dict:
+    """Pull the factual text out of a vision generateContent response."""
+    if not isinstance(data, dict):
+        return {"status": "unavailable"}
+    feedback = data.get("promptFeedback") or {}
+    if feedback.get("blockReason"):
+        return {"status": "refused",
+                "detail": str(feedback.get("blockReason"))[:200]}
+    texts: list[str] = []
+    for candidate in data.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            if isinstance(part, dict) and part.get("text"):
+                texts.append(str(part["text"]).strip())
+        if candidate.get("finishReason") in ("SAFETY", "PROHIBITED_CONTENT"):
+            detail = " ".join(texts)[:300] or str(candidate["finishReason"])
+            return {"status": "refused", "detail": detail}
+    if texts:
+        return {"status": "ok", "text": "\n".join(texts).strip()}
+    return {"status": "unavailable"}
+
+
+def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
+                             text: str, character_id: str,
+                             attachments: list[dict]) -> dict | None:
+    """Give Hannah real eyes/context for the attachments on this turn.
+
+    Images go to a free-pool vision model as inlineData. Readable text
+    files are included excerpt-first (first ATTACHMENT_TEXT_LIMIT
+    characters) directly in her brief. Unsupported files and pool
+    failures produce an honest brief — she never claims she saw
+    something she did not.
+    """
+    if not attachments:
+        return None
+    user_id = user.get("user_id", "")
+    if (character_id or "").strip().lower() != "hannah" \
+            or user_id not in _owner_ids():
+        return {"brief": "He tried to send an attachment, but that lane "
+                         "is only wired for Hannah. Tell him plainly "
+                         "this chat cannot take files yet."}
+
+    names = ", ".join((a.get("filename") or "attachment")
+                      for a in attachments)
+    prompt = (text or "").strip() or "What do you see in this?"
+    parts: list[dict] = [{
+        "text": (
+            "His message: " + prompt + "\n\n"
+            "Inspect ONLY the attached content included with this "
+            "request. For images, actually look at the image data. For "
+            "text files, use the excerpt provided. Transcribe visible "
+            "text exactly, especially prices, names and URLs. Answer "
+            "his request factually and concisely. If something is "
+            "unreadable, say what part is unreadable.")
+    }]
+    has_image = False
+    missing_images: list[str] = []
+    text_sections: list[str] = []
+    unsupported: list[str] = []
+    for record in attachments:
+        name = record.get("filename") or "attachment"
+        if record.get("kind") == "image":
+            path = os.path.join(_attachment_dir(),
+                                record.get("storage_name") or "")
+            try:
+                with open(path, "rb") as fh:
+                    image_bytes = fh.read()
+            except OSError:
+                missing_images.append(name)
+                continue
+            has_image = True
+            parts.append({"text": f"[Attached image: {name}]"})
+            parts.append({"inlineData": {
+                "mimeType": record.get("mime_type") or "image/jpeg",
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            }})
+        elif record.get("extraction_status") == "ok":
+            shown = int(record.get("extracted_chars") or 0)
+            limit_note = (
+                f"first {ATTACHMENT_TEXT_LIMIT} of {shown} characters"
+                if record.get("truncated") else f"all {shown} characters")
+            section = (f"[Attached file: {name} — {limit_note}]\n"
+                       + (record.get("extracted_text") or ""))
+            text_sections.append(section)
+            parts.append({"text": section})
+        else:
+            unsupported.append(name)
+
+    analysis = ""
+    model_used = ""
+    analysis_status = "not_needed"
+    if has_image:
+        last: dict = {"status": "unavailable"}
+        for model in attachment_models():
+            data = _attachment_post(parts, model)
+            result = _extract_attachment_analysis(data)
+            result["model"] = model
+            if result["status"] == "ok":
+                analysis = result["text"]
+                model_used = model
+                analysis_status = "ok"
+                last = result
+                break
+            last = result
+            if result["status"] == "refused":
+                break
+        if analysis_status != "ok":
+            analysis_status = last.get("status", "unavailable")
+
+    brief_parts = [
+        f"He attached {names} to this message for Hannah. The attachment "
+        "is visible in his thread."]
+    if analysis:
+        brief_parts.append(
+            "You actually inspected the image attachment. Factual "
+            "vision result:\n" + analysis +
+            "\nAnswer his message in your own voice using that result. "
+            "Do not invent details beyond it.")
+    if text_sections:
+        brief_parts.append(
+            "You actually received the readable text file content below "
+            "(already extracted for you):\n" + "\n\n".join(text_sections) +
+            "\nAnswer from that text. If it was truncated, say you read "
+            f"the first {ATTACHMENT_TEXT_LIMIT} characters.")
+    if missing_images:
+        brief_parts.append(
+            "These image files could not be reopened on the server: "
+            + ", ".join(missing_images) +
+            ". Say honestly that the upload did not come through "
+            "readably; do not pretend you saw them.")
+    if has_image and analysis_status == "refused":
+        brief_parts.append(
+            "The vision reader refused or blocked that image. Tell him "
+            "honestly that you could not read that one; do not guess "
+            "what it shows.")
+    elif has_image and analysis_status != "ok":
+        brief_parts.append(
+            "The free vision keys are resting or unavailable, so you "
+            "could NOT actually inspect the image this time. Tell him "
+            "honestly and ask him to send it again shortly; never claim "
+            "you saw it.")
+    if unsupported:
+        brief_parts.append(
+            "These files were attached and saved, but their text cannot "
+            "be extracted yet: " + ", ".join(unsupported) +
+            ". Tell him plainly Hannah can read images and "
+            "txt/md/csv/json today; pdf/docx are stored but not readable "
+            "by her yet.")
+    return {"brief": "\n\n".join(brief_parts),
+            "attachment_model": model_used,
+            "attachment_status": analysis_status}
+
+
+def maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
+                 character_id: str, attachments: list[dict] | None = None) -> dict | None:
+    try:
+        return _maybe_assist(conn, user, text, character_id,
+                             attachments=attachments)
     except Exception:
         return None
 
 
 def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
-                  character_id: str) -> dict | None:
+                  character_id: str,
+                  attachments: list[dict] | None = None) -> dict | None:
     user_id = user.get("user_id", "")
     tier = user.get("tier") or "free"
     if not enabled_for(user_id, tier):
@@ -2190,6 +2620,9 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if token:
             return _handle_github_token_intake(conn, user_id,
                                                character_id, token)
+        if attachments:
+            return analyze_chat_attachments(conn, user, text,
+                                            character_id, attachments)
         image_prompt = detect_image_request(text)
         if image_prompt is not None:
             return _handle_image_request(conn, user_id, character_id,
