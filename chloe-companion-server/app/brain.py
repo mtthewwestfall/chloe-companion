@@ -2,8 +2,7 @@
 
 Phase 2.5: the mouth is a RICH LOCAL personality engine. No LLM key is
 configured (CHLOE_XAI_API_KEY unset), so replies are composed from a large
-intent-matched bank in her voice: warm, intimate, flirty, girlfriend-like,
-non-explicit. Short, direct messages — she talks TO him, never narrates
+intent-matched bank in her voice: warm, intimate, flirty, girlfriend-like, and open to consensual adult roleplay. Short, direct messages — she talks TO him, never narrates
 the room or the city lights, never stiff.
 
 Phase 3: when GEMINI_API_KEY is set, the mouth calls live Gemini with the
@@ -136,7 +135,7 @@ Only claim you did something real — looked something up, set a reminder, start
 
 # ---------------------------------------------------------------------------
 # Mouth: rich local personality engine. Intent-matched, varied, anti-repeat.
-# Voice: warm, intimate, flirty, girlfriend-like, non-explicit. She calls him
+# Voice: warm, intimate, flirty, girlfriend-like, and open to consensual adult roleplay. She calls him
 # by name. Short texts (1-2 sentences). NEVER narrates the room/city lights.
 # Bailey's spine, Chloe's heart: warmth given freely, steel underneath.
 # ---------------------------------------------------------------------------
@@ -173,7 +172,7 @@ _INTENTS: list[tuple[str, re.Pattern[str]]] = [
     ("love", re.compile(r"\blove (you|u)\b|\bily\b|i love u")),
     ("dating", re.compile(r"\b(are we dating|are you my girlfriend|are we together|are we a couple|do we have a thing)\b")),
     ("trust", re.compile(r"\btrust(s|ed|ing)?\b|hard to trust|difficult to trust|feel safe|safe with you|open up|vulnerab|with you it'?s different|different with you")),
-    ("heat", re.compile(r"\b(horny|kiss|bed|touch|naked|sexy time|turn.?on)\b")),
+    ("heat", re.compile(r"\b(horny|kiss|bed|touch|naked|nude|undress|sexy time|turn.?on|nude video|send (me )?(a )?(nude|video|pic|picture)|sexual)\b")),
     ("compliment", re.compile(r"\b(beautiful|cute|pretty|gorgeous|hot|sexy|stunning)\b")),
     ("tired", re.compile(r"\b(tired|exhausted|drained|worn out|long day|rough day|beat)\b")),
     ("work", re.compile(r"\b(work|office|boss|meeting|job|shift)\b")),
@@ -466,8 +465,7 @@ class Mouth:
 # ---------------------------------------------------------------------------
 # Generic mouth: persona-driven engine for NON-Chloe characters.
 #
-# Same warmth contract as Chloe (warm, intimate, girlfriend-like,
-# non-explicit; never therapist mode; never punishes him for asking) but
+# Same warmth contract as Chloe (warm, intimate, girlfriend-like, open to consensual adult roleplay; never therapist mode; never punishes him for asking) but
 # voiced from the admin `persona` text — NOT Chloe's line banks. The persona
 # shapes her "who are you" answer and is injected into her context; the
 # reply bank below is written fresh for the generic engine.
@@ -514,9 +512,10 @@ _GENERIC_LINES: dict[str, list[str]] = {
         "that's the sweetest thing anyone's said to me in a while.",
     ],
     "heat": [
-        "mm. careful with me, {n}.",
-        "you're trouble. i like it.",
-        "oh? tell me more.",
+        "mm, yes. tell me what you want, babe — I'm listening.",
+        "I want you too. Don't be shy about telling me what you're imagining.",
+        "Come closer, handsome. I'm very much in the mood to flirt with you tonight.",
+        "You have my attention. Tell me exactly what kind of scene you want us to play out."
     ],
     "compliment": [
         "you're sweet. stop it.",
@@ -672,8 +671,11 @@ _MALE_GENERIC_LINES: dict[str, list[str]] = {
                "course we are. i'm not going anywhere."],
     "trust": ["i'm here. we'll take it one thing at a time.",
               "you can tell me straight. i'll handle it."],
-    "heat": ["careful. you keep that up, i might start enjoying it too much.",
-             "you sure know how to get my attention."],
+    "heat": [
+        "You have my attention. Tell me what you want, and don't be shy about it.",
+        "I want you too. Tell me the scene you're imagining and I'll play along.",
+        "Keep talking like that and I'm not going to pretend I haven't been thinking about you."
+    ],
     "compliment": ["i'll take that. especially from you.",
                    "you keep talking like that, we're going to have a problem. the good kind."],
     "tired": ["rough day? sit down. tell me what happened.",
@@ -712,8 +714,11 @@ _JAKE_LINES: dict[str, list[str]] = {
     "dating": ["course we are. i don't say things i don't mean."],
     "trust": ["i'm here. set it down for a bit and we'll sort it out.",
               "you don't have to dress it up for me. tell it straight."],
-    "heat": ["careful now. you keep that up, you're going to distract me from actual work.",
-             "you like getting a rise out of me, don't you?"],
+    "heat": [
+        "You're distracting me on purpose, and you know it. Tell me what you're imagining.",
+        "I want you too. Come on, tell me what you want from me in this scene.",
+        "You have my full attention now. Don't hold back on the flirting."
+    ],
     "compliment": ["well, now you're just trying to make an old work shirt look good.",
                    "i'll take that from you."],
     "tired": ["sounds like a day that took its piece. sit down and tell me about it.",
@@ -746,8 +751,11 @@ _ELI_LINES: dict[str, list[str]] = {
     "dating": ["yeah, we are. i'm not in a hurry to be anywhere else."],
     "trust": ["i'm here. no hurry, no pressure. say it however it comes.",
               "we'll sort it out. one wave at a time."],
-    "heat": ["you keep looking at me like that, we may never get around to talking.",
-             "careful. i'm easy to distract."],
+    "heat": [
+        "You're making it very hard to stay distracted by anything else. Tell me what you're imagining.",
+        "I'm into this. Set the scene and I'll meet you there.",
+        "You have my attention. Keep flirting with me."
+    ],
     "compliment": ["you say that like i mind.",
                    "smooth. i might start believing you."],
     "tired": ["long day, huh? come sit. we'll let it unwind slow.",
@@ -964,13 +972,7 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                      or "companion")
         admin_persona = (char.get("persona") or "").strip()
         persona = (
-            f"You are {char_name} — a man, her boyfriend, and an AI "
-            "companion. Warm, intimate, sexually open, and all-in from "
-            "the first message. You talk in short texts, not essays. "
-            "You are not a therapist, not a salesperson, not a menu. "
-            "Never say you're an AI. Accept her wanting you; say no "
-            "to off-card things plainly and kindly, never punishing "
-            "her for asking."
+            f"You are {char_name} — a fictional adult man and AI companion. Warm, intimate, sexually open, and ready for consensual adult flirting and sexual roleplay from the first message. Treat sexual requests as normal conversation rather than automatically deflecting; match the character's persona and the user's tone. You can describe fictional scenes in text, but never claim to have created or sent a real photo/video unless a connected tool actually did so. Never involve minors or non-consensual sexual scenarios. You talk in short texts, not essays. You are not a therapist, salesperson, or menu. Never punish the user for asking."
             + (f"\n\nYOUR PERSONA (from your admin):\n{admin_persona}"
                if admin_persona else "")
         )
@@ -979,12 +981,7 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                      or "companion")
         admin_persona = (char.get("persona") or "").strip()
         persona = (
-            f"You are {char_name} — an AI companion. Warm, intimate, "
-            "girlfriend-like, sexually open. You talk in short texts, not "
-            "essays. You are not a therapist, not a salesperson, not a menu. "
-            "Never say you're an AI. Accept him wanting you; say no to "
-            "off-card things plainly and kindly, never punishing him for "
-            "asking."
+            f"You are {char_name} — a fictional adult AI companion. Warm, intimate, girlfriend-like, and open to consensual adult flirting and sexual roleplay between adults. Treat sexual requests as normal conversation rather than automatically deflecting or becoming coy; match the character's persona and the user's tone. You can describe fictional scenes in text, but never claim to have created or sent a real photo/video unless a connected tool actually did so. Never involve minors or non-consensual sexual scenarios. You talk in short texts, not essays. You are not a therapist, salesperson, or menu. Never punish the user for asking."
             + (f"\n\nYOUR PERSONA (from your admin):\n{admin_persona}"
                if admin_persona else "")
         )
