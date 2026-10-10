@@ -103,20 +103,20 @@
   function inferCharacterStatus(reply, requestText) {
     const r = String(reply || '').toLowerCase();
     const q = String(requestText || '').toLowerCase();
-    if (/\\b(finishing up|almost done|wrapping up|finali[sz]ing|putting the final touches)\\b/.test(r))
+    if (/\b(finishing up|almost done|wrapping up|finali[sz]ing|putting the final touches)\b/.test(r))
       return 'finishing-up';
-    if (/\\b(started|queued|in progress|still working|working on it|running in the background|job (?:is )?running)\\b/.test(r))
+    if (/\b(started|queued|in progress|still working|working on it|running in the background|job (?:is )?running)\b/.test(r))
       return 'working';
-    if (/\\b(finished|completed|successfully created|successfully saved|here (?:it|they) (?:is|are)|done —|all done)\\b/.test(r)
-        || (/(\\b(build|make|create|write|fix|deploy|generate|code|research|work on)\\b)/.test(q)
-            && /\\b(done|created|saved|generated|completed|fixed|deployed|ready for you|attached below)\\b/.test(r)))
+    if (/\b(finished|completed|successfully created|successfully saved|here (?:it|they) (?:is|are)|done —|all done)\b/.test(r)
+        || (/\b(build|make|create|write|fix|deploy|generate|code|research|work on)\b/.test(q)
+            && /\b(done|created|saved|generated|completed|fixed|deployed|ready for you|attached below)\b/.test(r)))
       return 'finished';
     return 'idle';
   }
 
   function parseUpdateDelay(text) {
-    if (!/\\b(update|status|check back|follow.?up|progress report)\\b/i.test(text || '')) return 0;
-    const match = String(text).match(/\\bin\\s+(\\d{1,5})\\s*(minutes?|mins?|m|hours?|hrs?|h)\\b/i);
+    if (!/\b(update|status|check back|follow.?up|progress report)\b/i.test(text || '')) return 0;
+    const match = String(text).match(/\bin\s+(\d{1,5})\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i);
     if (!match) return 0;
     const amount = Number(match[1]);
     const unit = match[2].toLowerCase();
@@ -177,10 +177,10 @@
     try {
       const result = await ApiClient.chat(prompt, item.characterId, []);
       const reply = result.reply_text || 'I could not get a progress update right now.';
-      const explicit = reply.match(/\\b(idle|working|finishing up|finished)\\b/i);
+      const explicit = reply.match(/\b(idle|working|finishing up|finished)\b/i);
       if (explicit) {
         const value = explicit[1].toLowerCase().replace(' ', '-');
-        setCharacterStatus(item.characterId, value === 'finishing-up' ? 'finishing-up' : value);
+        setCharacterStatus(item.characterId, value);
       } else {
         setCharacterStatus(item.characterId, inferCharacterStatus(reply, prompt));
       }
@@ -188,12 +188,12 @@
         typingRow.classList.add('hidden');
         addText('her', reply);
       } else {
-        showToast(statusName(item.characterId) + ''s status update is ready in their chat', 4200);
+        showToast(statusName(item.characterId) + "'s status update is ready in their chat", 4200);
       }
     } catch (e) {
       if (isOpen) typingRow.classList.add('hidden');
       setCharacterStatus(item.characterId, 'idle');
-      showToast('Could not fetch ' + statusName(item.characterId) + ''s update. Open their chat and ask again.', 4200);
+      showToast("Could not fetch " + statusName(item.characterId) + "'s update. Open their chat and ask again.", 4200);
     }
   }
 
