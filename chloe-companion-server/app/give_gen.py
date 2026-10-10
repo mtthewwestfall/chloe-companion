@@ -40,6 +40,53 @@ STAGE_DESCRIPTIONS = {
     9: "sex, passionate intimate scene",
 }
 
+# Male-character versions of the give stages. The daily auto-generator picks
+# these for characters whose derived gender is male (Jake, Eli) instead of
+# the female maps above.
+MALE_STAGE_NAMES = {
+    1: "shirt lift tease",
+    2: "shirt off",
+    3: "chest flex",
+    4: "nipple tease",
+    5: "pants off",
+    6: "strokes himself",
+    7: "deep thrusts",
+    8: "getting head",
+    9: "fucking",
+}
+
+MALE_STAGE_DESCRIPTIONS = {
+    1: "shirt lift tease, lifting his shirt playfully, teasing grin, showing off his torso",
+    2: "shirt off, shirtless, holding his shirt, bedroom setting",
+    3: "chest flex, flexing his chest and arms, strong masculine expression",
+    4: "nipple tease, thumbing his nipples slowly, teasing grin",
+    5: "pants off, down to his underwear, confident masculine pose",
+    6: "stroking himself, working his cock slowly, hungry masculine expression",
+    7: "deep thrusts, pounding rhythm, intense close up",
+    8: "getting head, intimate oral scene, his pleasure close up",
+    9: "fucking, passionate hard thrusting, intimate scene",
+}
+
+
+def _is_male_character(girl_id: str) -> bool:
+    """True when the character's derived gender is male (Jake, Eli)."""
+    try:
+        return characters.character_gender(girl_id) == "male"
+    except Exception:
+        return False
+
+
+def stage_name_for(girl_id: str, stage: int) -> str:
+    """Display name for a give stage, gender-aware."""
+    names = MALE_STAGE_NAMES if _is_male_character(girl_id) else STAGE_NAMES
+    return names.get(stage, f"stage {stage}")
+
+
+def stage_description_for(girl_id: str, stage: int) -> str:
+    """Generation prompt for a give stage, gender-aware."""
+    descs = MALE_STAGE_DESCRIPTIONS if _is_male_character(girl_id) else STAGE_DESCRIPTIONS
+    return descs.get(stage, f"stage {stage} give video")
+
 
 def list_give_generations(conn: Any, status: str | None = None,
                           girl_id: str | None = None,
@@ -66,7 +113,7 @@ def list_give_generations(conn: Any, status: str | None = None,
     out = []
     for r in rows:
         d = dict(r)
-        d["stage_name"] = STAGE_NAMES.get(d.get("stage", 1), f"stage {d.get('stage')}")
+        d["stage_name"] = stage_name_for(str(d.get("girl_id") or ""), d.get("stage", 1))
         out.append(d)
     return out
 
@@ -76,7 +123,7 @@ def get_give_generation(conn: Any, gen_id: int) -> dict[str, Any] | None:
     if not row:
         return None
     d = dict(row)
-    d["stage_name"] = STAGE_NAMES.get(d.get("stage", 1), f"stage {d.get('stage')}")
+    d["stage_name"] = stage_name_for(str(d.get("girl_id") or ""), d.get("stage", 1))
     return d
 
 
@@ -238,7 +285,7 @@ def trigger_daily_give_generations() -> list[int]:
                 if existing:
                     continue
 
-                desc = STAGE_DESCRIPTIONS.get(stage, f"stage {stage} give video")
+                desc = stage_description_for(gid, stage)
                 gen_id = create_give_generation(conn, gid, stage, desc, today_str, status="pending")
                 queued_ids.append(gen_id)
 

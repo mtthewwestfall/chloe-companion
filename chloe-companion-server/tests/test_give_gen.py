@@ -142,6 +142,59 @@ class GiveGenAdminApiTest(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["queued"], 3)
 
+    def test_male_stage_names_and_descriptions(self):
+        self.assertEqual(give_gen.stage_name_for("jake", 1), "shirt lift tease")
+        self.assertEqual(give_gen.stage_name_for("eli", 6), "strokes himself")
+        self.assertEqual(give_gen.stage_name_for("jake", 9), "fucking")
+        for stage in range(1, 10):
+            desc = give_gen.stage_description_for("eli", stage)
+            for w in ("her ", "herself", "breasts", "titty"):
+                self.assertNotIn(w, desc.lower(), f"stage {stage}: {desc!r}")
+        self.assertIn("his cock", give_gen.stage_description_for("jake", 6))
+
+    def test_female_stages_unchanged(self):
+        self.assertEqual(give_gen.stage_name_for("mara", 3), "boob grabs")
+        self.assertEqual(give_gen.stage_name_for("chloe", 6), "plays w/ herself")
+        self.assertEqual(
+            give_gen.stage_description_for("chloe", 1),
+            "lift tease, lifting her shirt playfully, teasing smile",
+        )
+        self.assertEqual(
+            give_gen.stage_description_for("mara", 7),
+            "titty fuck, intimate chest scene, close up",
+        )
+
+    @mock.patch("app.give_gen._process_queued_give_generations")
+    @mock.patch("app.give_gen.characters.get_characters")
+    @mock.patch("app.give_gen.db.connect")
+    def test_trigger_daily_uses_male_prompts_for_guys(
+        self, mock_connect, mock_chars, mock_process
+    ):
+        mock_connect.return_value = self.conn
+        mock_chars.return_value = [
+            {"id": "jake", "name": "Jake"},
+            {"id": "mara", "name": "Mara"},
+        ]
+        queued = give_gen.trigger_daily_give_generations()
+        self.assertEqual(len(queued), 18)
+        rows = self.conn.execute(
+            "SELECT girl_id, stage, prompt FROM give_generations"
+        ).fetchall()
+        jake_prompts = [r["prompt"] for r in rows if r["girl_id"] == "jake"]
+        mara_prompts = [r["prompt"] for r in rows if r["girl_id"] == "mara"]
+        self.assertEqual(len(jake_prompts), 9)
+        self.assertEqual(len(mara_prompts), 9)
+        for p in jake_prompts:
+            self.assertNotIn("titty fuck", p)
+            self.assertNotIn("breasts", p)
+            self.assertNotIn("herself", p)
+        for p in mara_prompts:
+            self.assertIn("her", p)
+        # stage names on the listed rows are gender-aware too
+        gens = give_gen.list_give_generations(self.conn, girl_id="jake")
+        self.assertEqual(gens[0]["stage_name"],
+                         give_gen.MALE_STAGE_NAMES[gens[0]["stage"]])
+
 
 if __name__ == "__main__":
     unittest.main()
