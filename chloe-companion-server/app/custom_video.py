@@ -257,9 +257,9 @@ def run_custom_generation_with_login(request_id: int) -> None:
             # never write credentials/session material to Railway logs.
             import re
             detail = " ".join(str(e).split())[:240]
-            detail = re.sub(r"(?i)bearer\\s+\\S+", "Bearer [REDACTED]", detail)
+            detail = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", detail)
             detail = re.sub(
-                r"(?i)(?:refresh.?token|access.?token|token|password|api.?key)\\s*[:=]\\s*\\S+",
+                r"(?i)(?:refresh.?token|access.?token|token|password|api.?key)\s*[:=]\s*\S+",
                 "[REDACTED]", detail)
             detail = re.sub(r"(?i)eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}",
                             "[REDACTED_JWT]", detail)
