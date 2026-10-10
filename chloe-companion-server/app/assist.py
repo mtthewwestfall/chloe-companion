@@ -6835,12 +6835,10 @@ def analyze_chat_attachments(conn: sqlite3.Connection, user: dict,
     if not attachments:
         return None
     user_id = user.get("user_id", "")
-    if not is_assistant_character(character_id) \
-            or user_id not in _owner_ids():
-        return {"brief": "He tried to send an attachment, but that lane "
-                         "only works in an assistant thread (Hannah, "
-                         "Mia, Jordan or Rocky). Tell him plainly this "
-                         "chat cannot take files yet."}
+    if user_id not in _owner_ids():
+        return {"brief": "He tried to send an attachment, but uploads "
+                         "are only available in the owner's private "
+                         "character chats. Explain this plainly."}
 
     names = ", ".join((a.get("filename") or "attachment")
                       for a in attachments)
