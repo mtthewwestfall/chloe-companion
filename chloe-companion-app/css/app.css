@@ -465,15 +465,16 @@ body {
    Whispr Feed — Instagram-style posts on the landing page
    ============================================================ */
 .herday-section {
-  margin: 18px 0 6px;
-  padding: 0 4px;
+  margin: 20px 0 10px;
+  padding: 0;
 }
 .herday-title {
   font-size: 18px;
-  font-weight: 700;
-  color: #fff;
+  font-weight: 800;
+  color: #ffffff;
   margin: 0 0 2px;
-  padding: 0 12px;
+  padding: 0 14px;
+  letter-spacing: -0.2px;
 }
 .herday-live {
   font-size: 12px;
@@ -482,124 +483,213 @@ body {
 }
 .herday-sub {
   font-size: 13px;
-  color: #999;
-  margin: 0 0 10px;
-  padding: 0 12px;
+  color: #a8a8a8;
+  margin: 0 0 14px;
+  padding: 0 14px;
 }
 .feed-list {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 0 12px;
+  gap: 20px;
+  padding: 0 4px;
 }
 .feed-empty {
-  color: #888;
+  color: #a8a8a8;
   font-size: 14px;
-  padding: 12px 0;
+  padding: 16px 14px;
+  text-align: center;
 }
 .feed-post {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 14px;
+  background: #121212;
+  border: 1px solid #262626;
+  border-radius: 16px;
   overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 .feed-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
   padding: 10px 12px;
+  background: #121212;
 }
-.feed-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  object-fit: cover;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-}
-.feed-meta {
+.feed-user-info {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  align-items: center;
+  gap: 10px;
 }
-.feed-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: #fff;
-}
-.feed-time {
-  font-size: 11px;
-  color: #888;
-}
-.feed-media {
-  background: #000;
+.feed-avatar-ring {
+  padding: 2px;
+  border-radius: 50%;
+  background: linear-gradient(45deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 120px;
+}
+.feed-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  background: #000;
+  border: 1.5px solid #121212;
+}
+.feed-header-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.feed-username {
+  font-weight: 600;
+  color: #f5f5f5;
+  font-size: 13.5px;
+}
+.feed-dot {
+  color: #737373;
+  font-size: 10px;
+}
+.feed-time {
+  color: #a8a8a8;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+.feed-more-btn {
+  background: none;
+  border: none;
+  color: #f5f5f5;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.9;
+  transition: opacity 0.15s;
+}
+.feed-more-btn:active {
+  opacity: 0.6;
+}
+.feed-media {
+  background: #000000;
+  width: 100%;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
 }
 .feed-media-img,
 .feed-media-video {
   width: 100%;
-  max-height: 480px;
-  object-fit: contain;
+  max-height: 520px;
+  object-fit: cover;
   display: block;
 }
 .feed-media-audio {
   width: calc(100% - 24px);
-  margin: 12px;
+  margin: 16px 12px 8px;
 }
 .feed-voice-note {
   width: 100%;
   text-align: center;
-  color: #aaa;
+  color: #a8a8a8;
   font-size: 13px;
-  padding-bottom: 10px;
+  padding-bottom: 12px;
 }
 .feed-text-post {
-  padding: 24px 18px;
-  color: #eee;
+  padding: 28px 20px;
+  color: #f5f5f5;
   font-size: 16px;
   line-height: 1.5;
   text-align: center;
   width: 100%;
+  background: linear-gradient(135deg, #1e1e2e, #12121c);
 }
-.feed-actions {
+.feed-action-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px 2px;
+  justify-content: space-between;
+  padding: 10px 12px 6px;
 }
-.feed-like {
+.feed-actions-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.feed-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.feed-action-icon {
   background: none;
   border: none;
-  font-size: 24px;
-  color: #666;
+  color: #f5f5f5;
   cursor: pointer;
-  padding: 4px;
-  line-height: 1;
-  transition: color 0.15s, transform 0.15s;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s ease, opacity 0.12s ease;
 }
-.feed-like:active { transform: scale(1.25); }
-.feed-like.liked { color: #ff4d6d; }
+.feed-action-icon:active {
+  transform: scale(1.18);
+  opacity: 0.8;
+}
+.feed-like-btn.liked svg {
+  fill: #ff3040;
+  stroke: #ff3040;
+}
+.feed-bookmark-btn.saved svg {
+  fill: #ffffff;
+  stroke: #ffffff;
+}
 .feed-chat-btn {
-  margin-left: auto;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 7px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #ff2d78, #a855f7);
+  color: #ffffff;
+  border: none;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 14px;
   border-radius: 20px;
   cursor: pointer;
+  box-shadow: 0 2px 8px rgba(255, 45, 120, 0.35);
+  transition: transform 0.12s ease, opacity 0.12s ease;
 }
-.feed-chat-btn:active { background: rgba(255, 255, 255, 0.15); }
+.feed-chat-btn:active {
+  transform: scale(0.96);
+  opacity: 0.9;
+}
+.feed-likes-summary {
+  padding: 2px 12px 4px;
+  font-size: 13px;
+  color: #f5f5f5;
+}
+.feed-likes-text {
+  font-weight: 400;
+}
+.feed-likes-text strong {
+  font-weight: 600;
+  color: #ffffff;
+}
 .feed-caption {
-  padding: 6px 12px 12px;
-  font-size: 14px;
-  color: #ddd;
-  line-height: 1.45;
+  padding: 2px 12px 12px;
+  font-size: 13.5px;
+  color: #f5f5f5;
+  line-height: 1.4;
+  word-break: break-word;
 }
 .feed-caption-name {
   font-weight: 700;
-  color: #fff;
+  color: #ffffff;
+  margin-right: 2px;
+}
+.feed-caption-text {
+  color: #f5f5f5;
+  font-weight: 400;
 }

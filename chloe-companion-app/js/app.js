@@ -1479,8 +1479,8 @@
   /* ============================================================
      Whispr Feed — public landing page Instagram-style feed.
      Fetches from /api/v1/her-day/public (no auth). Vertical
-     scrollable posts: avatar + name + time, media, caption,
-     like toggle, chat CTA.
+     scrollable Instagram-style posts: header, media, action bar,
+     likes summary, caption.
      ============================================================ */
   const WhisprFeed = (() => {
     let posts = [];
@@ -1493,20 +1493,37 @@
       const created = new Date((createdAt || '').replace(' ', 'T') + 'Z');
       if (isNaN(created)) return '';
       const mins = Math.max(1, Math.round((Date.now() - created) / 60000));
-      if (mins < 60) return mins + 'm ago';
+      if (mins < 60) return mins + 'm';
       const hrs = Math.round(mins / 60);
-      if (hrs < 24) return hrs + 'h ago';
-      return Math.round(hrs / 24) + 'd ago';
+      if (hrs < 24) return hrs + 'h';
+      return Math.round(hrs / 24) + 'd';
     }
 
     function postKey(p) {
       return (p.girl_id || '') + '|' + (p.created_at || '') + '|' + (p.caption || '').slice(0, 40);
     }
 
-    function toggleLike(key, btn) {
+    function toggleLike(key, btn, likesCountEl, baseLikes) {
       if (liked[key]) { delete liked[key]; } else { liked[key] = 1; }
       try { localStorage.setItem('whisprFeedLikes', JSON.stringify(liked)); } catch (e) {}
-      btn.classList.toggle('liked', !!liked[key]);
+      const isLiked = !!liked[key];
+      btn.classList.toggle('liked', isLiked);
+
+      const svg = btn.querySelector('svg');
+      if (svg) {
+        if (isLiked) {
+          svg.setAttribute('fill', '#ff3040');
+          svg.setAttribute('stroke', '#ff3040');
+        } else {
+          svg.setAttribute('fill', 'none');
+          svg.setAttribute('stroke', 'currentColor');
+        }
+      }
+
+      if (likesCountEl) {
+        const count = isLiked ? baseLikes + 1 : baseLikes;
+        likesCountEl.textContent = count.toLocaleString();
+      }
     }
 
     function renderMedia(p, mediaBox) {
@@ -1557,66 +1574,172 @@
       }
       posts.forEach((p) => {
         const key = postKey(p);
+        const isLiked = !!liked[key];
+        const baseLikes = p.likes_count || 128;
+        const currentLikes = isLiked ? baseLikes + 1 : baseLikes;
+        const handle = (p.girl_id || p.girl_name || 'whispr').toLowerCase().replace(/\s+/g, '');
+
         const post = document.createElement('article');
         post.className = 'feed-post';
 
-        // Header: avatar + name + time
+        // 1. Header (Avatar, Username, Time ago, Options)
         const header = document.createElement('div');
         header.className = 'feed-header';
+
+        const userInfo = document.createElement('div');
+        userInfo.className = 'feed-user-info';
+
+        const avatarRing = document.createElement('div');
+        avatarRing.className = 'feed-avatar-ring';
         const av = document.createElement('img');
         av.className = 'feed-avatar';
         av.src = p.girl_avatar_url || '';
         av.alt = p.girl_name || '';
         av.loading = 'lazy';
-        const meta = document.createElement('div');
-        meta.className = 'feed-meta';
-        const name = document.createElement('span');
-        name.className = 'feed-name';
-        name.textContent = p.girl_name || '';
+        avatarRing.appendChild(av);
+
+        const headerText = document.createElement('div');
+        headerText.className = 'feed-header-text';
+        const username = document.createElement('span');
+        username.className = 'feed-username';
+        username.textContent = handle;
+        const dot = document.createElement('span');
+        dot.className = 'feed-dot';
+        dot.textContent = '•';
         const time = document.createElement('span');
         time.className = 'feed-time';
         time.textContent = timeAgo(p.created_at);
-        meta.appendChild(name);
-        meta.appendChild(time);
-        header.appendChild(av);
-        header.appendChild(meta);
 
-        // Media
+        headerText.appendChild(username);
+        headerText.appendChild(dot);
+        headerText.appendChild(time);
+
+        userInfo.appendChild(avatarRing);
+        userInfo.appendChild(headerText);
+
+        const moreBtn = document.createElement('button');
+        moreBtn.className = 'feed-more-btn';
+        moreBtn.setAttribute('aria-label', 'Options');
+        moreBtn.innerHTML = `
+          <svg aria-label="More options" height="20" viewBox="0 0 24 24" width="20" fill="currentColor">
+            <circle cx="12" cy="12" r="1.75"></circle>
+            <circle cx="6" cy="12" r="1.75"></circle>
+            <circle cx="18" cy="12" r="1.75"></circle>
+          </svg>`;
+
+        header.appendChild(userInfo);
+        header.appendChild(moreBtn);
+
+        // 2. Media
         const mediaBox = document.createElement('div');
         mediaBox.className = 'feed-media';
         renderMedia(p, mediaBox);
 
-        // Actions: like + chat
-        const actions = document.createElement('div');
-        actions.className = 'feed-actions';
+        // 3. Action Bar (Heart, Comment, Share | Chat button, Bookmark)
+        const actionBar = document.createElement('div');
+        actionBar.className = 'feed-action-bar';
+
+        const actionsLeft = document.createElement('div');
+        actionsLeft.className = 'feed-actions-left';
+
         const likeBtn = document.createElement('button');
-        likeBtn.className = 'feed-like' + (liked[key] ? ' liked' : '');
+        likeBtn.className = 'feed-action-icon feed-like-btn' + (isLiked ? ' liked' : '');
         likeBtn.setAttribute('aria-label', 'Like');
-        likeBtn.innerHTML = '\u2665';
-        likeBtn.addEventListener('click', () => toggleLike(key, likeBtn));
+        likeBtn.innerHTML = `
+          <svg aria-label="Like" height="24" viewBox="0 0 24 24" width="24" fill="${isLiked ? '#ff3040' : 'none'}" stroke="${isLiked ? '#ff3040' : 'currentColor'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+          </svg>`;
+
+        const commentBtn = document.createElement('button');
+        commentBtn.className = 'feed-action-icon feed-comment-btn';
+        commentBtn.setAttribute('aria-label', 'Comment');
+        commentBtn.innerHTML = `
+          <svg aria-label="Comment" height="24" viewBox="0 0 24 24" width="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
+          </svg>`;
+
+        const shareBtn = document.createElement('button');
+        shareBtn.className = 'feed-action-icon feed-share-btn';
+        shareBtn.setAttribute('aria-label', 'Share');
+        shareBtn.innerHTML = `
+          <svg aria-label="Share Post" height="24" viewBox="0 0 24 24" width="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>`;
+
+        actionsLeft.appendChild(likeBtn);
+        actionsLeft.appendChild(commentBtn);
+        actionsLeft.appendChild(shareBtn);
+
+        const actionsRight = document.createElement('div');
+        actionsRight.className = 'feed-actions-right';
+
         const chatBtn = document.createElement('button');
         chatBtn.className = 'feed-chat-btn';
-        chatBtn.textContent = 'Chat';
+        chatBtn.innerHTML = `
+          <svg height="15" viewBox="0 0 24 24" width="15" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+          <span>Chat</span>`;
         chatBtn.addEventListener('click', () => {
           const girl = CHARACTERS.find(c => c.id === (p.girl_id || '').toLowerCase());
           openChat(girl ? girl.id : CHARACTERS[1].id);
         });
-        actions.appendChild(likeBtn);
-        actions.appendChild(chatBtn);
 
-        // Caption
+        const bookmarkBtn = document.createElement('button');
+        bookmarkBtn.className = 'feed-action-icon feed-bookmark-btn';
+        bookmarkBtn.setAttribute('aria-label', 'Save');
+        bookmarkBtn.innerHTML = `
+          <svg aria-label="Save" height="24" viewBox="0 0 24 24" width="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="19 21 12 16 5 21 5 3 19 3 19 21"></polygon>
+          </svg>`;
+        bookmarkBtn.addEventListener('click', () => {
+          bookmarkBtn.classList.toggle('saved');
+          const bSvg = bookmarkBtn.querySelector('svg');
+          if (bSvg) {
+            if (bookmarkBtn.classList.contains('saved')) {
+              bSvg.setAttribute('fill', '#ffffff');
+            } else {
+              bSvg.setAttribute('fill', 'none');
+            }
+          }
+        });
+
+        actionsRight.appendChild(chatBtn);
+        actionsRight.appendChild(bookmarkBtn);
+
+        actionBar.appendChild(actionsLeft);
+        actionBar.appendChild(actionsRight);
+
+        // 4. Likes Summary Line
+        const likesSummary = document.createElement('div');
+        likesSummary.className = 'feed-likes-summary';
+        const likesText = document.createElement('span');
+        likesText.className = 'feed-likes-text';
+        likesText.innerHTML = `Liked by <strong>alex_m</strong> and <strong class="feed-likes-count">${currentLikes.toLocaleString()}</strong> others`;
+        likesSummary.appendChild(likesText);
+
+        const likesCountEl = likesText.querySelector('.feed-likes-count');
+        likeBtn.addEventListener('click', () => toggleLike(key, likeBtn, likesCountEl, baseLikes));
+
+        // 5. Caption
         const cap = document.createElement('div');
         cap.className = 'feed-caption';
         const capName = document.createElement('span');
         capName.className = 'feed-caption-name';
-        capName.textContent = p.girl_name || '';
+        capName.textContent = handle;
+        const capText = document.createElement('span');
+        capText.className = 'feed-caption-text';
+        capText.textContent = ' ' + (p.caption || '');
         cap.appendChild(capName);
-        cap.appendChild(document.createTextNode(' ' + (p.caption || '')));
+        cap.appendChild(capText);
 
         post.appendChild(header);
         post.appendChild(mediaBox);
-        post.appendChild(actions);
+        post.appendChild(actionBar);
+        post.appendChild(likesSummary);
         post.appendChild(cap);
+
         wrap.appendChild(post);
       });
     }
