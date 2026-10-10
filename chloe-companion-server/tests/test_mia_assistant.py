@@ -55,7 +55,8 @@ class MiaBase(unittest.TestCase):
         os.environ["ASSIST_ROLLOUT"] = "owner"
         os.environ["ASSIST_OWNER_IDS"] = "owner_1"
         self.conn = _conn()
-        for cid, name in (("mia", "Mia"), ("jordan", "Jordan")):
+        for cid, name in (("mia", "Mia"), ("jordan", "Jordan"),
+                         ("hannah", "Hannah")):
             store.upsert_local_character(
                 self.conn, {"id": cid, "name": name,
                             "owner_user_id": "owner_1"})
@@ -127,6 +128,23 @@ class SogniParityTest(MiaBase):
                             for r in rows))
         # First job was force-completed mid-test; the fresh one queues.
         self.assertEqual([r["status"] for r in rows], ["done", "queued"])
+
+    def test_mia_can_render_a_named_roster_character_video(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        spawned = []
+        with mock.patch.object(assist, "_spawn_sogni_plan_job",
+                               lambda job_id: spawned.append(job_id)):
+            res = self.say("make a video of Hannah dancing")
+        self.assertIn("video of Hannah", res["brief"])
+        self.assertEqual(len(spawned), 1)
+        row = self.conn.execute(
+            "SELECT character_id, target_character_id, kind, prompt, "
+            "billing_mode FROM sogni_plan_jobs").fetchone()
+        self.assertEqual(row["character_id"], "mia")
+        self.assertEqual(row["target_character_id"], "hannah")
+        self.assertEqual(row["kind"], "video")
+        self.assertEqual(row["billing_mode"], "subscription")
+        self.assertIn("dancing", row["prompt"])
 
     def test_sogni_mention_with_session_confirms_signed_in(self):
         assist.store_sogni_session(self.conn, TOKENS)
