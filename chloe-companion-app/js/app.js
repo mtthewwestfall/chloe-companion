@@ -150,7 +150,8 @@
     currentGirl = girl;
     $('chatName').textContent = girl.name;
     clearPendingAttachments();
-    $('attachBtn').classList.toggle('hidden', !ASSISTANT_GIRLS.includes(girl.id));
+    // Owner media attachments work in every character thread.
+    $('attachBtn').classList.remove('hidden');
     startAvatarCycle();
     // day divider + encryption note
     chatLog.innerHTML = '';
@@ -501,10 +502,6 @@
   }
 
   async function onAttachmentsPicked(files) {
-    if (!ASSISTANT_GIRLS.includes(currentGirl.id)) {
-      showToast('Attachments are only on an assistant chat right now', 3200);
-      return;
-    }
     const picked = Array.from(files || []);
     for (const file of picked) {
       if (pendingAttachments.length >= ATTACHMENT_MAX_PER_MESSAGE) {
