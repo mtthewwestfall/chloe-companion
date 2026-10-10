@@ -913,3 +913,25 @@ class AttachmentVideoTest(unittest.TestCase):
             self.conn, self.owner, "watch this", "hannah", [row])
         self.assertIn("did not come through as a playable video",
                       result["brief"])
+
+    def test_owner_can_analyze_image_in_non_assistant_character_thread(self):
+        image = assist.save_chat_attachment(
+            self.conn, "owner_1", "chloe", "family-photo.png",
+            "image/png", self.png)
+        row = assist.get_chat_attachments(
+            self.conn, "owner_1", "chloe", [image["id"]])[0]
+        seen = {}
+
+        def fake_post(parts, model):
+            seen["parts"] = parts
+            return {"candidates": [{"content": {"parts": [{
+                "text": "A person standing beside a red bicycle."
+            }]}}]}
+
+        assist._attachment_post = fake_post
+        result = assist.analyze_chat_attachments(
+            self.conn, self.owner, "what is in this photo?", "chloe", [row])
+        self.assertIn("actually inspected the image attachment",
+                      result["brief"])
+        self.assertIn("red bicycle", result["brief"])
+        self.assertTrue(any(part.get("inlineData") for part in seen["parts"]))
