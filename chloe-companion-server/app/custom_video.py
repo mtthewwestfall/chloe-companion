@@ -216,13 +216,9 @@ def run_custom_generation_with_login(request_id: int) -> None:
                 store.update_custom_request(conn, request_id, "pending")
                 detail = str(outcome.get("detail") or "")
                 detail = detail[:240]
-                for pattern in (
-                    r"(?i)(bearer\\s+)[^\\s,;]+",
-                    r"(?i)(refresh.?token[\\"'\\s:=]+)[^\\s,;\\"']+",
-                    r"(?i)(access.?token[\\"'\\s:=]+)[^\\s,;\\"']+",
-                    r"(?i)(password[\\"'\\s:=]+)[^\\s,;\\"']+",
-                ):
-                    detail = __import__("re").sub(pattern, r"\\1[REDACTED]", detail)
+                import re
+                detail = re.sub(r"(?i)bearer\s+\S+", "Bearer [REDACTED]", detail)
+                detail = re.sub(r"(?i)(?:refresh.?token|access.?token|password)\s*[:=]\s*\S+", "[REDACTED]", detail)
                 detail = " ".join(detail.split())
                 print(f"[custom_video] request {request_id} not fulfilled: "
                       f"{outcome.get('status') or 'failed'}; detail={detail or 'no provider detail'}",
