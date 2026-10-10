@@ -106,8 +106,6 @@ requirements.txt / .gitignore / README.md
 
 Banks refill to the allocation each billing cycle; they never stack.
 
-## Explicit content line (per product decision 2026-09-28)
+## Adult roleplay and generated media
 
-Explicit video performances stay on the **website only**. The companion is
-warm/flirty in conversation at most — never explicit, never punished for
-asking, never a salesperson.
+Companion characters can engage in consensual adult roleplay in text. Generated images and videos run through the configured media provider and the owner's authenticated plan/session; provider moderation, plan limits, and render failures still apply, so a request is never promised as complete until a real output is returned. Rocky remains the non-romantic build partner.
