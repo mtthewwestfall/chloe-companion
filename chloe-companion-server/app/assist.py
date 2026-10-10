@@ -106,7 +106,7 @@ def _owner_ids() -> set[str]:
 # every cross-lane redirect exempts him), plus one tool the girls
 # don't have: page reading (see the ROCKY PAGE READING section).
 # ---------------------------------------------------------------------------
-ASSISTANT_CHARACTERS = frozenset({"hannah", "mia", "jordan", "rocky"})
+ASSISTANT_CHARACTERS = frozenset({"brooklyn", "hannah", "mia", "jordan", "rocky"})
 
 
 def is_assistant_character(character_id) -> bool:
@@ -8175,11 +8175,14 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if is_assistant_character(character_id) \
                 and detect_project_identity(text):
             return {"brief": _owner_brief_reply(character_id)}
-        # Browser-agent dispatch (owner-only, Rocky's thread only):
-        # "screenshot <site>" / "look at <site> in the browser" queues
-        # a real Chromium job on the owner's VM worker. Deterministic
+        # Shared browser-agent dispatch (owner-only, all private
+        # assistant threads): Rocky owns the browser worker, but every
+        # private companion can queue a job through the same owner-scoped
+        # queue. Results return to the character thread that requested it.
+        # "screenshot <site>" / "look at <site> in the browser" queues a
+        # real Chromium job on the owner's VM worker. Deterministic
         # trigger; a miss just means normal chat.
-        if (character_id or "").strip().lower() == "rocky":
+        if is_assistant_character(character_id):
             bd = detect_browse_request(text)
             if bd is not None:
                 return _handle_browse_request(conn, user_id,
