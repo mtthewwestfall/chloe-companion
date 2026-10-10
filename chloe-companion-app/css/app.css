@@ -148,9 +148,21 @@ body {
   position: absolute; right: -2px; bottom: -2px; width: 13px; height: 13px;
   border-radius: 50%; background: #4ade80; border: 2.5px solid var(--bg);
 }
-.chat-header-titles { flex: 1; text-align: center; }
+.chat-header-titles { flex: 1; text-align: center; min-width: 0; }
 .chat-name { font-size: 16px; font-weight: 700; }
 .chat-sub { font-size: 12px; color: var(--sub); }
+.chat-status, .girl-status {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  margin-top: 3px; padding: 3px 8px; border-radius: 999px;
+  font-size: 11px; line-height: 1.25; font-weight: 650;
+  background: rgba(148, 163, 184, .12); color: var(--sub);
+}
+.status-dot { width: 6px; height: 6px; display: inline-block; border-radius: 50%; background: currentColor; flex: 0 0 6px; }
+.status-idle { color: #a1a1aa; }
+.status-working { color: #60a5fa; }
+.status-finishing-up { color: #fbbf24; }
+.status-finished { color: #4ade80; }
+.girl-status { margin: 5px 0 8px; }
 .header-icons { display: flex; gap: 14px; }
 .header-icons button { border: 0; background: none; color: var(--pink); font-size: 20px; cursor: pointer; }
 
