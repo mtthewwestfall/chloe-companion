@@ -67,6 +67,7 @@ import urllib.request
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -74,6 +75,13 @@ from pydantic import BaseModel
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, her_day, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://lockeddoor.ai"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Admin-Token"],
+)
 
 # Finished regular media-request generations are served from /generated/.
 os.makedirs(config.GENERATED_DIR, exist_ok=True)
