@@ -195,15 +195,19 @@ class GiveGenAdminApiTest(unittest.TestCase):
         self.assertEqual(gens[0]["stage_name"],
                          give_gen.MALE_STAGE_NAMES[gens[0]["stage"]])
 
+    def _ok_run(self):
+        m = mock.MagicMock()
+        m.returncode = 0
+        return m
+
     def test_topless_reference_frame_missing_without_stage2(self):
         self.assertIsNone(give_gen._topless_reference_frame(self.conn, "jake"))
 
-    @mock.patch("app.give_gen.assist._grab_frame", return_value=True)
     @mock.patch("app.give_gen.assist._ffmpeg_exe", return_value="/fake/ffmpeg")
     @mock.patch("app.give_gen.assist._fetch_first_frame",
                 return_value="/tmp/fake-stage2.mp4")
-    def test_topless_reference_frame_uses_stage2_video(
-        self, mock_fetch, mock_exe, mock_grab
+    def test_topless_reference_frame_uses_stage2_last_frame(
+        self, mock_fetch, mock_exe
     ):
         self.conn.execute(
             "INSERT INTO girl_media (girl_id, kind, url, preset, stage) "
@@ -211,27 +215,33 @@ class GiveGenAdminApiTest(unittest.TestCase):
         )
         self.conn.commit()
         with mock.patch("tempfile.mkstemp", return_value=(99, "/tmp/fake-frame.jpg")), \
-             mock.patch("os.close"), mock.patch("os.unlink"):
+             mock.patch("os.close"), mock.patch("os.unlink"), \
+             mock.patch("os.path.exists", return_value=True), \
+             mock.patch("os.path.getsize", return_value=1234), \
+             mock.patch("subprocess.run",
+                        return_value=self._ok_run()) as mock_run:
             path = give_gen._topless_reference_frame(self.conn, "jake")
         self.assertEqual(path, "/tmp/fake-frame.jpg")
         mock_fetch.assert_called_once_with("http://x/jake-stage2.mp4")
-        mock_grab.assert_called_once()
-        self.assertEqual(mock_grab.call_args[0][0], "/fake/ffmpeg")
+        args = mock_run.call_args[0][0]
+        self.assertIn("-sseof", args)
 
-    @mock.patch("app.give_gen.assist._grab_frame", return_value=False)
     @mock.patch("app.give_gen.assist._ffmpeg_exe", return_value="/fake/ffmpeg")
     @mock.patch("app.give_gen.assist._fetch_first_frame",
                 return_value="/tmp/fake-stage2.mp4")
     def test_topless_reference_frame_none_when_grab_fails(
-        self, mock_fetch, mock_exe, mock_grab
+        self, mock_fetch, mock_exe
     ):
+        bad = mock.MagicMock()
+        bad.returncode = 1
         self.conn.execute(
             "INSERT INTO girl_media (girl_id, kind, url, preset, stage) "
             "VALUES ('eli', 'give', 'http://x/eli-stage2.mp4', 'give', 2)"
         )
         self.conn.commit()
         with mock.patch("tempfile.mkstemp", return_value=(99, "/tmp/fake-frame.jpg")), \
-             mock.patch("os.close"), mock.patch("os.unlink"):
+             mock.patch("os.close"), mock.patch("os.unlink"), \
+             mock.patch("subprocess.run", return_value=bad):
             self.assertIsNone(give_gen._topless_reference_frame(self.conn, "eli"))
 
 

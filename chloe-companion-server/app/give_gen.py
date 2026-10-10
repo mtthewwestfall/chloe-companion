@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import tempfile
 import threading
 import traceback
@@ -193,11 +194,11 @@ def delete_give_generation(conn: Any, gen_id: int) -> dict[str, Any] | None:
 
 
 def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
-    """First frame of his approved stage-2 ("shirt off") give video.
+    """Last frame of the approved stage-2 ("shirt off") give video.
 
-    Used as the Sogni reference for male characters on stages past 2,
-    where he is already topless. Returns None when unavailable so the
-    caller falls back to the avatar.
+    Used as the Sogni reference for stages past 2, where the top is
+    already off (the first frame of stage 2 still has it on). Returns
+    None when unavailable so the caller falls back to the avatar.
     """
     try:
         row = conn.execute(
@@ -218,7 +219,16 @@ def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
             return None
         fd, frame_path = tempfile.mkstemp(suffix=".jpg")
         os.close(fd)
-        if assist._grab_frame(exe, video_path, 0.0, frame_path, 768):
+        try:
+            proc = subprocess.run(
+                [exe, "-hide_banner", "-loglevel", "error",
+                 "-sseof", "-0.5", "-i", video_path,
+                 "-frames:v", "1", "-q:v", "5", "-y", frame_path],
+                capture_output=True, timeout=45)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if (proc.returncode == 0 and os.path.exists(frame_path)
+                and os.path.getsize(frame_path) > 0):
             return frame_path
         try:
             os.unlink(frame_path)
@@ -252,7 +262,7 @@ def _run_give_generation_job(gen_id: int) -> None:
         girl = characters.get_character(gen["girl_id"])
         stage = gen.get("stage") or 0
         ref_path = None
-        if stage > 2 and _is_male_character(gen["girl_id"]):
+        if stage > 2:
             ref_path = _topless_reference_frame(conn, gen["girl_id"])
         if not ref_path:
             ref_path = assist._fetch_first_frame(girl.get("avatar_url") or "")
