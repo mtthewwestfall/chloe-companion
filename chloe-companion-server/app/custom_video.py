@@ -157,3 +157,143 @@ def spawn_custom_generation(request_id: int) -> None:
     t = threading.Thread(target=run_custom_generation, args=(request_id,),
                          daemon=True, name=f"custom-video-{request_id}")
     t.start()
+
+
+def run_custom_generation_with_login(request_id: int) -> None:
+    """Fulfill an admin-queued customer request using the owner's saved
+    Sogni login session (plan billing), then deliver it into the original
+    customer's original character conversation."""
+    conn = db.connect()
+    ref_path = None
+    try:
+        row = conn.execute(
+            "SELECT * FROM custom_video_requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        if not row or row["status"] != "pending":
+            return
+        req = dict(row)
+
+        # This is the login-based session Mia uses; no API key is needed.
+        from . import assist, characters
+        session = assist.stored_sogni_session(conn)
+        if not session:
+            print(f"[custom_video] request {request_id} waiting: Sogni login missing",
+                  flush=True)
+            return
+
+        # Claim atomically so a per-request click and the batch action cannot
+        # render the same request twice.
+        cur = conn.execute(
+            "UPDATE custom_video_requests SET status = 'generating' "
+            "WHERE id = ? AND status = 'pending'",
+            (request_id,),
+        )
+        conn.commit()
+        if cur.rowcount != 1:
+            return
+
+        girl = characters.get_character(req["girl_id"], user_id=req["user_id"])
+        if not girl:
+            store.update_custom_request(conn, request_id, "pending")
+            return
+
+        try:
+            ref_path = assist._fetch_first_frame(girl.get("avatar_url") or "")
+            prompt = assist._sogni_plan_prompt(
+                girl.get("name") or req["girl_id"], req["description"])
+            outcome, fresh_session = assist._sogni_plan_run(
+                session, prompt, ref_path, config.SOGNI_VIDEO_MODEL)
+            if fresh_session:
+                assist.store_sogni_session(conn, fresh_session)
+            if outcome.get("status") == "session_dead":
+                assist.clear_sogni_session(conn)
+
+            if outcome.get("status") != "done" or not outcome.get("path"):
+                # Keep it in the admin queue for retry/manual review.
+                store.update_custom_request(conn, request_id, "pending")
+                print(f"[custom_video] request {request_id} not fulfilled: "
+                      f"{outcome.get('status') or 'failed'}", flush=True)
+                return
+
+            path = outcome["path"]
+            video_url = "/generated/" + os.path.basename(path)
+            size = 0
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                pass
+
+            # Register it in the requested character's library and put a
+            # real video attachment into that customer's matching chat.
+            conn.execute(
+                "INSERT INTO girl_media (girl_id, kind, url, preset) "
+                "VALUES (?, 'give', ?, 'custom')",
+                (req["girl_id"], video_url),
+            )
+            store.log_turn(
+                conn, req["user_id"], req["girl_id"],
+                "I made that special video for you — it's right here. ❤️",
+                req["girl_id"],
+                [{"kind": "video", "url": video_url,
+                  "name": f"{req['girl_id']}-custom-video.mp4", "size": size}],
+            )
+            store.update_custom_request(
+                conn, request_id, "fulfilled", video_url=video_url)
+            print(f"[custom_video] request {request_id} fulfilled via saved Sogni login",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001 — leave failed work in admin queue
+            store.update_custom_request(conn, request_id, "pending")
+            print(f"[custom_video] request {request_id} failed: "
+                  f"{e.__class__.__name__}", flush=True)
+    finally:
+        if ref_path:
+            try:
+                os.unlink(ref_path)
+            except OSError:
+                pass
+        conn.close()
+
+
+def spawn_custom_generation_with_login(request_id: int) -> None:
+    t = threading.Thread(
+        target=run_custom_generation_with_login,
+        args=(request_id,),
+        daemon=True,
+        name=f"custom-video-login-{request_id}",
+    )
+    t.start()
+
+
+def _run_pending_custom_generations() -> None:
+    conn = db.connect()
+    try:
+        ids = [int(r[0]) for r in conn.execute(
+            "SELECT id FROM custom_video_requests WHERE status = 'pending' "
+            "ORDER BY id ASC").fetchall()]
+    finally:
+        conn.close()
+    # Sequential renders avoid competing for the same Sogni plan/session.
+    for request_id in ids:
+        run_custom_generation_with_login(request_id)
+
+
+def spawn_pending_custom_generations() -> int:
+    conn = db.connect()
+    try:
+        from . import assist
+        if not assist.stored_sogni_session(conn):
+            raise RuntimeError("sogni_login_required")
+        count = int(conn.execute(
+            "SELECT COUNT(*) FROM custom_video_requests "
+            "WHERE status = 'pending'").fetchone()[0])
+    finally:
+        conn.close()
+    if count:
+        t = threading.Thread(
+            target=_run_pending_custom_generations,
+            daemon=True,
+            name="custom-video-login-batch",
+        )
+        t.start()
+    return count
