@@ -460,9 +460,26 @@ async function toggleGeminiKey(id, active) {
 }
 
 async function delGeminiKey(id) {
-  if (!confirm('Delete this key?')) return;
-  await api('DELETE', `/api/v1/admin/gemini-keys/${id}`);
-  loadGeminiKeys();
+  if (!confirm('Delete this key? This permanently removes it from the key manager.')) return;
+  const button = document.querySelector(`button[onclick="delGeminiKey(${id})"]`);
+  if (button) { button.disabled = true; button.textContent = 'Deleting…'; }
+  try {
+    const res = await fetch(API + `/api/v1/admin/gemini-keys/${id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok || data.ok !== true) {
+      const detail = data.detail || data.error || `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    await loadGeminiKeys();
+    alert('Key deleted successfully.');
+  } catch (e) {
+    alert('Could not delete key: ' + (e && e.message ? e.message : 'Request failed') + '\\nNo key was removed unless the server confirmed deletion.');
+    if (button) { button.disabled = false; button.textContent = 'Delete'; }
+  }
 }
 
 function startKeyRefresh() {
