@@ -784,10 +784,20 @@
     brooklyn: [{ name: 'love', count: 11, emoji: '💕' }],
   };
 
-  $('plusBtn').addEventListener('click', () => {
+  $('plusBtn').addEventListener('click', async () => {
     const list = $('presetList');
     list.innerHTML = '';
-    const presets = PRESETS[currentGirl.id] || [];
+    let presets = [];
+    try {
+      const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(currentGirl.id));
+      if (r.ok) {
+        const d = await r.json();
+        presets = d.presets || [];
+      }
+    } catch (e) { /* fall through to the bundled map */ }
+    if (!presets.length) {
+      presets = PRESETS[currentGirl.id] || [];
+    }
     if (!presets.length) {
       list.innerHTML = '<div class="sheet-sub">No presets yet for ' + currentGirl.name + '.</div>';
     }
