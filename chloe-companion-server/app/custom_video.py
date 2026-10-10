@@ -261,7 +261,7 @@ def run_custom_generation_with_login(request_id: int) -> None:
             detail = re.sub(
                 r"(?i)(?:refresh.?token|access.?token|token|password|api.?key)\\s*[:=]\\s*\\S+",
                 "[REDACTED]", detail)
-            detail = re.sub(r"(?i)eyJ[A-Za-z0-9_-]{12,}\\.[A-Za-z0-9_-]{12,}\\.[A-Za-z0-9_-]{8,}",
+            detail = re.sub(r"(?i)eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}",
                             "[REDACTED_JWT]", detail)
             print(f"[custom_video] request {request_id} failed: "
                   f"{e.__class__.__name__}; detail={detail or 'no detail'}",
