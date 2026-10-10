@@ -31,15 +31,15 @@ STAGE_NAMES = {
 }
 
 STAGE_DESCRIPTIONS = {
-    1: "lift tease, lifting her shirt playfully, teasing smile",
-    2: "shirt off, topless, holding her top, bedroom setting",
-    3: "boob grabs, touching and holding her breasts, sensual expression",
-    4: "nipple pinch, gently pinching her nipples, passionate smile",
-    5: "pants off, wearing only underwear or bottomless, sexy pose",
-    6: "plays with herself, touching herself intimately, passionate movement",
-    7: "titty fuck, intimate chest scene, close up",
+    1: "lift tease, lifting her shirt playfully, teasing smile, she whispers \"Like what you see?\"",
+    2: "shirt off, topless, holding her top, bedroom setting, she says \"Much better, don't you think?\"",
+    3: "boob grabs, touching and holding her breasts, sensual expression, soft moans",
+    4: "nipple pinch, gently pinching her nipples, passionate smile, she gasps \"Oh, that feels so good\"",
+    5: "pants off, wearing only underwear, sexy pose, she teases \"Want to see the rest?\"",
+    6: "plays with herself, touching herself intimately, passionate movement, breathy moans, she whispers \"I wish it was you touching me\"",
+    7: "titty fuck, intimate chest scene, close up, she moans",
     8: "oral, intimate oral scene, close up",
-    9: "sex, passionate intimate scene",
+    9: "sex, passionate intimate scene, she cries out \"Yes, right there\"",
 }
 
 # Male-character versions of the give stages. The daily auto-generator picks
@@ -58,15 +58,15 @@ MALE_STAGE_NAMES = {
 }
 
 MALE_STAGE_DESCRIPTIONS = {
-    1: "shirt lift tease, lifting his shirt playfully, teasing grin, showing off his torso",
-    2: "shirt off, shirtless, holding his shirt, bedroom setting",
+    1: "shirt lift tease, lifting his shirt playfully, teasing grin, showing off his torso, he says \"Enjoy the view\"",
+    2: "shirt off, shirtless, holding his shirt, bedroom setting, he says \"Better?\"",
     3: "chest flex, flexing his chest and arms, strong masculine expression",
     4: "nipple tease, thumbing his nipples slowly, teasing grin",
-    5: "pants off, down to his underwear, confident masculine pose",
-    6: "stroking himself, working his cock slowly, hungry masculine expression",
+    5: "pants off, down to his underwear, confident masculine pose, he says \"Your turn\"",
+    6: "stroking himself, working his cock slowly, hungry masculine expression, he groans \"God, you turn me on\"",
     7: "deep thrusts, pounding rhythm, intense close up",
-    8: "getting head, intimate oral scene, his pleasure close up",
-    9: "fucking, passionate hard thrusting, intimate scene",
+    8: "getting head, intimate oral scene, his pleasure close up, he groans",
+    9: "fucking, passionate hard thrusting, intimate scene, he says \"You feel so good\"",
 }
 
 
@@ -335,17 +335,17 @@ def spawn_give_generation_job(gen_id: int) -> None:
     t.start()
 
 
-def trigger_daily_give_generations() -> list[int]:
+def trigger_daily_give_generations(day: str | None = None) -> list[int]:
     """Check and queue daily give generations for all public characters x 9 stages.
 
     For each public character and for each give stage (1..9), if no generation exists
-    for today (day=YYYY-MM-DD), queue a new generation job.
+    for the given day (day=YYYY-MM-DD, defaults to today), queue a new generation job.
     Returns list of queued give generation IDs.
     """
     conn = db.connect()
     queued_ids: list[int] = []
     try:
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_str = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         # Public characters only (no owner_user_id)
         public_chars = [c for c in characters.get_characters() if not c.get("owner_user_id")]
 

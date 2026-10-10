@@ -157,12 +157,30 @@ class GiveGenAdminApiTest(unittest.TestCase):
         self.assertEqual(give_gen.stage_name_for("chloe", 6), "plays w/ herself")
         self.assertEqual(
             give_gen.stage_description_for("chloe", 1),
-            "lift tease, lifting her shirt playfully, teasing smile",
+            "lift tease, lifting her shirt playfully, teasing smile, "
+            'she whispers "Like what you see?"',
         )
         self.assertEqual(
             give_gen.stage_description_for("mara", 7),
-            "titty fuck, intimate chest scene, close up",
+            "titty fuck, intimate chest scene, close up, she moans",
         )
+
+    def test_trigger_day_override(self):
+        # day= override queues a second round without touching today's rows
+        self.conn.execute(
+            "INSERT INTO give_generations (girl_id, stage, prompt, day, status) "
+            "VALUES ('mara', 1, 'old prompt', '2026-10-10', 'pending')"
+        )
+        self.conn.commit()
+        with mock.patch("app.give_gen._process_queued_give_generations"), \
+             mock.patch("app.give_gen.characters.get_characters",
+                        return_value=[{"id": "mara", "name": "Mara"}]), \
+             mock.patch("app.give_gen.db.connect", return_value=self.conn):
+            queued = give_gen.trigger_daily_give_generations(day="2026-10-11")
+        self.assertEqual(len(queued), 9)
+        days = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT day FROM give_generations").fetchall()}
+        self.assertEqual(days, {"2026-10-10", "2026-10-11"})
 
     @mock.patch("app.give_gen._process_queued_give_generations")
     @mock.patch("app.give_gen.characters.get_characters")

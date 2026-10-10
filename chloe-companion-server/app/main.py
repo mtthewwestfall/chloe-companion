@@ -1579,7 +1579,7 @@ def admin_delete_give_generation(gen_id: int, request: Request):
 
 
 @app.post("/api/v1/admin/give-generations/generate-daily")
-def admin_trigger_daily_give_generations(request: Request):
+def admin_trigger_daily_give_generations(request: Request, day: str = ""):
     _require_admin(request)
     conn = _conn()
     try:
@@ -1588,7 +1588,7 @@ def admin_trigger_daily_give_generations(request: Request):
             raise HTTPException(status_code=503, detail="sogni_login_required")
     finally:
         conn.close()
-    queued = give_gen.trigger_daily_give_generations()
+    queued = give_gen.trigger_daily_give_generations(day=day or None)
     return {"ok": True, "queued": len(queued), "generation_ids": queued}
 
 # ---------------------------------------------------------------------------
