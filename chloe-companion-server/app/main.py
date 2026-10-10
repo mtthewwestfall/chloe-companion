@@ -67,7 +67,7 @@ import urllib.request
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -78,6 +78,17 @@ app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 # Finished regular media-request generations are served from /generated/.
 os.makedirs(config.GENERATED_DIR, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=config.GENERATED_DIR), name="generated")
+
+@app.get("/admin.html", response_class=HTMLResponse, include_in_schema=False)
+def admin_page():
+    """Serve the companion admin panel from the same origin as its API."""
+    path = os.path.join(os.path.dirname(config.DATA_DIR),
+                        "chloe-companion-app", "admin.html")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return HTMLResponse(content=fh.read())
+    except OSError:
+        raise HTTPException(status_code=404, detail="admin_page_not_found")
 
 # Chloe's opener for a brand-new verified user who hasn't sent anything yet
 # (user's words, 2026-09-30). Seeded into her chat at email-verification time.
