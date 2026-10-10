@@ -193,6 +193,18 @@ def delete_give_generation(conn: Any, gen_id: int) -> dict[str, Any] | None:
     return get_give_generation(conn, gen_id)
 
 
+_APPROVED_REF_DIR = os.path.join(os.path.dirname(__file__), "ref_frames")
+
+
+def _approved_reference_frame(girl_id: str) -> str | None:
+    """Owner-approved topless reference photo on disk, if one exists."""
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        path = os.path.join(_APPROVED_REF_DIR, f"{girl_id}-topless{ext}")
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
     """Reference frame for stages past 2, where the top is already off.
 
