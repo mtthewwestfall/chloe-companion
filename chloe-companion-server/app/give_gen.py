@@ -194,12 +194,16 @@ def delete_give_generation(conn: Any, gen_id: int) -> dict[str, Any] | None:
 
 
 def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
-    """Last frame of the approved stage-2 ("shirt off") give video.
+    """Reference frame for stages past 2, where the top is already off.
 
-    Used as the Sogni reference for stages past 2, where the top is
-    already off (the first frame of stage 2 still has it on). Returns
-    None when unavailable so the caller falls back to the avatar.
+    Prefers the owner-approved topless photo on disk, then the last
+    frame of the approved stage-2 ("shirt off") give video (the first
+    frame still has the top on). Returns None when unavailable so the
+    caller falls back to the avatar.
     """
+    approved = _approved_reference_frame(girl_id)
+    if approved:
+        return approved
     try:
         # Latest stage-2 video preferred (last frame = top off); a photo
         # is only used when no video exists.

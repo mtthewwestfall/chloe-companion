@@ -195,6 +195,13 @@ class GiveGenAdminApiTest(unittest.TestCase):
         self.assertEqual(gens[0]["stage_name"],
                          give_gen.MALE_STAGE_NAMES[gens[0]["stage"]])
 
+    def test_approved_reference_frame_preferred(self):
+        with mock.patch("os.path.exists", return_value=True):
+            path = give_gen._approved_reference_frame("mara")
+        self.assertTrue(path.endswith("mara-topless.jpg"))
+        with mock.patch("os.path.exists", return_value=False):
+            self.assertIsNone(give_gen._approved_reference_frame("mara"))
+
     def _ok_run(self):
         m = mock.MagicMock()
         m.returncode = 0
