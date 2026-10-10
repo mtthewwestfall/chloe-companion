@@ -1,1 +1,49 @@
-{"shows":[{"id":"show_stub_001","starts_at":"2026-10-03T23:00:00-04:00","ticket_url":"https://example.invalid/tickets/stub-001","title":"STUB — Late Night with Chloe"},{"id":"show_stub_002","starts_at":"2026-10-05T22:00:00-04:00","ticket_url":"https://example.invalid/tickets/stub-002","title":"STUB — Sunday Slow Burn"}]}
+{
+  "shows": [
+    {
+      "id": "pub_1790642649402_210d0fbb",
+      "show_id": "pub_1790642649402_210d0fbb",
+      "show_type": "public",
+      "character_id": "chloe",
+      "title": "Special Live Room Experience",
+      "description": "Special Live Room Experience",
+      "price": 4.99,
+      "scheduled_at": null,
+      "status": "SCHEDULED",
+      "created_at": "2026-09-29T00:44:09.551440+00:00",
+      "starts_at": "2026-09-29T00:44:09.551440+00:00",
+      "ticket_url": "https://buy.stripe.com/28EfZafPldNlbdJfUldjO0b",
+      "duration_minutes": 30
+    },
+    {
+      "id": "pub_1790730733771_a3460ece",
+      "show_id": "pub_1790730733771_a3460ece",
+      "show_type": "public",
+      "character_id": "chloe",
+      "title": "Special Live Room Experience",
+      "description": "Special Live Room Experience",
+      "price": 4.99,
+      "scheduled_at": null,
+      "status": "SCHEDULED",
+      "created_at": "2026-09-30T01:12:13.917979+00:00",
+      "starts_at": "2026-09-30T01:12:13.917979+00:00",
+      "ticket_url": "https://buy.stripe.com/28EfZafPldNlbdJfUldjO0b",
+      "duration_minutes": 30
+    },
+    {
+      "id": "pub_1790730801019_78ff6d2c",
+      "show_id": "pub_1790730801019_78ff6d2c",
+      "show_type": "public",
+      "character_id": "chloe",
+      "title": "Special Live Room Experience",
+      "description": "Special Live Room Experience",
+      "price": 4.99,
+      "scheduled_at": null,
+      "status": "SCHEDULED",
+      "created_at": "2026-09-30T01:13:21.163936+00:00",
+      "starts_at": "2026-09-30T01:13:21.163936+00:00",
+      "ticket_url": "https://buy.stripe.com/28EfZafPldNlbdJfUldjO0b",
+      "duration_minutes": 30
+    }
+  ]
+}
