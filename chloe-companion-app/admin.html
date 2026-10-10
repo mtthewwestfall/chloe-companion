@@ -150,7 +150,8 @@
   <div id="tab-custom" class="hidden">
     <div class="girl-card">
       <div class="girl-name">Custom Video Requests</div>
-      <div class="sub" style="margin-bottom:12px;">Users describe a video — Sogni tries to make it. Blocked ones stay <b>pending</b> for you to fulfill manually.</div>
+      <div class="sub" style="margin-bottom:12px;">Mia can render pending customer requests with the saved Sogni login. Each finished video is delivered into the same character chat where the customer asked for it.</div>
+      <div style="margin-bottom:12px;"><button onclick="processPendingCustomVideos()">Mia: Make All Pending</button></div>
       <div style="margin-bottom:12px;">
         <button class="filter-btn active" onclick="setCustomFilter('')">All</button>
         <button class="filter-btn" onclick="setCustomFilter('pending')">Pending</button>
@@ -344,13 +345,40 @@ async function loadCustomVideos() {
   box.innerHTML = reqs.map(r => {
     const badge = r.status === 'fulfilled' ? '✅' : r.status === 'generating' ? '⏳' : '🕐';
     const video = r.video_url ? `<div style="margin-top:6px;"><a href="${r.video_url}" target="_blank" style="color:#6ab0ff;">${r.video_url}</a></div>` : '';
+    const action = r.status === 'pending'
+      ? `<div style="margin-top:10px;"><button onclick="fulfillCustomVideo(${Number(r.id)})">Mia: Make This Video</button></div>`
+      : '';
     const dt = (r.created_at || '').slice(0, 16).replace('T', ' ');
     return `<div class="girl-card" style="margin-bottom:10px;">
       <div style="font-weight:700;">${badge} ${r.girl_id} <span style="color:#888;font-weight:400;font-size:12px;">· ${r.status} · ${dt}</span></div>
       <div style="margin:6px 0;color:#ddd;">${(r.description || '').replace(/</g, '&lt;')}</div>
-      <div style="color:#888;font-size:12px;">user: ${r.user_id}</div>${video}
+      <div style="color:#888;font-size:12px;">user: ${r.user_id}</div>${video}${action}
     </div>`;
   }).join('');
+}
+
+async function fulfillCustomVideo(id) {
+  const data = await api('POST', `/api/v1/admin/custom-videos/${id}/fulfill`);
+  if (data.detail) {
+    alert(data.detail === 'sogni_login_required'
+      ? 'Mia needs the Sogni login saved in her chat before she can render these.'
+      : 'Could not start this request: ' + data.detail);
+    return;
+  }
+  alert('Mia picked up request #' + id + '. It will appear in the customer’s original character chat when finished.');
+  loadCustomVideos();
+}
+
+async function processPendingCustomVideos() {
+  const data = await api('POST', '/api/v1/admin/custom-videos/process-pending');
+  if (data.detail) {
+    alert(data.detail === 'sogni_login_required'
+      ? 'Mia needs the Sogni login saved in her chat before she can render these.'
+      : 'Could not start pending requests: ' + data.detail);
+    return;
+  }
+  alert('Mia queued ' + (data.queued || 0) + ' pending request(s). She will process them one at a time and deliver each video to its original character chat.');
+  loadCustomVideos();
 }
 
 let geminiKeys = [];
