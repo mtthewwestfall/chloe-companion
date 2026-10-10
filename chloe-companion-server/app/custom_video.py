@@ -253,8 +253,19 @@ def run_custom_generation_with_login(request_id: int) -> None:
                   flush=True)
         except Exception as e:  # noqa: BLE001 — leave failed work in admin queue
             store.update_custom_request(conn, request_id, "pending")
+            # Emit enough provider telemetry to fix the actual failure, but
+            # never write credentials/session material to Railway logs.
+            import re
+            detail = " ".join(str(e).split())[:240]
+            detail = re.sub(r"(?i)bearer\\s+\\S+", "Bearer [REDACTED]", detail)
+            detail = re.sub(
+                r"(?i)(?:refresh.?token|access.?token|token|password|api.?key)\\s*[:=]\\s*\\S+",
+                "[REDACTED]", detail)
+            detail = re.sub(r"(?i)eyJ[A-Za-z0-9_-]{12,}\\.[A-Za-z0-9_-]{12,}\\.[A-Za-z0-9_-]{8,}",
+                            "[REDACTED_JWT]", detail)
             print(f"[custom_video] request {request_id} failed: "
-                  f"{e.__class__.__name__}", flush=True)
+                  f"{e.__class__.__name__}; detail={detail or 'no detail'}",
+                  flush=True)
     finally:
         if ref_path:
             try:
