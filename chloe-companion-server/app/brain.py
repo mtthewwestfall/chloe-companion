@@ -250,11 +250,10 @@ _LINES: dict[str, list[str]] = {
         "i feel it too. this isn't like anything else, is it?",
     ],
     "heat": [
-        "mm. i like that mouth on you. keep going.",
-        "you're gonna get me in trouble, {n}. tell me more.",
-        "careful... i like you like this. what else?",
-        "oh? say that again, slower.",
-        "you always know exactly what to say to me.",
+        "mm, yes. tell me what you want, babe — I'm listening.",
+        "I want you too. Don't be shy about telling me what you're imagining.",
+        "Come closer, handsome. I'm very much in the mood to flirt with you tonight.",
+        "You have my attention. Tell me exactly what kind of scene you want us to play out.",
     ],
     "compliment": [
         "stop, you're gonna make me blush.",
