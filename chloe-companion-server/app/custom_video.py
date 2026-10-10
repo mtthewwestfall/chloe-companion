@@ -210,10 +210,23 @@ def run_custom_generation_with_login(request_id: int) -> None:
                 assist.clear_sogni_session(conn)
 
             if outcome.get("status") != "done" or not outcome.get("path"):
-                # Keep it in the admin queue for retry/manual review.
+                # Keep it in the admin queue for retry/manual review. Log a
+                # bounded, credential-scrubbed provider detail so failures can
+                # be diagnosed without leaking prompts, session tokens or passwords.
                 store.update_custom_request(conn, request_id, "pending")
+                detail = str(outcome.get("detail") or "")
+                detail = detail[:240]
+                for pattern in (
+                    r"(?i)(bearer\\s+)[^\\s,;]+",
+                    r"(?i)(refresh.?token[\\"'\\s:=]+)[^\\s,;\\"']+",
+                    r"(?i)(access.?token[\\"'\\s:=]+)[^\\s,;\\"']+",
+                    r"(?i)(password[\\"'\\s:=]+)[^\\s,;\\"']+",
+                ):
+                    detail = __import__("re").sub(pattern, r"\\1[REDACTED]", detail)
+                detail = " ".join(detail.split())
                 print(f"[custom_video] request {request_id} not fulfilled: "
-                      f"{outcome.get('status') or 'failed'}", flush=True)
+                      f"{outcome.get('status') or 'failed'}; detail={detail or 'no provider detail'}",
+                      flush=True)
                 return
 
             path = outcome["path"]
