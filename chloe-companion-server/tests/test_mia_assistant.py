@@ -134,7 +134,7 @@ class SogniParityTest(MiaBase):
         spawned = []
         with mock.patch.object(assist, "_spawn_sogni_plan_job",
                                lambda job_id: spawned.append(job_id)):
-            res = self.say("make a video of Hannah dancing")
+            res = self.say("make a video of Hannah dancing in the kitchen")
         self.assertIn("video of Hannah", res["brief"])
         self.assertEqual(len(spawned), 1)
         row = self.conn.execute(
