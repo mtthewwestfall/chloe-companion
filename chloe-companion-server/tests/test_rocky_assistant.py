@@ -95,6 +95,12 @@ class SetAndLaneTest(RockyBase):
         self.assertIsNone(
             assist._status_lane_redirect("rocky", "how's roof rover?"))
 
+    def test_rocky_brief_requires_cooperation_without_attitude(self):
+        brief = assist._ROCKY_BRIEF
+        self.assertIn("calm, respectful, and action-oriented", brief)
+        self.assertIn("Follow the owner's explicit instructions", brief)
+        self.assertIn("never posture, scold", brief)
+
     def test_brief_covers_all_projects_and_rules(self):
         brief = assist._owner_brief_reply("rocky")
         self.assertTrue(brief.endswith(assist._ROCKY_BRIEF))
