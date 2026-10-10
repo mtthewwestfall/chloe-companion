@@ -1448,6 +1448,50 @@ def admin_custom_videos(request: Request, status: str = ""):
     finally:
         conn.close()
 
+
+@app.post("/api/v1/admin/custom-videos/{request_id}/fulfill")
+def admin_fulfill_custom_video(request_id: int, request: Request):
+    """Mia renders one pending customer request using the saved Sogni login
+    and delivers the result into the exact character chat that requested it."""
+    _require_admin(request)
+    conn = _conn()
+    try:
+        if not assist.stored_sogni_session(conn):
+            raise HTTPException(status_code=503, detail="sogni_login_required")
+        row = conn.execute(
+            "SELECT status FROM custom_video_requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="request_not_found")
+        if row["status"] != "pending":
+            raise HTTPException(status_code=409, detail="request_not_pending")
+    finally:
+        conn.close()
+    custom_video.spawn_custom_generation_with_login(request_id)
+    return {"ok": True, "request_id": request_id, "status": "queued"}
+
+
+@app.post("/api/v1/admin/custom-videos/process-pending")
+def admin_process_pending_custom_videos(request: Request):
+    """Have Mia process the pending customer requests in order with the
+    saved Sogni login. The worker serializes renders and posts each video
+    into the original customer/character conversation."""
+    _require_admin(request)
+    conn = _conn()
+    try:
+        if not assist.stored_sogni_session(conn):
+            raise HTTPException(status_code=503, detail="sogni_login_required")
+    finally:
+        conn.close()
+    try:
+        count = custom_video.spawn_pending_custom_generations()
+    except RuntimeError as e:
+        if str(e) == "sogni_login_required":
+            raise HTTPException(status_code=503, detail="sogni_login_required")
+        raise
+    return {"ok": True, "queued": count}
+
 # ---------------------------------------------------------------------------
 # Whispr Feed feed (2026-10-07): Instagram-stories-style daily posts per girl.
 # Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
