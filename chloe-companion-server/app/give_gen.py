@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import threading
 import traceback
 from datetime import datetime, timezone
@@ -191,6 +192,46 @@ def delete_give_generation(conn: Any, gen_id: int) -> dict[str, Any] | None:
     return get_give_generation(conn, gen_id)
 
 
+def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
+    """First frame of his approved stage-2 ("shirt off") give video.
+
+    Used as the Sogni reference for male characters on stages past 2,
+    where he is already topless. Returns None when unavailable so the
+    caller falls back to the avatar.
+    """
+    try:
+        row = conn.execute(
+            "SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give' "
+            "AND stage = 2 ORDER BY id DESC LIMIT 1",
+            (girl_id,)).fetchone()
+    except Exception:
+        return None
+    video_url = (row[0] or "").strip() if row else ""
+    if not video_url:
+        return None
+    video_path = assist._fetch_first_frame(video_url)
+    if not video_path:
+        return None
+    try:
+        exe = assist._ffmpeg_exe()
+        if not exe:
+            return None
+        fd, frame_path = tempfile.mkstemp(suffix=".jpg")
+        os.close(fd)
+        if assist._grab_frame(exe, video_path, 0.0, frame_path, 768):
+            return frame_path
+        try:
+            os.unlink(frame_path)
+        except OSError:
+            pass
+        return None
+    finally:
+        try:
+            os.unlink(video_path)
+        except OSError:
+            pass
+
+
 def _run_give_generation_job(gen_id: int) -> None:
     """Worker thread: render 15s Sogni video using the saved Sogni login session."""
     conn = db.connect()
@@ -209,7 +250,12 @@ def _run_give_generation_job(gen_id: int) -> None:
         update_give_generation_status(conn, gen_id, "generating")
 
         girl = characters.get_character(gen["girl_id"])
-        ref_path = assist._fetch_first_frame(girl.get("avatar_url") or "")
+        stage = gen.get("stage") or 0
+        ref_path = None
+        if stage > 2 and _is_male_character(gen["girl_id"]):
+            ref_path = _topless_reference_frame(conn, gen["girl_id"])
+        if not ref_path:
+            ref_path = assist._fetch_first_frame(girl.get("avatar_url") or "")
         prompt = assist._sogni_plan_prompt(
             girl.get("name") or gen["girl_id"], gen["prompt"]
         )
