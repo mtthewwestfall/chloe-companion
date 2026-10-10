@@ -77,7 +77,7 @@ from . import assist, auth, brain, characters, config, creator, custom_video, db
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://lockeddoor.ai"],
+    allow_origins=["https://lockeddoor.ai", "https://lockdoor.ai"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-Admin-Token"],
@@ -1438,7 +1438,9 @@ def create_custom_video(body: CustomVideoIn, request: Request):
         req = store.save_custom_request(conn, user_id, cid, description)
         # Attempt Sogni generation in the background when configured;
         # otherwise it stays pending for manual fulfillment.
-        if config.SOGNI_API_KEY:
+        if assist.stored_sogni_session(conn):
+            custom_video.spawn_custom_generation_with_login(req["id"])
+        elif config.SOGNI_API_KEY:
             custom_video.spawn_custom_generation(req["id"])
         return {"id": req["id"], "status": req["status"]}
     finally:
@@ -1470,12 +1472,15 @@ def admin_custom_videos(request: Request, status: str = ""):
 
 @app.post("/api/v1/admin/custom-videos/{request_id}/fulfill")
 def admin_fulfill_custom_video(request_id: int, request: Request):
-    """Mia renders one pending customer request using the saved Sogni login
+    """Mia renders one pending customer request using the saved Sogni login or API key
     and delivers the result into the exact character chat that requested it."""
     _require_admin(request)
     conn = _conn()
+    has_session = False
     try:
-        if not assist.stored_sogni_session(conn):
+        has_session = bool(assist.stored_sogni_session(conn))
+        has_key = bool(config.SOGNI_API_KEY)
+        if not (has_session or has_key):
             raise HTTPException(status_code=503, detail="sogni_login_required")
         row = conn.execute(
             "SELECT status FROM custom_video_requests WHERE id = ?",
@@ -1487,19 +1492,24 @@ def admin_fulfill_custom_video(request_id: int, request: Request):
             raise HTTPException(status_code=409, detail="request_not_pending")
     finally:
         conn.close()
-    custom_video.spawn_custom_generation_with_login(request_id)
+    if has_session:
+        custom_video.spawn_custom_generation_with_login(request_id)
+    else:
+        custom_video.spawn_custom_generation(request_id)
     return {"ok": True, "request_id": request_id, "status": "queued"}
 
 
 @app.post("/api/v1/admin/custom-videos/process-pending")
 def admin_process_pending_custom_videos(request: Request):
     """Have Mia process the pending customer requests in order with the
-    saved Sogni login. The worker serializes renders and posts each video
+    saved Sogni login or API key. The worker serializes renders and posts each video
     into the original customer/character conversation."""
     _require_admin(request)
     conn = _conn()
     try:
-        if not assist.stored_sogni_session(conn):
+        has_session = bool(assist.stored_sogni_session(conn))
+        has_key = bool(config.SOGNI_API_KEY)
+        if not (has_session or has_key):
             raise HTTPException(status_code=503, detail="sogni_login_required")
     finally:
         conn.close()

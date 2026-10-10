@@ -119,14 +119,27 @@ def run_custom_generation(request_id: int) -> None:
         row = conn.execute(
             "SELECT * FROM custom_video_requests WHERE id = ?", (request_id,)
         ).fetchone()
-        if not row or row["status"] not in ("pending", "generating"):
+        if not row or row["status"] != "pending":
             return
         req = dict(row)
-        store.update_custom_request(conn, request_id, "generating")
+
+        cur = conn.execute(
+            "UPDATE custom_video_requests SET status = 'generating' "
+            "WHERE id = ? AND status = 'pending'",
+            (request_id,),
+        )
+        conn.commit()
+        if cur.rowcount != 1:
+            return
+
         # Resolve the girl for face-lock / naming. Import here to avoid a
         # hard import cycle (characters imports config only, but be safe).
         from . import characters
-        girl = characters.get_character(req["girl_id"])
+        girl = characters.get_character(req["girl_id"], user_id=req["user_id"])
+        if not girl:
+            store.update_custom_request(conn, request_id, "pending")
+            return
+
         try:
             url, cost = asyncio.run(
                 _generate_custom_async(request_id, girl, req["description"]))
@@ -137,14 +150,27 @@ def run_custom_generation(request_id: int) -> None:
                   f"{traceback.format_exc()}", flush=True)
             store.update_custom_request(conn, request_id, "pending")
             return
-        # Register the clip in her give library (stage left untagged for
-        # the owner to set in admin).
+
+        dest = os.path.join(config.GENERATED_DIR, f"custom_{request_id}.mp4")
+        size = 0
+        try:
+            size = os.path.getsize(dest)
+        except OSError:
+            pass
+
+        # Register the clip in her give library and deliver into her character chat.
         conn.execute(
             "INSERT INTO girl_media (girl_id, kind, url, preset) "
             "VALUES (?, 'give', ?, 'custom')",
-            (girl["id"], url),
+            (req["girl_id"], url),
         )
-        conn.commit()
+        store.log_turn(
+            conn, req["user_id"], req["girl_id"],
+            "I made that special video for you — it's right here. ❤️",
+            req["girl_id"],
+            [{"kind": "video", "url": url,
+              "name": f"{req['girl_id']}-custom-video.mp4", "size": size}],
+        )
         store.update_custom_request(conn, request_id, "fulfilled",
                                     video_url=url)
         print(f"[custom_video] request {request_id} fulfilled: {url} "
@@ -295,14 +321,25 @@ def _run_pending_custom_generations() -> None:
         conn.close()
     # Sequential renders avoid competing for the same Sogni plan/session.
     for request_id in ids:
-        run_custom_generation_with_login(request_id)
+        conn = db.connect()
+        try:
+            from . import assist
+            has_session = bool(assist.stored_sogni_session(conn))
+        finally:
+            conn.close()
+        if has_session:
+            run_custom_generation_with_login(request_id)
+        else:
+            run_custom_generation(request_id)
 
 
 def spawn_pending_custom_generations() -> int:
     conn = db.connect()
     try:
         from . import assist
-        if not assist.stored_sogni_session(conn):
+        has_session = bool(assist.stored_sogni_session(conn))
+        has_key = bool(config.SOGNI_API_KEY)
+        if not (has_session or has_key):
             raise RuntimeError("sogni_login_required")
         count = int(conn.execute(
             "SELECT COUNT(*) FROM custom_video_requests "
@@ -313,7 +350,7 @@ def spawn_pending_custom_generations() -> int:
         t = threading.Thread(
             target=_run_pending_custom_generations,
             daemon=True,
-            name="custom-video-login-batch",
+            name="custom-video-batch",
         )
         t.start()
     return count
