@@ -57,6 +57,153 @@
   let currentGirl = CHARACTERS[1];
   let avatarCycleTimer = null;
 
+  const CHARACTER_STATUS_KEY = 'whispr_character_status_v1';
+  const SCHEDULED_UPDATES_KEY = 'whispr_scheduled_updates_v1';
+  const scheduledUpdateTimers = new Map();
+  let scheduledUpdatesRestored = false;
+
+  function readStoredJson(key, fallback) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key) || 'null');
+      return value == null ? fallback : value;
+    } catch (e) { return fallback; }
+  }
+
+  function statusFor(characterId) {
+    const all = readStoredJson(CHARACTER_STATUS_KEY, {});
+    const item = all[characterId] || {};
+    const allowed = ['idle', 'working', 'finishing-up', 'finished'];
+    return allowed.includes(item.status) ? item.status : 'idle';
+  }
+
+  function statusLabel(status) {
+    return ({ idle: 'Idle', working: 'Working', 'finishing-up': 'Finishing up',
+      finished: 'Finished' })[status] || 'Idle';
+  }
+
+  function paintCharacterStatus() {
+    const status = statusFor(currentGirl.id);
+    const chip = $('chatStatus');
+    const label = $('chatStatusText');
+    if (chip && label) {
+      chip.className = 'chat-status status-' + status;
+      label.textContent = statusLabel(status);
+    }
+  }
+
+  function setCharacterStatus(characterId, status) {
+    const all = readStoredJson(CHARACTER_STATUS_KEY, {});
+    all[characterId] = { status, updatedAt: Date.now() };
+    try { localStorage.setItem(CHARACTER_STATUS_KEY, JSON.stringify(all)); } catch (e) {}
+    if (currentGirl && currentGirl.id === characterId) paintCharacterStatus();
+    const landing = $('landingView');
+    if (landing && !landing.classList.contains('hidden')) renderGirlCards();
+  }
+
+  function inferCharacterStatus(reply, requestText) {
+    const r = String(reply || '').toLowerCase();
+    const q = String(requestText || '').toLowerCase();
+    if (/\\b(finishing up|almost done|wrapping up|finali[sz]ing|putting the final touches)\\b/.test(r))
+      return 'finishing-up';
+    if (/\\b(started|queued|in progress|still working|working on it|running in the background|job (?:is )?running)\\b/.test(r))
+      return 'working';
+    if (/\\b(finished|completed|successfully created|successfully saved|here (?:it|they) (?:is|are)|done —|all done)\\b/.test(r)
+        || (/(\\b(build|make|create|write|fix|deploy|generate|code|research|work on)\\b)/.test(q)
+            && /\\b(done|created|saved|generated|completed|fixed|deployed|ready for you|attached below)\\b/.test(r)))
+      return 'finished';
+    return 'idle';
+  }
+
+  function parseUpdateDelay(text) {
+    if (!/\\b(update|status|check back|follow.?up|progress report)\\b/i.test(text || '')) return 0;
+    const match = String(text).match(/\\bin\\s+(\\d{1,5})\\s*(minutes?|mins?|m|hours?|hrs?|h)\\b/i);
+    if (!match) return 0;
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+    const multiplier = /^(h|hr|hrs|hour|hours)$/.test(unit) ? 3600000 : 60000;
+    const delay = amount * multiplier;
+    return delay >= 60000 && delay <= 7 * 24 * 60 * 60000 ? delay : 0;
+  }
+
+  function readScheduledUpdates() {
+    const updates = readStoredJson(SCHEDULED_UPDATES_KEY, []);
+    return Array.isArray(updates) ? updates : [];
+  }
+
+  function saveScheduledUpdates(updates) {
+    try { localStorage.setItem(SCHEDULED_UPDATES_KEY, JSON.stringify(updates)); } catch (e) {}
+  }
+
+  function scheduleCharacterUpdate(characterId, delayMs) {
+    const updates = readScheduledUpdates().filter((item) => item.characterId !== characterId);
+    const item = { characterId, dueAt: Date.now() + delayMs };
+    updates.push(item);
+    saveScheduledUpdates(updates);
+    armScheduledUpdate(item);
+    const minutes = Math.max(1, Math.round(delayMs / 60000));
+    showToast(statusName(characterId) + ' will give you a status update in ' + minutes + ' min' + (minutes === 1 ? '' : 's'), 3600);
+  }
+
+  function statusName(characterId) {
+    const character = CHARACTERS.find((item) => item.id === characterId);
+    return character ? character.name : characterId;
+  }
+
+  function armScheduledUpdate(item) {
+    if (scheduledUpdateTimers.has(item.characterId))
+      clearTimeout(scheduledUpdateTimers.get(item.characterId));
+    const delay = Math.max(0, Math.min(item.dueAt - Date.now(), 2147483000));
+    const timer = setTimeout(() => {
+      scheduledUpdateTimers.delete(item.characterId);
+      if (item.dueAt > Date.now()) { armScheduledUpdate(item); return; }
+      runScheduledUpdate(item);
+    }, delay);
+    scheduledUpdateTimers.set(item.characterId, timer);
+  }
+
+  async function runScheduledUpdate(item) {
+    const updates = readScheduledUpdates().filter((entry) =>
+      !(entry.characterId === item.characterId && entry.dueAt === item.dueAt));
+    saveScheduledUpdates(updates);
+    const prompt = 'Scheduled status update you promised: report your current status using exactly one of Idle, Working, Finishing up, or Finished, then briefly explain the actual progress on the task we discussed. Be honest; do not claim work is complete unless it really is.';
+    const isOpen = currentGirl && currentGirl.id === item.characterId
+      && !$('chatView').classList.contains('hidden');
+    setCharacterStatus(item.characterId, 'working');
+    if (isOpen) {
+      addText('him', 'Please give me the status update you promised.');
+      typingRow.classList.remove('hidden');
+      scrollBottom();
+    }
+    try {
+      const result = await ApiClient.chat(prompt, item.characterId, []);
+      const reply = result.reply_text || 'I could not get a progress update right now.';
+      const explicit = reply.match(/\\b(idle|working|finishing up|finished)\\b/i);
+      if (explicit) {
+        const value = explicit[1].toLowerCase().replace(' ', '-');
+        setCharacterStatus(item.characterId, value === 'finishing-up' ? 'finishing-up' : value);
+      } else {
+        setCharacterStatus(item.characterId, inferCharacterStatus(reply, prompt));
+      }
+      if (isOpen && currentGirl.id === item.characterId) {
+        typingRow.classList.add('hidden');
+        addText('her', reply);
+      } else {
+        showToast(statusName(item.characterId) + ''s status update is ready in their chat', 4200);
+      }
+    } catch (e) {
+      if (isOpen) typingRow.classList.add('hidden');
+      setCharacterStatus(item.characterId, 'idle');
+      showToast('Could not fetch ' + statusName(item.characterId) + ''s update. Open their chat and ask again.', 4200);
+    }
+  }
+
+  function restoreScheduledUpdates() {
+    if (scheduledUpdatesRestored) return;
+    scheduledUpdatesRestored = true;
+    readScheduledUpdates().forEach(armScheduledUpdate);
+  }
+
+
   function startAvatarCycle() {
     const video = $('chatAvatarVideo');
     const clips = currentGirl.videos || [];
@@ -91,11 +238,12 @@
       if (c.bestFor) descBits.push(`<b>Best for:</b> ${c.bestFor}`);
       const descHtml = descBits.length
         ? `<div class="girl-desc">${descBits.join('<br>')}</div>` : '';
+      const status = statusFor(c.id);
       el.innerHTML = `
         <img class="girl-photo" src="${c.avatar}" alt="${c.name}" loading="lazy">
         <div class="girl-info">
           <div class="girl-name">${c.name}</div>
-          <span class="online-dot">● Online Now</span>
+          <span class="girl-status status-${status}"><span class="status-dot"></span>${statusLabel(status)}</span>
           ${descHtml}
           <button class="start-chat-btn">[ Chat on Whispr ]</button>
         </div>`;
@@ -149,6 +297,7 @@
     const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[1];
     currentGirl = girl;
     $('chatName').textContent = girl.name;
+    paintCharacterStatus();
     clearPendingAttachments();
     // Owner media attachments work in every character thread.
     $('attachBtn').classList.remove('hidden');
@@ -559,6 +708,8 @@
     }
     if (!text && !readyAttachments.length) return;
     sending = true;
+    const targetCharacterId = currentGirl.id;
+    const requestedUpdateDelay = parseUpdateDelay(text);
     if (readyAttachments.length) addAttachments('him', readyAttachments);
     if (text) addText('him', text);
     clearPendingAttachments();
@@ -570,8 +721,11 @@
     await new Promise((r) => setTimeout(r, 900 + Math.random() * 900));
 
     try {
+      setCharacterStatus(targetCharacterId, 'working');
       const res = await ApiClient.chat(
-        text, currentGirl.id, readyAttachments.map((att) => att.id));
+        text, targetCharacterId, readyAttachments.map((att) => att.id));
+      setCharacterStatus(targetCharacterId, inferCharacterStatus(res.reply_text, text));
+      if (requestedUpdateDelay) scheduleCharacterUpdate(targetCharacterId, requestedUpdateDelay);
       typingRow.classList.add('hidden');
       if (res.voice_note_url) {
         addVoiceNote(res.voice_note_url, res.reply_text);
@@ -585,6 +739,7 @@
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
+      setCharacterStatus(targetCharacterId, 'idle');
       addText('her', 'hmm, lost you for a second. say that again?');
     }
     sending = false;
@@ -1296,6 +1451,7 @@
   }
 
   async function bootChat(isFirstHello, hasHistory = false) {
+    restoreScheduledUpdates();
     dayDividerIfNeeded();
     $('apiBaseLine').textContent = 'api: ' + CONFIG.API_BASE_URL;
     $('proactiveToggle').checked = localStorage.getItem('chloe_proactive') !== 'off';
