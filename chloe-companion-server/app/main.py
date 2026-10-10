@@ -849,11 +849,13 @@ async def upload_chat_attachment(request: Request,
     """
     user_id = _current_user_id(request)
     cid = (character_id or "").strip().lower()
-    if not assist.is_assistant_character(cid) \
-            or user_id not in assist._owner_ids():
+    if user_id not in assist._owner_ids():
         raise HTTPException(
             status_code=403,
-            detail="attachments are owner-only (assistant threads)")
+            detail="attachments are owner-only")
+    # Resolve through the same visibility/ownership rules as a chat turn.
+    character = characters.get_character(cid, user_id)
+    cid = character["id"]
     data = await file.read(assist.ATTACHMENT_READ_LIMIT + 1)
     conn = _conn()
     try:
@@ -884,11 +886,10 @@ def chat(body: ChatIn, request: Request):
         attachment_records: list[dict[str, Any]] = []
         public_attachments: list[dict[str, Any]] = []
         if body.attachment_ids:
-            if not assist.is_assistant_character(cid) \
-                    or user_id not in assist._owner_ids():
+            if user_id not in assist._owner_ids():
                 raise HTTPException(
                     status_code=403,
-                    detail="attachments are owner-only (assistant threads)")
+                    detail="attachments are owner-only")
             try:
                 attachment_records = assist.get_chat_attachments(
                     conn, user_id, cid, body.attachment_ids)
