@@ -436,6 +436,19 @@ def _startup():
     # GEMINI_PROBER=0.
     gemini_keys.start_prober()
 
+    # Background daily give generator loop: automatically triggers daily
+    # 15s Sogni give generations for each public character x 9 give stages.
+    def _auto_daily_gives_loop():
+        while True:
+            try:
+                give_gen.trigger_daily_give_generations()
+            except Exception as e:
+                print(f"[give_gen] auto daily gives loop exception: {e}", flush=True)
+            time.sleep(12 * 3600)
+
+    import threading
+    threading.Thread(target=_auto_daily_gives_loop, daemon=True, name="auto-daily-gives").start()
+
 
 # ---------------------------------------------------------------------------
 # Dev-agent bridge (2026-10-08): the owner's dev agent polls here for
