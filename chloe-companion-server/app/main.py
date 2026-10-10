@@ -72,7 +72,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, her_day, media_gen, photos, shows, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, media_gen, photos, shows, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 app.add_middleware(
@@ -435,6 +435,19 @@ def _startup():
     # fresh off the request path (see app/gemini_keys.py). Disable with
     # GEMINI_PROBER=0.
     gemini_keys.start_prober()
+
+    # Background daily give generator loop: automatically triggers daily
+    # 15s Sogni give generations for each public character x 9 give stages.
+    def _auto_daily_gives_loop():
+        while True:
+            try:
+                give_gen.trigger_daily_give_generations()
+            except Exception as e:
+                print(f"[give_gen] auto daily gives loop exception: {e}", flush=True)
+            time.sleep(12 * 3600)
+
+    import threading
+    threading.Thread(target=_auto_daily_gives_loop, daemon=True, name="auto-daily-gives").start()
 
 
 # ---------------------------------------------------------------------------
@@ -1521,6 +1534,63 @@ def admin_process_pending_custom_videos(request: Request):
         raise
     return {"ok": True, "queued": count}
 
+
+# ---------------------------------------------------------------------------
+# Admin: give generations for public characters
+# GET  /api/v1/admin/give-generations (admin) -> {generations:[...]}
+# POST /api/v1/admin/give-generations/{gen_id}/approve (admin) -> {ok, generation}
+# POST /api/v1/admin/give-generations/{gen_id}/delete (admin) -> {ok, generation}
+# POST /api/v1/admin/give-generations/generate-daily (admin) -> {ok, queued}
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/give-generations")
+def admin_list_give_generations(request: Request, status: str = "all", girl_id: str = "", day: str = ""):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        return {"generations": give_gen.list_give_generations(conn, status=status, girl_id=girl_id, day=day)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/give-generations/{gen_id}/approve")
+def admin_approve_give_generation(gen_id: int, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        res = give_gen.approve_give_generation(conn, gen_id)
+        if not res:
+            raise HTTPException(status_code=404, detail="generation_not_found")
+        return {"ok": True, "generation": res}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/give-generations/{gen_id}/delete")
+def admin_delete_give_generation(gen_id: int, request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        res = give_gen.delete_give_generation(conn, gen_id)
+        if not res:
+            raise HTTPException(status_code=404, detail="generation_not_found")
+        return {"ok": True, "generation": res}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/give-generations/generate-daily")
+def admin_trigger_daily_give_generations(request: Request):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        session = assist.stored_sogni_session(conn)
+        if not session:
+            raise HTTPException(status_code=503, detail="sogni_login_required")
+    finally:
+        conn.close()
+    queued = give_gen.trigger_daily_give_generations()
+    return {"ok": True, "queued": len(queued), "generation_ids": queued}
+
 # ---------------------------------------------------------------------------
 # Whispr Feed feed (2026-10-07): Instagram-stories-style daily posts per girl.
 # Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
@@ -1708,12 +1778,6 @@ def admin_her_day_generate_all(request: Request):
 # Manage gives, mains, typing mains, activities per character.
 # Token-gated via X-Admin-Token (same as other admin endpoints).
 # ---------------------------------------------------------------------------
-
-def _require_admin(request: Request):
-    token = request.headers.get("X-Admin-Token", "")
-    if not token or token != config.ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="admin_required")
-
 
 class GirlMediaIn(BaseModel):
     girl_id: str
