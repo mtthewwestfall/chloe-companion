@@ -16,11 +16,7 @@ is unreachable). `GET /api/v1/characters` serves `[{id, name, avatar_url}]`.
   rolling digest are namespaced per `(user_id, character_id)` — each
   character remembers him separately. Banks and trust state stay per-user.
 - Chloe (`"chloe"`) keeps her EXACT pinned engine: curated line banks,
-  `CHLOE_PINNED` facts, Liora voice. Other characters use the
-  persona-driven generic engine (`GenericMouth` in `app/brain.py`): same
-  warmth contract (warm, intimate, girlfriend-like, non-explicit; never
-  therapist mode; never punishes asking), voiced from the admin `persona`
-  text with a separately written reply bank. Their pinned facts are the
+  `CHLOE_PINNED` facts, Liora voice. Other characters use the persona-driven generic engine (`GenericMouth` in `app/brain.py`). All companion characters share a contract of warm, intimate, consensual adult flirting and sexual roleplay; they do not automatically deflect sexual requests or punish someone for asking. Individual admin personas and character-specific voices still apply. Rocky remains a non-romantic co-producer. Their pinned facts are the
   persona sentences; their voice notes use their `companion_voice`
   (`app/voice.py`, Chloe stays `liora`).
 - Photo drops are Chloe-only (never Chloe's photos on another character).
@@ -55,7 +51,7 @@ engine, but re-scoped:
 |---|---|---|
 | `START_MILESTONE` | `5` | New users never start below M5. |
 | `STAGE_DAYS` | `[2, 3, 5]` | Min **real** days at M5/M6/M7 before deepening to M6/M7/M8. Short on purpose — a paying subscriber should feel the relationship move within weeks, not seasons. |
-| `CHLOE_PINNED` | 20 facts | Her pinned self-facts, grouped by unlock stage. M5 = everyday surface (apartment, necklace, tank/sweats); M6–M8 = deeper texture (habits → small vulnerabilities → what "staying" means to her). All tasteful, non-explicit, girlfriend-warm. |
+| `CHLOE_PINNED` | 20 facts | Her pinned self-facts, grouped by unlock stage. M5 = everyday surface (apartment, necklace, tank/sweats); M6–M8 = deeper texture (habits → small vulnerabilities → what "staying" means to her). Adult, intimate, girlfriend-warm; consensual adult roleplay is allowed. |
 | `CONDUCT_NOTE` / `POSTURE_LINE` | — | Injected into chat context: how she holds him (warm from message one, never punishes asking, moves toward closeness). |
 
 `maybe_advance()` checks the stage clock once per chat turn and advances **at
