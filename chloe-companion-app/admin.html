@@ -89,6 +89,7 @@
     <button class="tab" onclick="showTab('accounts')">Accounts</button>
     <button class="tab" onclick="showTab('keys')">Gemini Keys</button>
     <button class="tab" onclick="showTab('custom')">Custom Videos</button>
+    <button class="tab" onclick="showTab('give-gens')">Give Generations</button>
   </div>
 
   <div id="tab-media">
@@ -161,6 +162,23 @@
       <div id="customVideoList"></div>
     </div>
   </div>
+
+  <div id="tab-give-gens" class="hidden">
+    <div class="girl-card">
+      <div class="girl-name">Daily Give Generations (15s)</div>
+      <div class="sub" style="margin-bottom:12px;">Daily automated 15-second Sogni generations for each public character across all 9 give stages. Approve to add to the girl's give library or delete to reject.</div>
+      <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button onclick="triggerDailyGiveGen()" style="padding:8px 16px;border-radius:8px;border:none;background:linear-gradient(135deg,#ff4d8d,#a855f7);color:#fff;cursor:pointer;font-weight:600;font-size:13px;">Generate Daily Gives Now</button>
+      </div>
+      <div style="margin-bottom:12px;">
+        <button class="filter-btn active" onclick="setGiveGenFilter('pending')">Pending</button>
+        <button class="filter-btn" onclick="setGiveGenFilter('all')">All</button>
+        <button class="filter-btn" onclick="setGiveGenFilter('approved')">Approved</button>
+        <button class="filter-btn" onclick="setGiveGenFilter('deleted')">Deleted</button>
+      </div>
+      <div id="giveGenList"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -191,9 +209,11 @@ function showTab(t) {
   document.getElementById('tab-accounts').classList.toggle('hidden', t !== 'accounts');
   document.getElementById('tab-keys').classList.toggle('hidden', t !== 'keys');
   document.getElementById('tab-custom').classList.toggle('hidden', t !== 'custom');
+  document.getElementById('tab-give-gens').classList.toggle('hidden', t !== 'give-gens');
   if (t === 'accounts') loadAccounts();
   if (t === 'keys') loadGeminiKeys();
   if (t === 'custom') loadCustomVideos();
+  if (t === 'give-gens') loadGiveGenerations();
 }
 
 async function api(method, path, body) {
@@ -379,6 +399,81 @@ async function processPendingCustomVideos() {
   }
   alert('Mia queued ' + (data.queued || 0) + ' pending request(s). She will process them one at a time and deliver each video to its original character chat.');
   loadCustomVideos();
+}
+
+let giveGenFilter = 'pending';
+
+async function setGiveGenFilter(f) {
+  giveGenFilter = f;
+  document.querySelectorAll('#tab-give-gens .filter-btn').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+  loadGiveGenerations();
+}
+
+async function loadGiveGenerations() {
+  const box = document.getElementById('giveGenList');
+  box.innerHTML = '<div class="sub">Loading…</div>';
+  const q = giveGenFilter ? `?status=${encodeURIComponent(giveGenFilter)}` : '';
+  const data = await api('GET', '/api/v1/admin/give-generations' + q);
+  const gens = data.generations || [];
+  if (!gens.length) { box.innerHTML = '<div class="sub">No give generations found.</div>'; return; }
+  box.innerHTML = gens.map(g => {
+    const badge = g.status === 'approved' ? '✅ Approved' : g.status === 'deleted' ? '❌ Deleted' : g.status === 'generating' ? '⏳ Generating' : g.status === 'failed' ? '⚠️ Failed' : '🕐 Pending';
+    const video = g.url ? `<video class="media-preview" src="${g.url}" controls playsinline preload="metadata"></video>` : '';
+    const errorText = g.error ? `<div style="color:#ff6b6b;font-size:12px;margin-top:4px;">Error: ${escapeHtml(g.error)}</div>` : '';
+    const stageName = STAGE_NAMES[g.stage] || ('stage ' + g.stage);
+    const actions = (g.status === 'pending' || g.status === 'failed')
+      ? `<div style="display:flex;gap:8px;margin-top:10px;">
+          ${g.url ? `<button onclick="approveGiveGen(${g.id})" style="padding:6px 14px;border-radius:6px;border:none;background:#51cf66;color:#000;font-weight:700;cursor:pointer;font-size:12px;">Approve & Add to Give Library</button>` : ''}
+          <button onclick="deleteGiveGen(${g.id})" style="padding:6px 14px;border-radius:6px;border:none;background:#ff4444;color:#fff;font-weight:700;cursor:pointer;font-size:12px;">Delete</button>
+         </div>`
+      : '';
+    const dt = (g.created_at || '').slice(0, 16).replace('T', ' ');
+    return `<div class="girl-card" style="margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span style="font-weight:700;font-size:16px;text-transform:capitalize;">${escapeHtml(g.girl_id)}</span>
+        <span class="stage-tag">Stage ${g.stage}: ${escapeHtml(stageName)}</span>
+      </div>
+      ${video}
+      <div style="font-size:12px;color:#aaa;margin-top:4px;">Prompt: ${escapeHtml(g.prompt)}</div>
+      <div style="color:#888;font-size:11px;margin-top:4px;">Status: ${badge} &middot; Day: ${g.day} &middot; Created: ${dt}</div>
+      ${errorText}
+      ${actions}
+    </div>`;
+  }).join('');
+}
+
+async function approveGiveGen(id) {
+  const data = await api('POST', `/api/v1/admin/give-generations/${id}/approve`);
+  if (data.ok) {
+    alert('Approved! Video added to ' + (data.generation.girl_id || 'girl') + '’s give library.');
+    loadGiveGenerations();
+    loadMedia();
+  } else if (data.detail) {
+    alert('Error approving generation: ' + data.detail);
+  }
+}
+
+async function deleteGiveGen(id) {
+  if (!confirm('Delete this generated give?')) return;
+  const data = await api('POST', `/api/v1/admin/give-generations/${id}/delete`);
+  if (data.ok) {
+    loadGiveGenerations();
+  } else if (data.detail) {
+    alert('Error deleting generation: ' + data.detail);
+  }
+}
+
+async function triggerDailyGiveGen() {
+  const data = await api('POST', '/api/v1/admin/give-generations/generate-daily');
+  if (data.detail) {
+    alert(data.detail === 'sogni_login_required'
+      ? 'Sogni login required in chat first (say "sogni login <user> <pass>" to Mia/Hannah).'
+      : 'Could not trigger generations: ' + data.detail);
+    return;
+  }
+  alert('Queued ' + (data.queued || 0) + ' daily give generation(s)! 15-second Sogni videos are rendering in background.');
+  loadGiveGenerations();
 }
 
 let geminiKeys = [];

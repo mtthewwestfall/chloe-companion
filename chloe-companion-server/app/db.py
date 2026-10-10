@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS girl_media (
     kind       TEXT NOT NULL,
     url        TEXT NOT NULL,
     preset     TEXT,
+    stage      INTEGER DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_girl_media_girl ON girl_media(girl_id, kind);
@@ -372,6 +373,22 @@ CREATE TABLE IF NOT EXISTS her_day_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_her_day_user_girl ON her_day_posts(user_id, girl_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_her_day_expires ON her_day_posts(expires_at);
+
+-- Give generations for public characters: daily 15s Sogni generations per give stage.
+CREATE TABLE IF NOT EXISTS give_generations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    girl_id     TEXT NOT NULL,
+    stage       INTEGER NOT NULL,
+    prompt      TEXT NOT NULL DEFAULT '',
+    url         TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | generating | approved | deleted | failed
+    error       TEXT NOT NULL DEFAULT '',
+    day         TEXT NOT NULL,                     -- YYYY-MM-DD
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_give_gen_girl_stage_day ON give_generations(girl_id, stage, day);
+CREATE INDEX IF NOT EXISTS idx_give_gen_status ON give_generations(status);
 """
 
 

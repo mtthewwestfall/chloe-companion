@@ -5160,7 +5160,8 @@ def _handle_sogni_logout(conn: sqlite3.Connection, user_id: str,
 
 def _sogni_plan_params(prompt: str, ref_path: str | None = None,
                          model: str | None = None,
-                         kind: str = "video") -> dict:
+                         kind: str = "video",
+                         duration: int | None = None) -> dict:
     """The one and only job shape she ever submits.
 
     billingMode is pinned to the plan here; there is no parameter,
@@ -5182,7 +5183,7 @@ def _sogni_plan_params(prompt: str, ref_path: str | None = None,
             "modelId": model or config.SOGNI_VIDEO_MODEL,
             "positivePrompt": prompt,
             "numberOfMedia": 1,
-            "duration": _SOGNI_PLAN_DURATION,
+            "duration": duration if duration is not None else _SOGNI_PLAN_DURATION,
             "fps": _SOGNI_PLAN_FPS,
             "width": _SOGNI_PLAN_WIDTH,
             "height": _SOGNI_PLAN_HEIGHT,
@@ -5243,7 +5244,8 @@ def _classify_sogni_failure(text: str) -> str:
 async def _sogni_plan_render(session: dict, prompt: str,
                                ref_path: str | None,
                                model: str | None = None,
-                               kind: str = "video") -> tuple[dict, dict | None]:
+                               kind: str = "video",
+                               duration: int | None = None) -> tuple[dict, dict | None]:
     """Submit one plan-billed render and download the clip.
 
     Returns (outcome, fresh_session): outcome is
@@ -5269,7 +5271,7 @@ async def _sogni_plan_render(session: dict, prompt: str,
                                 refresh_token=session.get(
                                     "refreshToken") or "")
         project = await client.projects.create(
-            _sogni_plan_params(prompt, ref_path, model, kind))
+            _sogni_plan_params(prompt, ref_path, model, kind, duration=duration))
         outcome["project_id"] = project.id
         urls: list = []
         try:
@@ -5336,11 +5338,12 @@ async def _sogni_plan_render(session: dict, prompt: str,
 
 
 def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
-                    model: str | None = None) -> tuple[dict, dict | None]:
+                    model: str | None = None,
+                    duration: int | None = None) -> tuple[dict, dict | None]:
     """Sync seam over the render (monkeypatched in tests)."""
     try:
         return asyncio.run(_sogni_plan_render(session, prompt,
-                                              ref_path, model))
+                                              ref_path, model, duration=duration))
     except Exception as e:  # noqa: BLE001
         return ({"status": _classify_sogni_failure(str(e)),
                  "project_id": None, "path": None,

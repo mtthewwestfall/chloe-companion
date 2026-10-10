@@ -1,0 +1,147 @@
+import sqlite3
+import unittest
+from unittest import mock
+
+from fastapi.testclient import TestClient
+
+from app import assist, config, db, give_gen
+from app import main as api
+
+
+def _db():
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    db._migrate_character_columns(conn)
+    db._migrate_auth_columns(conn)
+    db._migrate_submission_columns(conn)
+    db._migrate_creator_columns(conn)
+    db._migrate_owner_column(conn)
+    db._migrate_referral_columns(conn)
+    db._migrate_conversation_attachments(conn)
+    db._migrate_girl_media_stage(conn)
+    conn.executescript(db.SCHEMA)
+    return conn
+
+
+class GiveGenUnitTest(unittest.TestCase):
+    def setUp(self):
+        self.conn = _db()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_sogni_plan_params_duration(self):
+        params_default = assist._sogni_plan_params("test prompt")
+        self.assertEqual(params_default["duration"], 6)
+
+        params_15s = assist._sogni_plan_params("test prompt", duration=15)
+        self.assertEqual(params_15s["duration"], 15)
+
+    def test_create_and_list_give_generations(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "chloe", 1, "lift tease prompt", "2026-10-10", status="pending"
+        )
+        self.assertIsInstance(gen_id, int)
+
+        item = give_gen.get_give_generation(self.conn, gen_id)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["girl_id"], "chloe")
+        self.assertEqual(item["stage"], 1)
+        self.assertEqual(item["stage_name"], "lift tease")
+        self.assertEqual(item["status"], "pending")
+
+        items = give_gen.list_give_generations(self.conn, status="pending", girl_id="chloe")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["id"], gen_id)
+
+    def test_approve_give_generation(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "chloe", 2, "shirt off prompt", "2026-10-10", status="pending"
+        )
+        give_gen.update_give_generation_status(self.conn, gen_id, "pending", url="/generated/give_gen_1.mp4")
+
+        approved = give_gen.approve_give_generation(self.conn, gen_id)
+        self.assertIsNotNone(approved)
+        self.assertEqual(approved["status"], "approved")
+
+        # Verify insertion into girl_media
+        media_row = self.conn.execute(
+            "SELECT * FROM girl_media WHERE girl_id = 'chloe' AND url = '/generated/give_gen_1.mp4'"
+        ).fetchone()
+        self.assertIsNotNone(media_row)
+        self.assertEqual(media_row["kind"], "give")
+        self.assertEqual(media_row["stage"], 2)
+
+    def test_delete_give_generation(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "chloe", 3, "boob grabs prompt", "2026-10-10", status="pending"
+        )
+        deleted = give_gen.delete_give_generation(self.conn, gen_id)
+        self.assertIsNotNone(deleted)
+        self.assertEqual(deleted["status"], "deleted")
+
+
+class GiveGenAdminApiTest(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(api.app)
+        self.admin_token = "test_admin_token_123"
+        self.patcher = mock.patch.object(config, "ADMIN_TOKEN", self.admin_token)
+        self.patcher.start()
+        self.headers = {"X-Admin-Token": self.admin_token}
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    @mock.patch("app.main._conn")
+    def test_admin_list_and_manage_give_generations(self, mock_conn):
+        conn = _db()
+        mock_c = mock.MagicMock(wraps=conn)
+        mock_c.close = mock.MagicMock()
+        mock_conn.return_value = mock_c
+
+        gen_id = give_gen.create_give_generation(
+            conn, "mara", 1, "test prompt", "2026-10-10", status="pending"
+        )
+        give_gen.update_give_generation_status(conn, gen_id, "pending", url="/generated/test.mp4")
+
+        # List
+        res = self.client.get("/api/v1/admin/give-generations?status=pending", headers=self.headers)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertIn("generations", data)
+        self.assertEqual(len(data["generations"]), 1)
+
+        # Approve
+        res_app = self.client.post(f"/api/v1/admin/give-generations/{gen_id}/approve", headers=self.headers)
+        self.assertEqual(res_app.status_code, 200)
+        self.assertTrue(res_app.json()["ok"])
+
+        # Delete
+        gen_id2 = give_gen.create_give_generation(
+            conn, "mara", 2, "test prompt 2", "2026-10-10", status="pending"
+        )
+        res_del = self.client.post(f"/api/v1/admin/give-generations/{gen_id2}/delete", headers=self.headers)
+        self.assertEqual(res_del.status_code, 200)
+        self.assertTrue(res_del.json()["ok"])
+
+    @mock.patch("app.main._conn")
+    @mock.patch("app.assist.stored_sogni_session")
+    @mock.patch("app.give_gen.trigger_daily_give_generations")
+    def test_admin_trigger_daily_give_generations(self, mock_trigger, mock_sogni_session, mock_conn):
+        conn = _db()
+        mock_c = mock.MagicMock(wraps=conn)
+        mock_c.close = mock.MagicMock()
+        mock_conn.return_value = mock_c
+        mock_sogni_session.return_value = {"token": "fake_token", "refreshToken": "fake_refresh"}
+        mock_trigger.return_value = [1, 2, 3]
+
+        res = self.client.post("/api/v1/admin/give-generations/generate-daily", headers=self.headers)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["queued"], 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
