@@ -201,9 +201,13 @@ def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
     None when unavailable so the caller falls back to the avatar.
     """
     try:
+        # Latest stage-2 video preferred (last frame = top off); a photo
+        # is only used when no video exists.
         row = conn.execute(
             "SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give' "
-            "AND stage = 2 ORDER BY id DESC LIMIT 1",
+            "AND stage = 2 ORDER BY (lower(url) LIKE '%.jpg' "
+            "OR lower(url) LIKE '%.jpeg' OR lower(url) LIKE '%.png' "
+            "OR lower(url) LIKE '%.webp'), id DESC LIMIT 1",
             (girl_id,)).fetchone()
     except Exception:
         return None
@@ -213,6 +217,9 @@ def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
     video_path = assist._fetch_first_frame(video_url)
     if not video_path:
         return None
+    # A stage-2 photo needs no frame extraction — use it as-is.
+    if video_url.lower().split("?")[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
+        return video_path
     try:
         exe = assist._ffmpeg_exe()
         if not exe:
