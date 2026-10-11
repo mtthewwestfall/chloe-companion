@@ -4825,6 +4825,10 @@ def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
     Railway env var SOGNI_PLAN_SESSION (JSON {"token","refreshToken"})
     wins when set — one login for the whole server. Falls back to the
     per-DB stored session otherwise."""
+    # Long-lived API key (dashboard-issued, Bearer auth) wins over all.
+    api_key = os.environ.get("SOGNI_API_KEY", "").strip()
+    if api_key:
+        return {"token": api_key, "refreshToken": api_key, "api_key": True}
     env_val = os.environ.get("SOGNI_PLAN_SESSION", "").strip()
     if env_val:
         try:
