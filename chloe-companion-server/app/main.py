@@ -1210,6 +1210,34 @@ def create_media_request(body: MediaRequestIn, request: Request):
 
 
 
+def _pwa_media_dir() -> str:
+    """Absolute path of the statically-served chloe-companion-app/media dir."""
+    return os.path.join(os.path.dirname(config.DATA_DIR),
+                        "chloe-companion-app", "media")
+
+
+def _scan_media_dir_give_clips(girl_id: str) -> list[dict]:
+    """Staged give clips for a girl found as files in the static media dir
+    (<girl>-give-stage<N>[-variant].mp4) without needing girl_media rows.
+    A girl's repo-shipped library works the moment the files land."""
+    gid = (girl_id or "").lower().strip()
+    found: list[dict] = []
+    try:
+        names = sorted(os.listdir(_pwa_media_dir()))
+    except OSError:
+        return found
+    for fn in names:
+        fl = fn.lower()
+        if not fl.startswith(gid + "-give-") or not fl.endswith(".mp4"):
+            continue
+        m = re.search(r"-stage(\d+)", fl)
+        stage = int(m.group(1)) if m else 0
+        if stage < 1 or stage > 9:
+            continue
+        found.append({"file": fn, "stage": stage})
+    return found
+
+
 # ---------------------------------------------------------------------------
 # Preset videos (2026-10-06): serve a girl's give clips by preset tag.
 # POST /api/v1/preset-video {girl_id, preset} -> {video_url, media_type, preset}
@@ -1343,6 +1371,24 @@ async def preset_video(body: PresetVideoIn, request: Request):
             except Exception:
                 db_rows = []
         clips = [{"id": r["id"], "url": r["url"], "media_type": "video"} for r in db_rows]
+        if not clips:
+            # Static media-dir fallback (2026-10-10): staged give clips
+            # shipped in chloe-companion-app/media/ work even when they
+            # were never registered in girl_media (e.g. brooklyn's
+            # library). Same stage-escalation walk as the DB path.
+            base = str(request.base_url).rstrip("/")
+            dir_clips = _scan_media_dir_give_clips(key[0])
+            picked = dir_clips
+            if stage > 0:
+                picked = []
+                for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+                    at = [c for c in dir_clips if c["stage"] == try_stage]
+                    if at:
+                        stage = try_stage
+                        picked = at
+                        break
+            clips = [{"id": None, "url": base + "/media/" + c["file"],
+                      "media_type": "video"} for c in picked]
         # Prefer unseen clips at this stage; if all seen, start a fresh rotation
         fresh = [c for c in clips if c["id"] not in seen_ids] if user_id else clips
         if user_id and clips and not fresh:
@@ -1399,6 +1445,35 @@ async def preset_video(body: PresetVideoIn, request: Request):
 
 
 
+
+
+@app.get("/api/v1/give-presets/{girl_id}")
+def give_presets(girl_id: str, request: Request):
+    """Presets for the in-app 'Send a video' sheet: counts every servable
+    give clip for the girl — girl_media rows plus staged files found in
+    the static media dir. Owner-scoped girls only for their owner."""
+    gid = (girl_id or "").lower().strip()
+    try:
+        user_id = _current_user_id(request)
+    except Exception:
+        user_id = None
+    if not characters.visible_to(gid, user_id):
+        raise HTTPException(status_code=404, detail="unknown girl")
+    n_db = 0
+    conn = _conn()
+    try:
+        try:
+            n_db = conn.execute(
+                "SELECT COUNT(*) AS c FROM girl_media WHERE girl_id = ? AND kind = 'give'",
+                (gid,)).fetchone()["c"] or 0
+        except Exception:
+            n_db = 0
+    finally:
+        conn.close()
+    total = n_db + len(_scan_media_dir_give_clips(gid))
+    if total <= 0:
+        return {"presets": []}
+    return {"presets": [{"name": "love", "count": total, "emoji": "\U0001f495"}]}
 
 
 @app.get("/api/v1/girl-videos/{girl_id}")
