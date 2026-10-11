@@ -384,6 +384,7 @@ CREATE TABLE IF NOT EXISTS give_generations (
     status      TEXT NOT NULL DEFAULT 'pending',  -- pending | generating | approved | deleted | failed
     error       TEXT NOT NULL DEFAULT '',
     day         TEXT NOT NULL,                     -- YYYY-MM-DD
+    source      TEXT NOT NULL DEFAULT 'sogni',   -- sogni | upload
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     approved_at TEXT
 );
@@ -584,6 +585,14 @@ def _migrate_girl_media_stage(conn: sqlite3.Connection) -> None:
         pass  # already exists
 
 
+def _migrate_give_gen_source(conn: sqlite3.Connection) -> None:
+    """Owner uploads (2026-10-11): track give generation source."""
+    try:
+        conn.execute("ALTER TABLE give_generations ADD COLUMN source TEXT NOT NULL DEFAULT 'sogni'")
+    except sqlite3.OperationalError:
+        pass  # already exists
+
+
 def _migrate_referral_columns(conn: sqlite3.Connection) -> None:
     """Referral program (2026-10-06): add referral columns to users."""
     for col, ddl in [
@@ -613,6 +622,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_referral_columns(conn)
         _migrate_conversation_attachments(conn)
         _migrate_girl_media_stage(conn)
+        _migrate_give_gen_source(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)
         conn.commit()

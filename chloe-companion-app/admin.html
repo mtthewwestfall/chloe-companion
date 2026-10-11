@@ -164,6 +164,29 @@
   </div>
 
   <div id="tab-give-gens" class="hidden">
+    <div class="girl-card" style="border:2px solid #a855f7;">
+      <div class="girl-name">&#128228; Upload Give Media</div>
+      <div class="sub" style="margin-bottom:12px;">Upload your own image or video straight from your phone as a give stage for any character &mdash; no Sogni needed. It lands in her give library immediately.</div>
+      <div style="display:grid;gap:12px;">
+        <label style="font-size:14px;color:#aaa;">Character
+          <select id="uploadGirl" style="display:block;width:100%;margin-top:6px;padding:14px;font-size:16px;border-radius:10px;border:1px solid #444;background:#0a0a0f;color:#fff;min-height:52px;"><option value="">Loading characters&hellip;</option></select>
+        </label>
+        <label style="font-size:14px;color:#aaa;">Give stage
+          <select id="uploadStage" style="display:block;width:100%;margin-top:6px;padding:14px;font-size:16px;border-radius:10px;border:1px solid #444;background:#0a0a0f;color:#fff;min-height:52px;"></select>
+        </label>
+        <div id="uploadDrop" style="border:2px dashed #a855f7;border-radius:12px;padding:28px 16px;text-align:center;color:#aaa;font-size:15px;cursor:pointer;min-height:90px;display:flex;align-items:center;justify-content:center;">
+          Tap to choose a file, or drag &amp; drop here<br>(image or video, up to 100MB)
+        </div>
+        <input type="file" id="uploadFile" accept="image/*,video/*" style="display:none;">
+        <div id="uploadPreview"></div>
+        <div id="uploadProgress" class="hidden" style="background:#0a0a0f;border-radius:10px;height:14px;overflow:hidden;">
+          <div id="uploadBar" style="height:100%;width:0%;background:linear-gradient(135deg,#ff4d8d,#a855f7);transition:width .2s;"></div>
+        </div>
+        <div id="uploadStatus" class="sub"></div>
+        <button onclick="uploadGiveMedia()" id="uploadBtn" style="padding:16px;border-radius:12px;border:none;background:linear-gradient(135deg,#ff4d8d,#a855f7);color:#fff;cursor:pointer;font-weight:700;font-size:17px;min-height:56px;">Upload as Give Stage</button>
+        <div id="uploadResult"></div>
+      </div>
+    </div>
     <div class="girl-card">
       <div class="girl-name">Daily Give Generations (15s)</div>
       <div class="sub" style="margin-bottom:12px;">Daily automated 15-second Sogni generations for each public character across all 9 give stages. Approve to add to the girl's give library or delete to reject.</div>
@@ -213,7 +236,7 @@ function showTab(t) {
   if (t === 'accounts') loadAccounts();
   if (t === 'keys') loadGeminiKeys();
   if (t === 'custom') loadCustomVideos();
-  if (t === 'give-gens') loadGiveGenerations();
+  if (t === 'give-gens') { loadUploadGirls(); loadGiveGenerations(); }
 }
 
 async function api(method, path, body) {
@@ -408,6 +431,89 @@ async function setGiveGenFilter(f) {
   document.querySelectorAll('#tab-give-gens .filter-btn').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
   loadGiveGenerations();
+}
+
+// --- Upload Give Media (owner uploads straight from phone) ---
+let uploadGirlsLoaded = false;
+async function loadUploadGirls() {
+  if (uploadGirlsLoaded) return;
+  uploadGirlsLoaded = true;
+  try {
+    const data = await api('GET', '/api/v1/admin/girls');
+    const girls = data.girls || data || [];
+    document.getElementById('uploadGirl').innerHTML =
+      girls.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.name || g.id)}</option>`).join('')
+      || '<option value="">No characters found</option>';
+  } catch (e) {
+    document.getElementById('uploadGirl').innerHTML = '<option value="">Failed to load</option>';
+  }
+}
+(function initUploadStage() {
+  const sel = document.getElementById('uploadStage');
+  sel.innerHTML = [1,2,3,4,5,6,7,8,9].map(s =>
+    `<option value="${s}">Stage ${s}: ${STAGE_NAMES[s] || ('stage ' + s)}</option>`).join('');
+  const drop = document.getElementById('uploadDrop');
+  const picker = document.getElementById('uploadFile');
+  drop.addEventListener('click', () => picker.click());
+  ['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.style.borderColor = '#ff4d8d'; }));
+  ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.style.borderColor = '#a855f7'; }));
+  drop.addEventListener('drop', e => {
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) { picker.files = e.dataTransfer.files; showUploadPreview(); }
+  });
+  picker.addEventListener('change', showUploadPreview);
+})();
+function showUploadPreview() {
+  const f = document.getElementById('uploadFile').files[0];
+  const box = document.getElementById('uploadPreview');
+  if (!f) { box.innerHTML = ''; return; }
+  const url = URL.createObjectURL(f);
+  const tag = f.type.startsWith('video')
+    ? `<video class="media-preview" src="${url}" controls playsinline preload="metadata" style="max-height:280px;"></video>`
+    : `<img class="media-preview" src="${url}" style="max-height:280px;object-fit:contain;">`;
+  box.innerHTML = tag + `<div class="sub">${escapeHtml(f.name)} &middot; ${(f.size/1048576).toFixed(1)} MB</div>`;
+}
+function uploadGiveMedia() {
+  const girlId = document.getElementById('uploadGirl').value;
+  const stage = document.getElementById('uploadStage').value;
+  const file = document.getElementById('uploadFile').files[0];
+  const status = document.getElementById('uploadStatus');
+  const result = document.getElementById('uploadResult');
+  const btn = document.getElementById('uploadBtn');
+  result.innerHTML = '';
+  if (!girlId) { status.textContent = 'Pick a character first.'; return; }
+  if (!file) { status.textContent = 'Choose a file first.'; return; }
+  if (file.size > 100 * 1048576) { status.textContent = 'File is over 100MB.'; return; }
+  const fd = new FormData();
+  fd.append('girl_id', girlId);
+  fd.append('stage', stage);
+  fd.append('file', file);
+  const xhr = new XMLHttpRequest();
+  document.getElementById('uploadProgress').classList.remove('hidden');
+  btn.disabled = true;
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) document.getElementById('uploadBar').style.width = Math.round(e.loaded / e.total * 100) + '%';
+  };
+  xhr.onload = () => {
+    btn.disabled = false;
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status === 200 && data.ok) {
+      status.textContent = 'Uploaded!';
+      const media = data.media_type === 'video'
+        ? `<video class="media-preview" src="${data.url}" controls playsinline preload="metadata" style="max-height:280px;"></video>`
+        : `<img class="media-preview" src="${data.url}" style="max-height:280px;object-fit:contain;">`;
+      result.innerHTML = media + `<div class="sub">Live in <b style="text-transform:capitalize;">${escapeHtml(girlId)}</b>'s give library &middot; stage ${escapeHtml(String(stage))} &middot; <a href="${data.url}" target="_blank" style="color:#a855f7;">${escapeHtml(data.url)}</a></div>`;
+      document.getElementById('uploadBar').style.width = '100%';
+      loadGiveGenerations();
+    } else {
+      status.textContent = 'Upload failed: ' + (data.detail || ('HTTP ' + xhr.status));
+    }
+  };
+  xhr.onerror = () => { btn.disabled = false; status.textContent = 'Upload failed: network error.'; };
+  xhr.open('POST', API + '/api/v1/admin/give-generations/upload');
+  xhr.setRequestHeader('X-Admin-Token', token);
+  xhr.send(fd);
+  status.textContent = 'Uploading…';
 }
 
 async function loadGiveGenerations() {

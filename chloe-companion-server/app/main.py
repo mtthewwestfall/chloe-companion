@@ -1668,6 +1668,83 @@ def admin_trigger_daily_give_generations(request: Request, day: str = "",
                                                      include_private=include_private)
     return {"ok": True, "queued": len(queued), "generation_ids": queued}
 
+
+# ---------------------------------------------------------------------------
+# Admin: upload owner media directly as give stages (2026-10-11).
+# POST /api/v1/admin/give-generations/upload (admin, multipart)
+#   form fields: girl_id (character id), stage (1-9), file (image or video)
+# Images (jpg/png/webp) and videos (mp4/mov/webm) up to 100MB are stored
+# under /generated/ and registered in the girl's give library immediately
+# via the same approval path as Sogni-generated clips.
+# -> {ok, id, url, media_type, generation}
+# ---------------------------------------------------------------------------
+_GIVE_UPLOAD_TYPES = {
+    ".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image",
+    ".mp4": "video", ".mov": "video", ".webm": "video",
+}
+_GIVE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+
+@app.post("/api/v1/admin/give-generations/upload")
+async def admin_upload_give_generation(request: Request):
+    _require_admin(request)
+    form = await request.form()
+    girl_id = str(form.get("girl_id") or "").strip().lower()
+    try:
+        stage = int(form.get("stage") or 0)
+    except (TypeError, ValueError):
+        stage = 0
+    upload = form.get("file")
+    if not girl_id:
+        raise HTTPException(status_code=400, detail="girl_id_required")
+    if not 1 <= stage <= 9:
+        raise HTTPException(status_code=400, detail="invalid_stage")
+    if not upload or not hasattr(upload, "read"):
+        raise HTTPException(status_code=400, detail="file_required")
+    roster = {str(c.get("id") or "").lower()
+              for c in characters.get_characters(include_private=True)}
+    if girl_id not in roster:
+        raise HTTPException(status_code=400, detail="unknown_character")
+    ext = os.path.splitext(getattr(upload, "filename", "") or "")[1].lower()
+    if ext not in _GIVE_UPLOAD_TYPES:
+        raise HTTPException(status_code=400, detail="unsupported_type")
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty_file")
+    if len(data) > _GIVE_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="file_too_large")
+    import uuid as _uuid
+    safe_girl = re.sub(r"[^a-z0-9_-]", "", girl_id) or "girl"
+    fname = f"give-upload-{safe_girl}-stage{stage}-{_uuid.uuid4().hex[:8]}{ext}"
+    gdir = config.GENERATED_DIR
+    os.makedirs(gdir, exist_ok=True)
+    with open(os.path.join(gdir, fname), "wb") as f:
+        f.write(data)
+    url = "/generated/" + fname
+    from datetime import datetime, timezone
+    conn = _conn()
+    try:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        gen_id = give_gen.create_give_generation(
+            conn, girl_id, stage, "[owner upload]", day, status="pending")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(give_generations)")}
+        if "source" in cols:
+            conn.execute(
+                "UPDATE give_generations SET url = ?, source = 'upload' WHERE id = ?",
+                (url, gen_id))
+        else:
+            conn.execute(
+                "UPDATE give_generations SET url = ? WHERE id = ?", (url, gen_id))
+        conn.commit()
+        # Same approval path as Sogni clips: marks approved and inserts the
+        # girl_media row so it joins her give library immediately.
+        res = give_gen.approve_give_generation(conn, gen_id)
+    finally:
+        conn.close()
+    return {"ok": True, "id": gen_id, "url": url,
+            "media_type": _GIVE_UPLOAD_TYPES[ext], "generation": res}
+
+
 # ---------------------------------------------------------------------------
 # Browser automation jobs for Sogni web UI generation.
 # The VM browser worker polls for pending jobs, generates via Playwright,
