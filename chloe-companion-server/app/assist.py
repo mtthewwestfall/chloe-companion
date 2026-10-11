@@ -5260,6 +5260,86 @@ def _classify_sogni_failure(text: str) -> str:
     return "failed"
 
 
+
+async def _sogni_plan_render_api_key(api_key: str, prompt: str,
+                                     ref_path: str | None,
+                                     model: str | None = None,
+                                     kind: str = "video",
+                                     duration: int | None = None) -> tuple[dict, dict | None]:
+    """Render via Sogni REST API using dashboard API key (Bearer auth).
+    
+    Returns (outcome, None) — API keys don't rotate, so no fresh session.
+    """
+    import aiohttp
+    
+    outcome: dict = {"status": "failed", "project_id": None,
+                     "path": None, "detail": ""}
+    headers = {"Authorization": f"Bearer {api_key}",
+               "Content-Type": "application/json"}
+    params = _sogni_plan_params(prompt, ref_path, model, kind, duration=duration)
+    
+    try:
+        async with aiohttp.ClientSession(headers=headers) as http:
+            # Create project
+            async with http.post("https://api.sogni.ai/v1/projects",
+                                 json=params, timeout=60) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    outcome["status"] = _classify_sogni_failure(text)
+                    outcome["detail"] = f"create failed {resp.status}: " + text[:200]
+                    return outcome, None
+                data = await resp.json()
+                project_id = data.get("id")
+                outcome["project_id"] = project_id
+            # Poll for completion
+            urls: list = []
+            for _ in range(90):  # 15 min max
+                await asyncio.sleep(10)
+                async with http.get(f"https://api.sogni.ai/v1/projects/{project_id}",
+                                    timeout=30) as resp:
+                    if resp.status != 200:
+                        continue
+                    info = await resp.json()
+                jobs = info.get("completedWorkerJobs") or []
+                for wj in jobs:
+                    img_id = wj.get("imgID") or wj.get("id")
+                    if img_id:
+                        # Get download URL
+                        async with http.post(
+                                "https://api.sogni.ai/v1/projects/media-download-url",
+                                json={"jobId": project_id, "id": img_id,
+                                      "type": "complete"},
+                                timeout=30) as r2:
+                            if r2.status == 200:
+                                d2 = await r2.json()
+                                url = d2.get("url") or d2.get("downloadUrl")
+                                if url:
+                                    urls.append(url)
+                if urls:
+                    break
+            if not urls:
+                outcome["status"] = "failed"
+                outcome["detail"] = "render timed out with no result"
+                return outcome, None
+            # Download
+            os.makedirs(config.GENERATED_DIR, exist_ok=True)
+            ext = "jpg" if kind == "image" else "mp4"
+            prefix = "sogni-img" if kind == "image" else "sogni-vid"
+            filename = "{0}-{1}-{2}.{3}".format(
+                prefix, datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                uuid.uuid4().hex[:10], ext)
+            dest = os.path.join(config.GENERATED_DIR, filename)
+            from . import media_gen
+            media_gen._download(urls[0], dest)
+            outcome["status"] = "done"
+            outcome["path"] = dest
+            outcome["detail"] = "billingMode=subscription; api-key render completed"
+    except Exception as e:  # noqa: BLE001
+        outcome["status"] = _classify_sogni_failure(str(e))
+        outcome["detail"] = str(e)[:200]
+    return outcome, None
+
+
 async def _sogni_plan_render(session: dict, prompt: str,
                                ref_path: str | None,
                                model: str | None = None,
@@ -5272,7 +5352,14 @@ async def _sogni_plan_render(session: dict, prompt: str,
     done / blocked / plan_rejected / session_dead / failed; the
     fresh session (the SDK rotates the pair) must be persisted by
     the caller. Every failure is classified, never retried on
-    another billing mode."""
+    another billing mode.
+    
+    When session has api_key=True, uses the dashboard API key via
+    direct REST calls (Bearer auth) instead of the SDK JWT flow."""
+    # API key path: direct REST, no SDK
+    if session.get("api_key"):
+        return await _sogni_plan_render_api_key(
+            session.get("token") or "", prompt, ref_path, model, kind, duration)
     from sogni_client import SogniClient
 
     from . import media_gen
