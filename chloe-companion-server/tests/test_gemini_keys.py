@@ -191,6 +191,13 @@ class TestNeedsAttention(GeminiKeysTestBase):
         ids = [c[0] for c in gemini_keys.get_candidate_keys()]
         self.assertNotIn(k["id"], ids)
 
+    def test_disabled_shows_disabled_even_when_flagged(self):
+        k = self._add("flag-off-key", "f", True)
+        gemini_keys.report_failure(k["id"], "payment")
+        gemini_keys.set_active(k["id"], False)
+        row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
+        self.assertEqual(row["status"], "disabled")
+
     def test_set_active_clears_flags(self):
         k = self._add("clear-key", "c", False)
         gemini_keys.report_failure(k["id"], "payment")

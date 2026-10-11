@@ -1204,10 +1204,10 @@ def _row_to_public(row) -> dict:
             exhausted = until > datetime.now(timezone.utc)
         except (ValueError, TypeError):
             exhausted = True
-    if row["needs_attention"]:
-        status = "needs_attention"
-    elif not row["is_active"]:
+    if not row["is_active"]:
         status = "disabled"
+    elif row["needs_attention"]:
+        status = "needs_attention"
     elif exhausted:
         status = "cooling_down"
     elif row["consecutive_failures"]:

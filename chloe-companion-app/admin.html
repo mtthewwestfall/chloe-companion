@@ -627,7 +627,9 @@ function renderGeminiKeys() {
       </div>
       <div class="key-actions">
         <button class="key-btn" onclick="testGeminiKey(${k.id})">Test</button>
-        <button class="key-btn" onclick="toggleGeminiKey(${k.id}, ${k.is_active ? 'false' : 'true'})">${k.is_active ? 'Disable' : 'Enable'}</button>
+        ${k.status === 'needs_attention'
+          ? `<button class="key-btn" onclick="toggleGeminiKey(${k.id}, true)">Re-enable</button>`
+          : `<button class="key-btn" onclick="toggleGeminiKey(${k.id}, ${k.is_active ? 'false' : 'true'})">${k.is_active ? 'Disable' : 'Enable'}</button>`}
         <button class="key-btn danger" onclick="delGeminiKey(${k.id})">Delete</button>
       </div>
     </div>`;
