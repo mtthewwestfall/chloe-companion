@@ -1669,6 +1669,103 @@ def admin_trigger_daily_give_generations(request: Request, day: str = "",
     return {"ok": True, "queued": len(queued), "generation_ids": queued}
 
 # ---------------------------------------------------------------------------
+# Browser automation jobs for Sogni web UI generation.
+# The VM browser worker polls for pending jobs, generates via Playwright,
+# and uploads the result file.
+# Worker auth: X-Browser-Key header must match BROWSER_WORKER_KEY env var.
+# ---------------------------------------------------------------------------
+def _require_browser_worker(request: Request):
+    import os as _os
+    key = _os.environ.get("BROWSER_WORKER_KEY", "")
+    got = request.headers.get("x-browser-key", "")
+    if not key or got != key:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+@app.post("/api/v1/browser-jobs")
+def browser_job_enqueue(request: Request, payload: dict):
+    # Called by chat worker (internal). No worker key needed; chat is trusted.
+    import uuid as _uuid, time as _time
+    job_id = f"{int(_time.time())}-{_uuid.uuid4().hex[:8]}"
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO browser_jobs (id, kind, prompt, ref_path, model, "
+            "user_id, girl_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (job_id, payload.get("kind", "video"), payload.get("prompt", ""),
+             payload.get("ref_path"), payload.get("model"),
+             payload.get("user_id", ""), payload.get("girl_id", "")))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "job_id": job_id}
+
+@app.get("/api/v1/browser-jobs/poll")
+def browser_job_poll(request: Request):
+    _require_browser_worker(request)
+    conn = _conn()
+    try:
+        # Claim one pending job atomically
+        row = conn.execute(
+            "SELECT id, kind, prompt, ref_path, model, user_id, girl_id "
+            "FROM browser_jobs WHERE status = 'pending' "
+            "ORDER BY created_at LIMIT 1").fetchone()
+        if not row:
+            return {"ok": True, "job": None}
+        conn.execute(
+            "UPDATE browser_jobs SET status = 'working', "
+            "updated_at = datetime('now') WHERE id = ? AND status = 'pending'",
+            (row["id"],))
+        conn.commit()
+        if conn.total_changes == 0:
+            return {"ok": True, "job": None}
+        return {"ok": True, "job": dict(row)}
+    finally:
+        conn.close()
+
+@app.post("/api/v1/browser-jobs/{job_id}/complete")
+async def browser_job_complete(request: Request, job_id: str):
+    _require_browser_worker(request)
+    # Multipart: file field "file", form fields "status", "error"
+    form = await request.form()
+    status = form.get("status", "failed")
+    error = form.get("error", "")
+    result_path = None
+    upload = form.get("file")
+    if upload and hasattr(upload, "read"):
+        import os as _os
+        fname = f"{job_id}.{'mp4' if 'video' in str(upload.filename) else 'png'}"
+        # Save under GENERATED_DIR
+        gdir = config.GENERATED_DIR
+        _os.makedirs(gdir, exist_ok=True)
+        result_path = _os.path.join(gdir, fname)
+        with open(result_path, "wb") as f:
+            f.write(await upload.read())
+    conn = _conn()
+    try:
+        conn.execute(
+            "UPDATE browser_jobs SET status = ?, result_path = ?, error = ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (status, result_path, error, job_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "result_path": result_path}
+
+@app.get("/api/v1/browser-jobs/{job_id}")
+def browser_job_status(request: Request, job_id: str):
+    # Called by chat worker to poll for completion. Internal.
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT id, status, result_path, error FROM browser_jobs "
+            "WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        return dict(row)
+    finally:
+        conn.close()
+
+# ---------------------------------------------------------------------------
 # Whispr Feed feed (2026-10-07): Instagram-stories-style daily posts per girl.
 # Stories expire after 24h. Generation runs via daily cron (6 AM) or on-demand.
 # GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}

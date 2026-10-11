@@ -389,6 +389,25 @@ CREATE TABLE IF NOT EXISTS give_generations (
 );
 CREATE INDEX IF NOT EXISTS idx_give_gen_girl_stage_day ON give_generations(girl_id, stage, day);
 CREATE INDEX IF NOT EXISTS idx_give_gen_status ON give_generations(status);
+
+-- Browser automation jobs for Sogni web UI generation.
+-- The VM browser worker polls for pending jobs, generates via Playwright,
+-- uploads the result file back.
+CREATE TABLE IF NOT EXISTS browser_jobs (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'video',
+    prompt       TEXT NOT NULL,
+    ref_path     TEXT,
+    model        TEXT,
+    user_id      TEXT NOT NULL DEFAULT '',
+    girl_id      TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    result_path  TEXT,
+    error        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_browser_jobs_status ON browser_jobs(status);
 """
 
 
