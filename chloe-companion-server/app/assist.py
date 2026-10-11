@@ -5858,15 +5858,38 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 prompt = _sogni_plan_prompt(
                     girl.get("name") or "Hannah", job["prompt"]) \
                     if is_character_render else job["prompt"]
-                if kind == "image":
-                    outcome, fresh = _sogni_plan_image_run(
-                        session, prompt, ref_path, job["model"])
+                # Delegate to the auto generator's proven worker.
+                # The chat's direct Sogni path fails silently; the
+                # give_gen worker succeeds with identical params.
+                # We run it synchronously here and translate the result.
+                from . import give_gen as _gg
+                import datetime as _dt
+                _day = _dt.date.today().isoformat()
+                _gen_id = _gg.create_give_generation(
+                    conn, target_id or "mia", 99, prompt, _day,
+                    status="pending")
+                # Run the proven worker synchronously
+                _gg._run_give_generation_job(_gen_id)
+                _grow = conn.execute(
+                    "SELECT status, url, error FROM give_generations "
+                    "WHERE id = ?", (_gen_id,)).fetchone()
+                _gstat = _grow["status"] if _grow else "failed"
+                _gurl = _grow["url"] if _grow else ""
+                _gerr = _grow["error"] if _grow else ""
+                if _gstat == "pending" and _gurl:
+                    # give_gen marks done as "pending" with url set
+                    outcome = {"status": "done",
+                               "project_id": None,
+                               "path": os.path.join(
+                                   config.GENERATED_DIR,
+                                   os.path.basename(_gurl)),
+                               "detail": "via give_gen worker"}
+                    fresh = None
                 else:
-                    # Match auto generator: duration=15, explicit model
-                    outcome, fresh = _sogni_plan_run(
-                        session, prompt, ref_path,
-                        model=job["model"] or config.SOGNI_VIDEO_MODEL,
-                        duration=15)
+                    outcome = {"status": "failed",
+                               "project_id": None, "path": None,
+                               "detail": (_gerr or _gstat)[:200]}
+                    fresh = None
             finally:
                 if ref_path:
                     try:
