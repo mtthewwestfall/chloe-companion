@@ -335,21 +335,24 @@ def spawn_give_generation_job(gen_id: int) -> None:
     t.start()
 
 
-def trigger_daily_give_generations(day: str | None = None) -> list[int]:
-    """Check and queue daily give generations for all public characters x 9 stages.
+def trigger_daily_give_generations(day: str | None = None,
+                                   include_private: bool = False) -> list[int]:
+    """Check and queue daily give generations for characters x 9 stages.
 
-    For each public character and for each give stage (1..9), if no generation exists
-    for the given day (day=YYYY-MM-DD, defaults to today), queue a new generation job.
-    Returns list of queued give generation IDs.
+    For each character (public only by default; private owner-scoped too when
+    include_private=True) and for each give stage (1..9), if no generation
+    exists for the given day (day=YYYY-MM-DD, defaults to today), queue a new
+    generation job. Returns list of queued give generation IDs.
     """
     conn = db.connect()
     queued_ids: list[int] = []
     try:
         today_str = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # Public characters only (no owner_user_id)
-        public_chars = [c for c in characters.get_characters() if not c.get("owner_user_id")]
+        # Public characters only by default; private too when requested
+        chars = [c for c in characters.get_characters()
+                 if include_private or not c.get("owner_user_id")]
 
-        for char in public_chars:
+        for char in chars:
             gid = char["id"].lower().strip()
             girl_name = char.get("name") or gid
 
