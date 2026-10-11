@@ -348,8 +348,10 @@ def trigger_daily_give_generations(day: str | None = None,
     queued_ids: list[int] = []
     try:
         today_str = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # Public characters only by default; private too when requested
-        chars = [c for c in characters.get_characters()
+        # Public characters only by default; private too when requested.
+        # (get_characters filters private out unless asked, so request them
+        # explicitly when include_private is set.)
+        chars = [c for c in characters.get_characters(include_private=include_private)
                  if include_private or not c.get("owner_user_id")]
 
         for char in chars:
