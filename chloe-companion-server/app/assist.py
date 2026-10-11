@@ -3931,7 +3931,7 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
                          "it should show. Ask him what he wants in it, "
                          "warmly and briefly."}
     gate = image_gate(conn, user_id, now_epoch=now_epoch)
-    if gate["attempts"] >= gate["daily_cap"]:
+    if user_id not in _owner_ids() and gate["attempts"] >= gate["daily_cap"]:
         return {"brief": "He asked for another image, but he has hit "
                          "today's image limit. Tell him honestly the "
                          "picture desk is closed until tomorrow; do not "
@@ -5694,7 +5694,8 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                          "way and will land right here when it's done; "
                          "one at a time."}
     cap = sogni_plan_daily_cap()
-    if _sogni_plan_today_count(conn, user_id) >= cap:
+    if user_id not in _owner_ids() and \
+            _sogni_plan_today_count(conn, user_id) >= cap:
         return {"brief": "He asked for another video, but he's hit "
                          "today's video limit. Tell him honestly the "
                          "video desk is closed until tomorrow; do not "
@@ -5970,7 +5971,8 @@ def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
                          "way and will land right here when it's done; "
                          "one at a time."}
     cap = sogni_plan_daily_cap()
-    if _sogni_plan_today_count(conn, user_id) >= cap:
+    if user_id not in _owner_ids() and \
+            _sogni_plan_today_count(conn, user_id) >= cap:
         return {"brief": "He asked for another picture, but he's hit "
                          "today's Sogni plan media limit. Tell him "
                          "honestly the media desk is closed until "
