@@ -5593,10 +5593,23 @@ async def await_sogni_client(session: dict):
 def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
                     model: str | None = None,
                     duration: int | None = None) -> tuple[dict, dict | None]:
-    """Sync seam over the render (monkeypatched in tests)."""
+    """Sync seam over the render (monkeypatched in tests).
+    
+    Uses an explicit new event loop for thread safety — the chat worker
+    runs in a spawned thread (unlike the auto generator's main thread),
+    and the Sogni websocket client needs a clean loop per thread.
+    """
     try:
-        return asyncio.run(_sogni_plan_render(session, prompt,
-                                              ref_path, model, duration=duration))
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_sogni_plan_render(
+                session, prompt, ref_path, model, duration=duration))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
     except Exception as e:  # noqa: BLE001
         return ({"status": _classify_sogni_failure(str(e)),
                  "project_id": None, "path": None,
@@ -5608,8 +5621,16 @@ def _sogni_plan_image_run(session: dict, prompt: str,
                           model: str | None = None) -> tuple[dict, dict | None]:
     """Sync seam over the plan image render (monkeypatched in tests)."""
     try:
-        return asyncio.run(_sogni_plan_render(
-            session, prompt, ref_path, model, kind="image"))
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_sogni_plan_render(
+                session, prompt, ref_path, model, kind="image"))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
     except Exception as e:  # noqa: BLE001
         return ({"status": _classify_sogni_failure(str(e)),
                  "project_id": None, "path": None,
