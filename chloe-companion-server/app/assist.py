@@ -5789,16 +5789,14 @@ def _run_sogni_plan_job(job_id: int) -> None:
         if not row or row["status"] not in ("queued", "rendering"):
             return
         job = dict(row)
-        # If the handler already created the project synchronously
-        # (deterministic gate), wait on that project instead of
-        # creating a new one.
-        precreated = job.get("project_id") if job.get("status") == \
-            "rendering" else None
-        if not precreated:
-            conn.execute(
-                "UPDATE sogni_plan_jobs SET status = 'rendering' "
-                "WHERE id = ?", (job_id,))
-            conn.commit()
+        # Unified path: the worker uses _sogni_plan_run (same as the
+        # auto generator) which keeps the websocket open for the full
+        # create+render cycle. Projects created this way are visible
+        # in Sogni.
+        conn.execute(
+            "UPDATE sogni_plan_jobs SET status = 'rendering' "
+            "WHERE id = ?", (job_id,))
+        conn.commit()
         outcome: dict = {"status": "session_dead", "project_id": None,
                          "path": None, "detail": "session missing"}
         fresh: dict | None = None
@@ -5839,11 +5837,7 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 prompt = _sogni_plan_prompt(
                     girl.get("name") or "Hannah", job["prompt"]) \
                     if is_character_render else job["prompt"]
-                if precreated:
-                    outcome, fresh = asyncio.run(
-                        _sogni_plan_wait_project(
-                            session, precreated, kind))
-                elif kind == "image":
+                if kind == "image":
                     outcome, fresh = _sogni_plan_image_run(
                         session, prompt, ref_path, job["model"])
                 else:
@@ -5968,41 +5962,30 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
     job_id = _sogni_plan_enqueue(conn, user_id, character_id, shaped,
                                    kind="video",
                                    target_character_id=target_id)
-    # Deterministic gate: only claim rendering after Sogni accepts the
-    # project. On failure, mark the job and tell him honestly.
+    # Session check: fail fast if Sogni login is missing/dead.
+    # The background worker uses _sogni_plan_run (same as the auto
+    # generator) which keeps the websocket open for the full
+    # create+render cycle — projects created this way are visible
+    # in Sogni, unlike the old split create-then-close flow.
     _session = stored_sogni_session(conn)
-    from . import characters as _chars
-    _girl = _chars.get_character(target_id, user_id=user_id)
-    _ref = _fetch_first_frame(_girl.get("avatar_url") or "")
-    _project_id, _err = _sogni_plan_create_project_sync(
-        _session or {}, shaped, _ref, config.SOGNI_VIDEO_MODEL, "video")
-    if _ref:
-        try:
-            os.unlink(_ref)
-        except OSError:
-            pass
-    if not _project_id:
+    if not _session:
         conn.execute("UPDATE sogni_plan_jobs SET status = 'failed', "
                      "error = ? WHERE id = ?",
-                     (_err or "sogni rejected the project", job_id))
+                     ("sogni login missing", job_id))
         conn.commit()
-        return {"brief": "He asked for a video but Sogni would not "
-                         "start it (" + (_err or "unknown error") +
-                         "). Tell him honestly it did not start and "
-                         "why, in your own voice, short and warm; do "
-                         "not promise it is rendering."}
-    conn.execute("UPDATE sogni_plan_jobs SET status = 'rendering', "
-                 "project_id = ? WHERE id = ?", (_project_id, job_id))
-    conn.commit()
+        return {"brief": "He asked for a video but the Sogni login "
+                         "is missing. Tell him honestly you need him "
+                         "to log in again with 'sogni login Lockeddoor', "
+                         "short and warm."}
     _spawn_sogni_plan_job(job_id)
     who = f" of {target_name}" if target_name \
         and target_id != character_id else ""
-    return {"brief": "You just started making that video" + who +
+    return {"brief": "You're starting that video" + who +
                      " for him on his Sogni Unlimited plan — it's "
-                     "rendering now, and the finished clip will land "
-                     "right here in this chat when it's ready. "
-                     "Confirm in your own voice, short and warm; do "
-                     "not mention models, queues, or process.",
+                     "queued and will land right here in this chat "
+                     "when it's ready. Confirm in your own voice, "
+                     "short and warm; do not mention models, queues, "
+                     "or process.",
             "sogni_media_kind": "video",
             "sogni_target_character_id": target_id,
             "sogni_media_intent": intent}
@@ -6273,39 +6256,23 @@ def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
                                    kind="image",
                                    target_character_id=target_character_id)
     _session2 = stored_sogni_session(conn)
-    from . import characters as _chars2
-    _girl2 = _chars2.get_character(target_character_id or character_id,
-                                   user_id=user_id)
-    _ref2 = _fetch_first_frame(_girl2.get("avatar_url") or "")
-    _project_id2, _err2 = _sogni_plan_create_project_sync(
-        _session2 or {}, shaped, _ref2, config.SOGNI_IMAGE_MODEL, "image")
-    if _ref2:
-        try:
-            os.unlink(_ref2)
-        except OSError:
-            pass
-    if not _project_id2:
+    if not _session2:
         conn.execute("UPDATE sogni_plan_jobs SET status = 'failed', "
                      "error = ? WHERE id = ?",
-                     (_err2 or "sogni rejected the project", job_id))
+                     ("sogni login missing", job_id))
         conn.commit()
-        return {"brief": "He asked for a picture but Sogni would not "
-                         "start it (" + (_err2 or "unknown error") +
-                         "). Tell him honestly it did not start and "
-                         "why, in your own voice, short and warm; do "
-                         "not promise it is rendering."}
-    conn.execute("UPDATE sogni_plan_jobs SET status = 'rendering', "
-                 "project_id = ? WHERE id = ?", (_project_id2, job_id))
-    conn.commit()
+        return {"brief": "He asked for a picture but the Sogni login "
+                         "is missing. Tell him honestly you need him "
+                         "to log in again with 'sogni login Lockeddoor', "
+                         "short and warm."}
     _spawn_sogni_plan_job(job_id)
     who = f" of {target_name}" if target_name \
         and target_character_id != character_id else ""
-    return {"brief": "You just started making that picture" + who +
-                     " for him on his Sogni plan — it's rendering "
-                     "now, and the finished picture will land right "
-                     "here in this chat when it's ready. Confirm in "
-                     "your own voice, short and warm; do not mention "
-                     "models, queues, or process.",
+    return {"brief": "You're starting that picture" + who +
+                     " for him on his Sogni plan — it's queued and "
+                     "will land right here in this chat when it's "
+                     "ready. Confirm in your own voice, short and "
+                     "warm; do not mention models, queues, or process.",
             "sogni_media_kind": "image",
             "sogni_target_character_id": target_character_id,
             "sogni_media_intent": intent,
