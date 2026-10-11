@@ -77,8 +77,8 @@
   }
 
   function statusLabel(status) {
-    return ({ idle: 'Idle', working: 'Working', 'finishing-up': 'Finishing up',
-      finished: 'Finished' })[status] || 'Idle';
+    return ({ idle: 'Online', working: 'Working', 'finishing-up': 'Finishing up',
+      finished: 'Finished' })[status] || 'Online';
   }
 
   function paintCharacterStatus() {
