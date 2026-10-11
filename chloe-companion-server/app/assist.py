@@ -113,6 +113,32 @@ def is_assistant_character(character_id) -> bool:
     return (character_id or "").strip().lower() in ASSISTANT_CHARACTERS
 
 
+def sogni_lane_character(user_id: str, character_id) -> bool:
+    """Threads that get the Sogni media lane: the assistant girls, plus
+    private characters owned by this user."""
+    if is_assistant_character(character_id):
+        return True
+    from . import characters
+    owner = characters.owner_of(character_id)
+    return bool(owner) and owner == (user_id or "")
+
+
+def _private_character_verified_fictional(character_id) -> bool:
+    try:
+        from . import db as _db
+        c = _db.connect()
+        try:
+            row = c.execute(
+                "SELECT verified_fictional FROM local_characters "
+                "WHERE id = ?",
+                ((character_id or "").strip().lower(),)).fetchone()
+        finally:
+            c.close()
+    except Exception:  # noqa: BLE001 — fail closed
+        return False
+    return bool(row and row[0])
+
+
 def _is_rocky(character_id) -> bool:
     return (character_id or "").strip().lower() == "rocky"
 
@@ -5861,43 +5887,48 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 # Delegate to the auto generator's proven worker via
                 # its async spawn (exactly like the admin's generate-daily).
                 # Poll for completion; the worker sets url on success.
-                from . import give_gen as _gg
-                import datetime as _dt
-                import time as _time
-                _day = _dt.date.today().isoformat()
-                _gen_id = _gg.create_give_generation(
-                    conn, target_id or "mia", 99, prompt, _day,
-                    status="pending")
-                _gg.spawn_give_generation_job(_gen_id)
-                # Poll up to 6 minutes for the worker to finish
-                _gurl = ""
-                _gerr = ""
-                _gstat = "pending"
-                for _ in range(72):
-                    _time.sleep(5)
-                    _grow = conn.execute(
-                        "SELECT status, url, error FROM give_generations "
-                        "WHERE id = ?", (_gen_id,)).fetchone()
-                    if not _grow:
-                        break
-                    _gstat = _grow["status"]
-                    _gurl = _grow["url"] or ""
-                    _gerr = _grow["error"] or ""
-                    if _gurl or _gstat in ("failed", "approved"):
-                        break
-                if _gurl:
-                    outcome = {"status": "done",
-                               "project_id": None,
-                               "path": os.path.join(
-                                   config.GENERATED_DIR,
-                                   os.path.basename(_gurl)),
-                               "detail": "via give_gen worker"}
-                    fresh = None
+                if kind == "image":
+                    outcome, fresh = _sogni_plan_image_run(
+                        session, prompt, ref_path,
+                        config.SOGNI_IMAGE_MODEL)
                 else:
-                    outcome = {"status": "failed",
-                               "project_id": None, "path": None,
-                               "detail": (_gerr or _gstat or "timeout")[:200]}
-                    fresh = None
+                    from . import give_gen as _gg
+                    import datetime as _dt
+                    import time as _time
+                    _day = _dt.date.today().isoformat()
+                    _gen_id = _gg.create_give_generation(
+                        conn, target_id or "mia", 99, prompt, _day,
+                        status="pending")
+                    _gg.spawn_give_generation_job(_gen_id)
+                    # Poll up to 6 minutes for the worker to finish
+                    _gurl = ""
+                    _gerr = ""
+                    _gstat = "pending"
+                    for _ in range(72):
+                        _time.sleep(5)
+                        _grow = conn.execute(
+                            "SELECT status, url, error FROM give_generations "
+                            "WHERE id = ?", (_gen_id,)).fetchone()
+                        if not _grow:
+                            break
+                        _gstat = _grow["status"]
+                        _gurl = _grow["url"] or ""
+                        _gerr = _grow["error"] or ""
+                        if _gurl or _gstat in ("failed", "approved"):
+                            break
+                    if _gurl:
+                        outcome = {"status": "done",
+                                   "project_id": None,
+                                   "path": os.path.join(
+                                       config.GENERATED_DIR,
+                                       os.path.basename(_gurl)),
+                                   "detail": "via give_gen worker"}
+                        fresh = None
+                    else:
+                        outcome = {"status": "failed",
+                                   "project_id": None, "path": None,
+                                   "detail": (_gerr or _gstat or "timeout")[:200]}
+                        fresh = None
             finally:
                 if ref_path:
                     try:
@@ -8486,14 +8517,29 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         # in the picture desk. ANY Sogni mention routes here (plus
         # short confirmations while the topic is open) so the brain
         # never improvises a capability denial.
-        if is_assistant_character(character_id):
+        sogni_thread = sogni_lane_character(user_id, character_id)
+        # Private characters can be built from real photos: adult
+        # renders stay closed unless she is verified fictional.
+        if sogni_thread and not is_assistant_character(character_id) \
+                and (detect_nude_media_ask(text) is not None
+                     or detect_sogni_media_intent(text) == "adult") \
+                and not _private_character_verified_fictional(
+                    character_id):
+            return {"brief": "He asked for an explicit picture or video "
+                             "of you, but adult renders are only open "
+                             "for characters verified as fictional. "
+                             "Tell him warmly you can't make that one, "
+                             "and offer a non-explicit picture or video "
+                             "instead.",
+                    "sogni_adult_blocked": True}
+        if sogni_thread:
             sogni_hit = _handle_sogni_lane(conn, user_id,
                                            character_id, text)
             if sogni_hit is not None:
                 return sogni_hit
         image_prompt = detect_image_request(text)
         if image_prompt is not None:
-            if is_assistant_character(character_id):
+            if sogni_thread:
                 return _route_sogni_image(conn, user_id, character_id,
                                           image_prompt, raw_text=text)
             return _handle_image_request(conn, user_id, character_id,
