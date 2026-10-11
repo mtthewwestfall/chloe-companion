@@ -5841,8 +5841,11 @@ def _run_sogni_plan_job(job_id: int) -> None:
                     outcome, fresh = _sogni_plan_image_run(
                         session, prompt, ref_path, job["model"])
                 else:
+                    # Match auto generator: duration=15, explicit model
                     outcome, fresh = _sogni_plan_run(
-                        session, prompt, ref_path, job["model"])
+                        session, prompt, ref_path,
+                        model=job["model"] or config.SOGNI_VIDEO_MODEL,
+                        duration=15)
             finally:
                 if ref_path:
                     try:
