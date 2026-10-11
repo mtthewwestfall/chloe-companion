@@ -113,6 +113,32 @@ def is_assistant_character(character_id) -> bool:
     return (character_id or "").strip().lower() in ASSISTANT_CHARACTERS
 
 
+def sogni_lane_character(user_id: str, character_id) -> bool:
+    """Threads that get the Sogni media lane: the assistant girls, plus
+    private characters owned by this user."""
+    if is_assistant_character(character_id):
+        return True
+    from . import characters
+    owner = characters.owner_of(character_id)
+    return bool(owner) and owner == (user_id or "")
+
+
+def _private_character_verified_fictional(character_id) -> bool:
+    try:
+        from . import db as _db
+        c = _db.connect()
+        try:
+            row = c.execute(
+                "SELECT verified_fictional FROM local_characters "
+                "WHERE id = ?",
+                ((character_id or "").strip().lower(),)).fetchone()
+        finally:
+            c.close()
+    except Exception:  # noqa: BLE001 — fail closed
+        return False
+    return bool(row and row[0])
+
+
 def _is_rocky(character_id) -> bool:
     return (character_id or "").strip().lower() == "rocky"
 
@@ -4018,6 +4044,8 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
 # Hannah's thread only, one render at a time, daily cap.
 # ---------------------------------------------------------------------------
 _SOGNI_PLAN_SESSION = "sogni_plan_session"
+_SOGNI_ENV_DEAD = "sogni_env_session_dead"
+_SOGNI_RENDER_LOCK = threading.Lock()
 _SOGNI_PLAN_APP_ID = "companion-hannah-plan"
 _SOGNI_PLAN_PLACEHOLDER = "[sogni login]"
 _SOGNI_PLAN_WIDTH = 768
@@ -4819,20 +4847,44 @@ def store_sogni_session(conn: sqlite3.Connection, session: dict) -> None:
     conn.commit()
 
 
-def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
-    """The stored token pair, or None when she is signed out.
+def _session_fingerprint(session: dict) -> str:
+    import hashlib
+    raw = (session.get("token") or "") + "|" + \
+        (session.get("refreshToken") or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    Railway env var SOGNI_PLAN_SESSION (JSON {"token","refreshToken"})
-    wins when set — one login for the whole server. Falls back to the
-    per-DB stored session otherwise."""
-    # Long-lived API key (dashboard-issued, Bearer auth) wins over all.
-    api_key = os.environ.get("SOGNI_API_KEY", "").strip()
-    if api_key:
-        return {"token": api_key, "refreshToken": api_key, "api_key": True}
+
+def _env_sogni_session() -> dict | None:
     env_val = os.environ.get("SOGNI_PLAN_SESSION", "").strip()
-    if env_val:
+    if not env_val:
+        return None
+    try:
+        data = json.loads(env_val)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = str(data.get("token") or "")
+    refresh = str(data.get("refreshToken") or "")
+    if token and refresh:
+        return {"token": token, "refreshToken": refresh}
+    return None
+
+
+def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
+    """The Sogni session renders use. The in-app login (DB, kept fresh
+    as the SDK rotates the pair) wins; the SOGNI_PLAN_SESSION env pair
+    is only a seed and is skipped once it has died (its refresh token
+    goes stale after the first rotation); the dashboard API key is the
+    last resort."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT value FROM assist_secrets WHERE name = ?",
+        (_SOGNI_PLAN_SESSION,),
+    ).fetchone()
+    if row:
         try:
-            data = json.loads(env_val)
+            data = json.loads(row[0] or "")
         except (TypeError, json.JSONDecodeError):
             data = None
         if isinstance(data, dict):
@@ -4840,23 +4892,20 @@ def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
             refresh = str(data.get("refreshToken") or "")
             if token and refresh:
                 return {"token": token, "refreshToken": refresh}
-    ensure_tables(conn)
-    row = conn.execute(
-        "SELECT value FROM assist_secrets WHERE name = ?",
-        (_SOGNI_PLAN_SESSION,)).fetchone()
-    if not row:
-        return None
-    try:
-        data = json.loads(row[0] or "")
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    token = str(data.get("token") or "")
-    refresh = str(data.get("refreshToken") or "")
-    if not token or not refresh:
-        return None
-    return {"token": token, "refreshToken": refresh}
+
+    env_session = _env_sogni_session()
+    if env_session:
+        dead = conn.execute(
+            "SELECT value FROM assist_secrets WHERE name = ?",
+            (_SOGNI_ENV_DEAD,),
+        ).fetchone()
+        if not dead or dead[0] != _session_fingerprint(env_session):
+            return env_session
+
+    api_key = os.environ.get("SOGNI_API_KEY", "").strip()
+    if api_key:
+        return {"token": api_key, "refreshToken": api_key, "api_key": True}
+    return None
 
 
 def clear_sogni_session(conn: sqlite3.Connection) -> bool:
@@ -4865,6 +4914,14 @@ def clear_sogni_session(conn: sqlite3.Connection) -> bool:
     cur = conn.execute(
         "DELETE FROM assist_secrets WHERE name = ?",
         (_SOGNI_PLAN_SESSION,))
+    env_session = _env_sogni_session()
+    if env_session:
+        conn.execute(
+            "INSERT INTO assist_secrets (name, value, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET "
+            "value = excluded.value, updated_at = excluded.updated_at",
+            (_SOGNI_ENV_DEAD, _session_fingerprint(env_session),
+             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
     conn.commit()
     return cur.rowcount > 0
 
@@ -5247,7 +5304,8 @@ def _classify_sogni_failure(text: str) -> str:
     low = (text or "").lower()
     if any(k in low for k in ("401", "unauthorized", "unauthenticated",
                               "invalid token", "token expired",
-                              "refresh token", "not authenticated")):
+                              "refresh token", "not authenticated",
+                              "account changed")):
         return "session_dead"
     if any(k in low for k in ("sensitive content", "sensitive",
                               "moderation", "nsfw")):
@@ -5590,6 +5648,25 @@ async def await_sogni_client(session: dict):
     return client
 
 
+def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
+    """One render at a time on the shared login, each starting from the
+    newest stored pair and persisting the rotated pair before the next
+    starts: parallel renders on one refresh token end in "The account
+    changed"."""
+    from . import db as _db
+    with _SOGNI_RENDER_LOCK:
+        conn = _db.connect()
+        try:
+            if not session.get("api_key"):
+                session = stored_sogni_session(conn) or session
+            outcome, fresh = loop.run_until_complete(make_coro(session))
+            if fresh:
+                store_sogni_session(conn, fresh)
+            return outcome, fresh
+        finally:
+            conn.close()
+
+
 def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
                     model: str | None = None,
                     duration: int | None = None) -> tuple[dict, dict | None]:
@@ -5603,7 +5680,7 @@ def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_sogni_plan_render(
+            return _locked_render(loop, session, lambda session: _sogni_plan_render(
                 session, prompt, ref_path, model, duration=duration))
         finally:
             try:
@@ -5624,7 +5701,7 @@ def _sogni_plan_image_run(session: dict, prompt: str,
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_sogni_plan_render(
+            return _locked_render(loop, session, lambda session: _sogni_plan_render(
                 session, prompt, ref_path, model, kind="image"))
         finally:
             try:
@@ -5861,43 +5938,48 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 # Delegate to the auto generator's proven worker via
                 # its async spawn (exactly like the admin's generate-daily).
                 # Poll for completion; the worker sets url on success.
-                from . import give_gen as _gg
-                import datetime as _dt
-                import time as _time
-                _day = _dt.date.today().isoformat()
-                _gen_id = _gg.create_give_generation(
-                    conn, target_id or "mia", 99, prompt, _day,
-                    status="pending")
-                _gg.spawn_give_generation_job(_gen_id)
-                # Poll up to 6 minutes for the worker to finish
-                _gurl = ""
-                _gerr = ""
-                _gstat = "pending"
-                for _ in range(72):
-                    _time.sleep(5)
-                    _grow = conn.execute(
-                        "SELECT status, url, error FROM give_generations "
-                        "WHERE id = ?", (_gen_id,)).fetchone()
-                    if not _grow:
-                        break
-                    _gstat = _grow["status"]
-                    _gurl = _grow["url"] or ""
-                    _gerr = _grow["error"] or ""
-                    if _gurl or _gstat in ("failed", "approved"):
-                        break
-                if _gurl:
-                    outcome = {"status": "done",
-                               "project_id": None,
-                               "path": os.path.join(
-                                   config.GENERATED_DIR,
-                                   os.path.basename(_gurl)),
-                               "detail": "via give_gen worker"}
-                    fresh = None
+                if kind == "image":
+                    outcome, fresh = _sogni_plan_image_run(
+                        session, prompt, ref_path,
+                        config.SOGNI_IMAGE_MODEL)
                 else:
-                    outcome = {"status": "failed",
-                               "project_id": None, "path": None,
-                               "detail": (_gerr or _gstat or "timeout")[:200]}
-                    fresh = None
+                    from . import give_gen as _gg
+                    import datetime as _dt
+                    import time as _time
+                    _day = _dt.date.today().isoformat()
+                    _gen_id = _gg.create_give_generation(
+                        conn, target_id or "mia", 99, prompt, _day,
+                        status="pending")
+                    _gg.spawn_give_generation_job(_gen_id)
+                    # Poll up to 6 minutes for the worker to finish
+                    _gurl = ""
+                    _gerr = ""
+                    _gstat = "pending"
+                    for _ in range(72):
+                        _time.sleep(5)
+                        _grow = conn.execute(
+                            "SELECT status, url, error FROM give_generations "
+                            "WHERE id = ?", (_gen_id,)).fetchone()
+                        if not _grow:
+                            break
+                        _gstat = _grow["status"]
+                        _gurl = _grow["url"] or ""
+                        _gerr = _grow["error"] or ""
+                        if _gurl or _gstat in ("failed", "approved"):
+                            break
+                    if _gurl:
+                        outcome = {"status": "done",
+                                   "project_id": None,
+                                   "path": os.path.join(
+                                       config.GENERATED_DIR,
+                                       os.path.basename(_gurl)),
+                                   "detail": "via give_gen worker"}
+                        fresh = None
+                    else:
+                        outcome = {"status": "failed",
+                                   "project_id": None, "path": None,
+                                   "detail": (_gerr or _gstat or "timeout")[:200]}
+                        fresh = None
             finally:
                 if ref_path:
                     try:
@@ -8486,14 +8568,29 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         # in the picture desk. ANY Sogni mention routes here (plus
         # short confirmations while the topic is open) so the brain
         # never improvises a capability denial.
-        if is_assistant_character(character_id):
+        sogni_thread = sogni_lane_character(user_id, character_id)
+        # Private characters can be built from real photos: adult
+        # renders stay closed unless she is verified fictional.
+        if sogni_thread and not is_assistant_character(character_id) \
+                and (detect_nude_media_ask(text) is not None
+                     or detect_sogni_media_intent(text) == "adult") \
+                and not _private_character_verified_fictional(
+                    character_id):
+            return {"brief": "He asked for an explicit picture or video "
+                             "of you, but adult renders are only open "
+                             "for characters verified as fictional. "
+                             "Tell him warmly you can't make that one, "
+                             "and offer a non-explicit picture or video "
+                             "instead.",
+                    "sogni_adult_blocked": True}
+        if sogni_thread:
             sogni_hit = _handle_sogni_lane(conn, user_id,
                                            character_id, text)
             if sogni_hit is not None:
                 return sogni_hit
         image_prompt = detect_image_request(text)
         if image_prompt is not None:
-            if is_assistant_character(character_id):
+            if sogni_thread:
                 return _route_sogni_image(conn, user_id, character_id,
                                           image_prompt, raw_text=text)
             return _handle_image_request(conn, user_id, character_id,

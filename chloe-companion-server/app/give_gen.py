@@ -282,13 +282,21 @@ def _run_give_generation_job(gen_id: int) -> None:
 
         update_give_generation_status(conn, gen_id, "generating")
 
-        girl = characters.get_character(gen["girl_id"])
+        # Private characters only resolve for their owner; without the
+        # owner they silently fall back to Chloe's face and name.
+        girl = characters.get_character(
+            gen["girl_id"], user_id=characters.owner_of(gen["girl_id"]))
         stage = gen.get("stage") or 0
         ref_path = None
         if stage > 2:
             ref_path = _topless_reference_frame(conn, gen["girl_id"])
         if not ref_path:
             ref_path = assist._fetch_first_frame(girl.get("avatar_url") or "")
+        if not ref_path:
+            err_msg = "no reference photo for " + str(gen["girl_id"])
+            update_give_generation_status(conn, gen_id, "failed", error=err_msg)
+            print(f"[give_gen] gen #{gen_id} failed: {err_msg}", flush=True)
+            return
         prompt = assist._sogni_plan_prompt(
             girl.get("name") or gen["girl_id"], gen["prompt"]
         )
