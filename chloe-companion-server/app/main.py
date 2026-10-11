@@ -437,11 +437,11 @@ def _startup():
     gemini_keys.start_prober()
 
     # Background daily give generator loop: automatically triggers daily
-    # 15s Sogni give generations for each public character x 9 give stages.
+    # 15s Sogni give generations for each character x 9 give stages (public + private).
     def _auto_daily_gives_loop():
         while True:
             try:
-                give_gen.trigger_daily_give_generations()
+                give_gen.trigger_daily_give_generations(include_private=True)
             except Exception as e:
                 print(f"[give_gen] auto daily gives loop exception: {e}", flush=True)
             time.sleep(12 * 3600)
