@@ -106,7 +106,7 @@ def _owner_ids() -> set[str]:
 # every cross-lane redirect exempts him), plus one tool the girls
 # don't have: page reading (see the ROCKY PAGE READING section).
 # ---------------------------------------------------------------------------
-ASSISTANT_CHARACTERS = frozenset({"brooklyn", "hannah", "mia", "jordan", "rocky", "bailey"})
+ASSISTANT_CHARACTERS = frozenset({"brooklyn", "hannah", "mia", "jordan", "rocky"})
 
 
 def is_assistant_character(character_id) -> bool:
@@ -4820,7 +4820,22 @@ def store_sogni_session(conn: sqlite3.Connection, session: dict) -> None:
 
 
 def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
-    """The stored token pair, or None when she is signed out."""
+    """The stored token pair, or None when she is signed out.
+
+    Railway env var SOGNI_PLAN_SESSION (JSON {"token","refreshToken"})
+    wins when set — one login for the whole server. Falls back to the
+    per-DB stored session otherwise."""
+    env_val = os.environ.get("SOGNI_PLAN_SESSION", "").strip()
+    if env_val:
+        try:
+            data = json.loads(env_val)
+        except (TypeError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict):
+            token = str(data.get("token") or "")
+            refresh = str(data.get("refreshToken") or "")
+            if token and refresh:
+                return {"token": token, "refreshToken": refresh}
     ensure_tables(conn)
     row = conn.execute(
         "SELECT value FROM assist_secrets WHERE name = ?",
