@@ -106,7 +106,7 @@ def _owner_ids() -> set[str]:
 # every cross-lane redirect exempts him), plus one tool the girls
 # don't have: page reading (see the ROCKY PAGE READING section).
 # ---------------------------------------------------------------------------
-ASSISTANT_CHARACTERS = frozenset({"brooklyn", "hannah", "mia", "jordan", "rocky"})
+ASSISTANT_CHARACTERS = frozenset({"brooklyn", "hannah", "mia", "jordan", "rocky", "bailey"})
 
 
 def is_assistant_character(character_id) -> bool:
