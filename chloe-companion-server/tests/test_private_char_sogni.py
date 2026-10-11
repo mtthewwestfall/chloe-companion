@@ -140,5 +140,59 @@ class PrivateCharacterSogniTest(unittest.TestCase):
         gc.assert_called_with("luna", user_id="owner_1")
 
 
+class SogniSessionTest(unittest.TestCase):
+    ENV = {"token": "env-tok", "refreshToken": "env-ref"}
+
+    def setUp(self):
+        self._env = {k: os.environ.get(k)
+                     for k in ("SOGNI_API_KEY", "SOGNI_PLAN_SESSION")}
+        os.environ["SOGNI_PLAN_SESSION"] = __import__("json").dumps(self.ENV)
+        os.environ["SOGNI_API_KEY"] = "dash-key"
+        self.conn = _conn()
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_login_beats_env_seed_beats_api_key(self):
+        self.assertEqual(assist.stored_sogni_session(self.conn), self.ENV)
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.assertEqual(assist.stored_sogni_session(self.conn), TOKENS)
+
+    def test_dead_env_seed_is_skipped(self):
+        assist.clear_sogni_session(self.conn)
+        self.assertTrue(assist.stored_sogni_session(self.conn).get("api_key"))
+        os.environ.pop("SOGNI_API_KEY")
+        self.assertIsNone(assist.stored_sogni_session(self.conn))
+        assist.store_sogni_session(self.conn, TOKENS)
+        self.assertEqual(assist.stored_sogni_session(self.conn), TOKENS)
+
+    def test_account_changed_means_session_dead(self):
+        self.assertEqual(assist._classify_sogni_failure(
+            "The account changed. Submit this request again."),
+            "session_dead")
+
+    def test_render_uses_and_persists_freshest_pair(self):
+        assist.store_sogni_session(self.conn, TOKENS)
+        rotated = {"token": "tok-new", "refreshToken": "ref-new"}
+        seen = {}
+
+        async def fake_render(session, *a, **k):
+            seen["session"] = session
+            return {"status": "done", "path": "/tmp/x.mp4"}, rotated
+
+        with mock.patch.object(assist, "_sogni_plan_render", fake_render), \
+             mock.patch.object(assist.db, "connect",
+                               return_value=_NoClose(self.conn)):
+            outcome, _ = assist._sogni_plan_run(
+                {"token": "stale", "refreshToken": "stale"}, "p", None)
+        self.assertEqual(outcome["status"], "done")
+        self.assertEqual(seen["session"], TOKENS)
+        self.assertEqual(assist.stored_sogni_session(self.conn), rotated)
+
+
 if __name__ == "__main__":
     unittest.main()

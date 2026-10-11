@@ -292,6 +292,11 @@ def _run_give_generation_job(gen_id: int) -> None:
             ref_path = _topless_reference_frame(conn, gen["girl_id"])
         if not ref_path:
             ref_path = assist._fetch_first_frame(girl.get("avatar_url") or "")
+        if not ref_path:
+            err_msg = "no reference photo for " + str(gen["girl_id"])
+            update_give_generation_status(conn, gen_id, "failed", error=err_msg)
+            print(f"[give_gen] gen #{gen_id} failed: {err_msg}", flush=True)
+            return
         prompt = assist._sogni_plan_prompt(
             girl.get("name") or gen["girl_id"], gen["prompt"]
         )

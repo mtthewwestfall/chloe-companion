@@ -4044,6 +4044,8 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
 # Hannah's thread only, one render at a time, daily cap.
 # ---------------------------------------------------------------------------
 _SOGNI_PLAN_SESSION = "sogni_plan_session"
+_SOGNI_ENV_DEAD = "sogni_env_session_dead"
+_SOGNI_RENDER_LOCK = threading.Lock()
 _SOGNI_PLAN_APP_ID = "companion-hannah-plan"
 _SOGNI_PLAN_PLACEHOLDER = "[sogni login]"
 _SOGNI_PLAN_WIDTH = 768
@@ -4845,20 +4847,44 @@ def store_sogni_session(conn: sqlite3.Connection, session: dict) -> None:
     conn.commit()
 
 
-def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
-    """The stored token pair, or None when she is signed out.
+def _session_fingerprint(session: dict) -> str:
+    import hashlib
+    raw = (session.get("token") or "") + "|" + \
+        (session.get("refreshToken") or "")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    Railway env var SOGNI_PLAN_SESSION (JSON {"token","refreshToken"})
-    wins when set — one login for the whole server. Falls back to the
-    per-DB stored session otherwise."""
-    # Long-lived API key (dashboard-issued, Bearer auth) wins over all.
-    api_key = os.environ.get("SOGNI_API_KEY", "").strip()
-    if api_key:
-        return {"token": api_key, "refreshToken": api_key, "api_key": True}
+
+def _env_sogni_session() -> dict | None:
     env_val = os.environ.get("SOGNI_PLAN_SESSION", "").strip()
-    if env_val:
+    if not env_val:
+        return None
+    try:
+        data = json.loads(env_val)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    token = str(data.get("token") or "")
+    refresh = str(data.get("refreshToken") or "")
+    if token and refresh:
+        return {"token": token, "refreshToken": refresh}
+    return None
+
+
+def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
+    """The Sogni session renders use. The in-app login (DB, kept fresh
+    as the SDK rotates the pair) wins; the SOGNI_PLAN_SESSION env pair
+    is only a seed and is skipped once it has died (its refresh token
+    goes stale after the first rotation); the dashboard API key is the
+    last resort."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT value FROM assist_secrets WHERE name = ?",
+        (_SOGNI_PLAN_SESSION,),
+    ).fetchone()
+    if row:
         try:
-            data = json.loads(env_val)
+            data = json.loads(row[0] or "")
         except (TypeError, json.JSONDecodeError):
             data = None
         if isinstance(data, dict):
@@ -4866,23 +4892,20 @@ def stored_sogni_session(conn: sqlite3.Connection) -> dict | None:
             refresh = str(data.get("refreshToken") or "")
             if token and refresh:
                 return {"token": token, "refreshToken": refresh}
-    ensure_tables(conn)
-    row = conn.execute(
-        "SELECT value FROM assist_secrets WHERE name = ?",
-        (_SOGNI_PLAN_SESSION,)).fetchone()
-    if not row:
-        return None
-    try:
-        data = json.loads(row[0] or "")
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    token = str(data.get("token") or "")
-    refresh = str(data.get("refreshToken") or "")
-    if not token or not refresh:
-        return None
-    return {"token": token, "refreshToken": refresh}
+
+    env_session = _env_sogni_session()
+    if env_session:
+        dead = conn.execute(
+            "SELECT value FROM assist_secrets WHERE name = ?",
+            (_SOGNI_ENV_DEAD,),
+        ).fetchone()
+        if not dead or dead[0] != _session_fingerprint(env_session):
+            return env_session
+
+    api_key = os.environ.get("SOGNI_API_KEY", "").strip()
+    if api_key:
+        return {"token": api_key, "refreshToken": api_key, "api_key": True}
+    return None
 
 
 def clear_sogni_session(conn: sqlite3.Connection) -> bool:
@@ -4891,6 +4914,14 @@ def clear_sogni_session(conn: sqlite3.Connection) -> bool:
     cur = conn.execute(
         "DELETE FROM assist_secrets WHERE name = ?",
         (_SOGNI_PLAN_SESSION,))
+    env_session = _env_sogni_session()
+    if env_session:
+        conn.execute(
+            "INSERT INTO assist_secrets (name, value, updated_at) "
+            "VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET "
+            "value = excluded.value, updated_at = excluded.updated_at",
+            (_SOGNI_ENV_DEAD, _session_fingerprint(env_session),
+             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
     conn.commit()
     return cur.rowcount > 0
 
@@ -5273,7 +5304,8 @@ def _classify_sogni_failure(text: str) -> str:
     low = (text or "").lower()
     if any(k in low for k in ("401", "unauthorized", "unauthenticated",
                               "invalid token", "token expired",
-                              "refresh token", "not authenticated")):
+                              "refresh token", "not authenticated",
+                              "account changed")):
         return "session_dead"
     if any(k in low for k in ("sensitive content", "sensitive",
                               "moderation", "nsfw")):
@@ -5616,6 +5648,25 @@ async def await_sogni_client(session: dict):
     return client
 
 
+def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
+    """One render at a time on the shared login, each starting from the
+    newest stored pair and persisting the rotated pair before the next
+    starts: parallel renders on one refresh token end in "The account
+    changed"."""
+    from . import db as _db
+    with _SOGNI_RENDER_LOCK:
+        conn = _db.connect()
+        try:
+            if not session.get("api_key"):
+                session = stored_sogni_session(conn) or session
+            outcome, fresh = loop.run_until_complete(make_coro(session))
+            if fresh:
+                store_sogni_session(conn, fresh)
+            return outcome, fresh
+        finally:
+            conn.close()
+
+
 def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
                     model: str | None = None,
                     duration: int | None = None) -> tuple[dict, dict | None]:
@@ -5629,7 +5680,7 @@ def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_sogni_plan_render(
+            return _locked_render(loop, session, lambda session: _sogni_plan_render(
                 session, prompt, ref_path, model, duration=duration))
         finally:
             try:
@@ -5650,7 +5701,7 @@ def _sogni_plan_image_run(session: dict, prompt: str,
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            return loop.run_until_complete(_sogni_plan_render(
+            return _locked_render(loop, session, lambda session: _sogni_plan_render(
                 session, prompt, ref_path, model, kind="image"))
         finally:
             try:
