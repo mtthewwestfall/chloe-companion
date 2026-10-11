@@ -5500,8 +5500,9 @@ def _sogni_plan_create_project_sync(session: dict, prompt: str,
 async def _sogni_plan_wait_project(session: dict, project_id: str,
                              kind: str = "video"
                              ) -> tuple[dict, dict | None]:
-    """Wait for an already-created project; download on completion."""
-    from sogni_client import SogniClient
+    """Wait for an already-created project via status polling; download
+    on completion. Simpler and more robust than reconstructing SDK
+    project objects."""
     from . import media_gen
 
     outcome: dict = {"status": "failed", "project_id": project_id,
@@ -5509,37 +5510,33 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
     fresh: dict | None = None
     client = None
     try:
-        media_gen._patch_websocket_quirk()
-        client = await_sogni_client(session)
-        # Reconstruct a minimal project handle for waiting.
-        project = await client.projects.get(project_id)
-        # The SDK get returns info dict; wrap for wait_for_completion.
-        # Fall back to polling the info endpoint.
+        client = await await_sogni_client(session)
+        # Poll project status until complete/failed or timeout (15 min).
+        info: dict = {}
+        for _ in range(90):
+            try:
+                info = await client.projects.get(project_id) or {}
+            except Exception:
+                info = {}
+            status = str(info.get("status") or "").lower()
+            if status in ("complete", "completed", "done", "failed",
+                          "error", "cancelled", "canceled"):
+                break
+            await asyncio.sleep(10)
         urls: list = []
-        try:
-            # Try to get a project object capable of waiting.
-            proj_obj = await client.projects._get_project_obj(project_id) \
-                if hasattr(client.projects, "_get_project_obj") else None
-            if proj_obj is not None:
-                urls = await proj_obj.wait_for_completion(timeout=900) or []
-        except Exception:
-            urls = []
+        for wj in (info.get("completedWorkerJobs") or []):
+            img_id = wj.get("imgID") or wj.get("id")
+            if not img_id:
+                continue
+            try:
+                urls.append(await client.projects.media_download_url(
+                    {"jobId": project_id, "id": img_id,
+                     "type": "complete"}))
+            except Exception:
+                pass
         if not urls:
-            info = project if isinstance(project, dict) else {}
-            for wj in (info.get("completedWorkerJobs") or []):
-                img_id = wj.get("imgID") or wj.get("id")
-                if not img_id:
-                    continue
-                try:
-                    urls.append(await client.projects.media_download_url(
-                        {"jobId": project_id, "id": img_id,
-                         "type": "complete"}))
-                except Exception:
-                    pass
-        if not urls:
-            blob = " ".join(str((project or {}).get(k) or "")
-                            for k in ("status", "reason", "error")) \
-                if isinstance(project, dict) else ""
+            blob = " ".join(str(info.get(k) or "")
+                            for k in ("status", "reason", "error"))
             outcome["status"] = _classify_sogni_failure(blob)
             outcome["detail"] = blob[:200] or "render ended with no result"
             return outcome, fresh
@@ -5563,6 +5560,15 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
             outcome["detail"] = str(e)[:200]
     finally:
         if client is not None:
+            try:
+                # Persist rotated tokens if the SDK offers them.
+                backup = await client.api_client.auth.backup()
+                if backup and backup.get("token") \
+                        and backup.get("refreshToken"):
+                    fresh = {"token": backup["token"],
+                             "refreshToken": backup["refreshToken"]}
+            except Exception:
+                pass
             try:
                 await client.aclose()
             except Exception:
