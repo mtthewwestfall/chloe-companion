@@ -5858,26 +5858,34 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 prompt = _sogni_plan_prompt(
                     girl.get("name") or "Hannah", job["prompt"]) \
                     if is_character_render else job["prompt"]
-                # Delegate to the auto generator's proven worker.
-                # The chat's direct Sogni path fails silently; the
-                # give_gen worker succeeds with identical params.
-                # We run it synchronously here and translate the result.
+                # Delegate to the auto generator's proven worker via
+                # its async spawn (exactly like the admin's generate-daily).
+                # Poll for completion; the worker sets url on success.
                 from . import give_gen as _gg
                 import datetime as _dt
+                import time as _time
                 _day = _dt.date.today().isoformat()
                 _gen_id = _gg.create_give_generation(
                     conn, target_id or "mia", 99, prompt, _day,
                     status="pending")
-                # Run the proven worker synchronously
-                _gg._run_give_generation_job(_gen_id)
-                _grow = conn.execute(
-                    "SELECT status, url, error FROM give_generations "
-                    "WHERE id = ?", (_gen_id,)).fetchone()
-                _gstat = _grow["status"] if _grow else "failed"
-                _gurl = _grow["url"] if _grow else ""
-                _gerr = _grow["error"] if _grow else ""
-                if _gstat == "pending" and _gurl:
-                    # give_gen marks done as "pending" with url set
+                _gg.spawn_give_generation_job(_gen_id)
+                # Poll up to 6 minutes for the worker to finish
+                _gurl = ""
+                _gerr = ""
+                _gstat = "pending"
+                for _ in range(72):
+                    _time.sleep(5)
+                    _grow = conn.execute(
+                        "SELECT status, url, error FROM give_generations "
+                        "WHERE id = ?", (_gen_id,)).fetchone()
+                    if not _grow:
+                        break
+                    _gstat = _grow["status"]
+                    _gurl = _grow["url"] or ""
+                    _gerr = _grow["error"] or ""
+                    if _gurl or _gstat in ("failed", "approved"):
+                        break
+                if _gurl:
                     outcome = {"status": "done",
                                "project_id": None,
                                "path": os.path.join(
@@ -5888,7 +5896,7 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 else:
                     outcome = {"status": "failed",
                                "project_id": None, "path": None,
-                               "detail": (_gerr or _gstat)[:200]}
+                               "detail": (_gerr or _gstat or "timeout")[:200]}
                     fresh = None
             finally:
                 if ref_path:
