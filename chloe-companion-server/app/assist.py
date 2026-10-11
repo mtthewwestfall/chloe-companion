@@ -5450,6 +5450,140 @@ async def _sogni_plan_render(session: dict, prompt: str,
     return outcome, fresh
 
 
+def _sogni_plan_create_project_sync(session: dict, prompt: str,
+                                    ref_path: str | None,
+                                    model: str | None = None,
+                                    kind: str = "video",
+                                    duration: int | None = None
+                                    ) -> tuple[str | None, str | None]:
+    """Synchronously create the Sogni project; return (project_id, error).
+
+    This is the deterministic gate: the chat must only claim "rendering"
+    after Sogni has actually accepted the project. Returns (project_id,
+    None) on success, (None, error_detail) on failure. The caller spawns
+    the background waiter only on success.
+    """
+    # API key path is disabled (blanked) — plan renders go through the
+    # SDK token flow on the unlimited web plan, never the API.
+    if session.get("api_key"):
+        return None, "api key path disabled; use plan session"
+    from sogni_client import SogniClient
+    from . import media_gen
+
+    async def _create():
+        media_gen._patch_websocket_quirk()
+        client = await SogniClient.create(
+            app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
+            disable_socket=False,
+            websocket_factory=media_gen._ws_factory)
+        try:
+            await client.set_tokens(token=session.get("token") or "",
+                                    refresh_token=session.get(
+                                        "refreshToken") or "")
+            project = await client.projects.create(
+                _sogni_plan_params(prompt, ref_path, model, kind,
+                                   duration=duration))
+            return project.id
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+    try:
+        pid = asyncio.run(_create())
+        return (pid, None) if pid else (None, "empty project id from Sogni")
+    except Exception as e:  # noqa: BLE001
+        return None, str(e)[:200]
+
+
+async def _sogni_plan_wait_project(session: dict, project_id: str,
+                             kind: str = "video"
+                             ) -> tuple[dict, dict | None]:
+    """Wait for an already-created project; download on completion."""
+    from sogni_client import SogniClient
+    from . import media_gen
+
+    outcome: dict = {"status": "failed", "project_id": project_id,
+                     "path": None, "detail": ""}
+    fresh: dict | None = None
+    client = None
+    try:
+        media_gen._patch_websocket_quirk()
+        client = await_sogni_client(session)
+        # Reconstruct a minimal project handle for waiting.
+        project = await client.projects.get(project_id)
+        # The SDK get returns info dict; wrap for wait_for_completion.
+        # Fall back to polling the info endpoint.
+        urls: list = []
+        try:
+            # Try to get a project object capable of waiting.
+            proj_obj = await client.projects._get_project_obj(project_id) \
+                if hasattr(client.projects, "_get_project_obj") else None
+            if proj_obj is not None:
+                urls = await proj_obj.wait_for_completion(timeout=900) or []
+        except Exception:
+            urls = []
+        if not urls:
+            info = project if isinstance(project, dict) else {}
+            for wj in (info.get("completedWorkerJobs") or []):
+                img_id = wj.get("imgID") or wj.get("id")
+                if not img_id:
+                    continue
+                try:
+                    urls.append(await client.projects.media_download_url(
+                        {"jobId": project_id, "id": img_id,
+                         "type": "complete"}))
+                except Exception:
+                    pass
+        if not urls:
+            blob = " ".join(str((project or {}).get(k) or "")
+                            for k in ("status", "reason", "error")) \
+                if isinstance(project, dict) else ""
+            outcome["status"] = _classify_sogni_failure(blob)
+            outcome["detail"] = blob[:200] or "render ended with no result"
+            return outcome, fresh
+        os.makedirs(config.GENERATED_DIR, exist_ok=True)
+        if kind == "image":
+            filename = "sogni-img-{0}-{1}.jpg".format(
+                datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                uuid.uuid4().hex[:10])
+        else:
+            filename = "sogni-vid-{0}-{1}.mp4".format(
+                datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                uuid.uuid4().hex[:10])
+        dest = os.path.join(config.GENERATED_DIR, filename)
+        media_gen._download(urls[0], dest)
+        outcome["status"] = "done"
+        outcome["path"] = dest
+        outcome["detail"] = "billingMode=subscription; project completed"
+    except Exception as e:  # noqa: BLE001
+        if outcome["status"] == "failed":
+            outcome["status"] = _classify_sogni_failure(str(e))
+            outcome["detail"] = str(e)[:200]
+    finally:
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+    return outcome, fresh
+
+
+async def await_sogni_client(session: dict):
+    """Create an authenticated SogniClient from a plan session."""
+    from sogni_client import SogniClient
+    from . import media_gen
+    media_gen._patch_websocket_quirk()
+    client = await SogniClient.create(
+        app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
+        disable_socket=False,
+        websocket_factory=media_gen._ws_factory)
+    await client.set_tokens(token=session.get("token") or "",
+                            refresh_token=session.get("refreshToken") or "")
+    return client
+
+
 def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
                     model: str | None = None,
                     duration: int | None = None) -> tuple[dict, dict | None]:
@@ -5646,13 +5780,19 @@ def _run_sogni_plan_job(job_id: int) -> None:
         row = conn.execute(
             "SELECT * FROM sogni_plan_jobs WHERE id = ?",
             (job_id,)).fetchone()
-        if not row or row["status"] != "queued":
+        if not row or row["status"] not in ("queued", "rendering"):
             return
         job = dict(row)
-        conn.execute(
-            "UPDATE sogni_plan_jobs SET status = 'rendering' "
-            "WHERE id = ?", (job_id,))
-        conn.commit()
+        # If the handler already created the project synchronously
+        # (deterministic gate), wait on that project instead of
+        # creating a new one.
+        precreated = job.get("project_id") if job.get("status") == \
+            "rendering" else None
+        if not precreated:
+            conn.execute(
+                "UPDATE sogni_plan_jobs SET status = 'rendering' "
+                "WHERE id = ?", (job_id,))
+            conn.commit()
         outcome: dict = {"status": "session_dead", "project_id": None,
                          "path": None, "detail": "session missing"}
         fresh: dict | None = None
@@ -5693,7 +5833,11 @@ def _run_sogni_plan_job(job_id: int) -> None:
                 prompt = _sogni_plan_prompt(
                     girl.get("name") or "Hannah", job["prompt"]) \
                     if is_character_render else job["prompt"]
-                if kind == "image":
+                if precreated:
+                    outcome, fresh = asyncio.run(
+                        _sogni_plan_wait_project(
+                            session, precreated, kind))
+                elif kind == "image":
                     outcome, fresh = _sogni_plan_image_run(
                         session, prompt, ref_path, job["model"])
                 else:
@@ -5818,6 +5962,32 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
     job_id = _sogni_plan_enqueue(conn, user_id, character_id, shaped,
                                    kind="video",
                                    target_character_id=target_id)
+    # Deterministic gate: only claim rendering after Sogni accepts the
+    # project. On failure, mark the job and tell him honestly.
+    _session = stored_sogni_session(conn)
+    from . import characters as _chars
+    _girl = _chars.get_character(target_id, user_id=user_id)
+    _ref = _fetch_first_frame(_girl.get("avatar_url") or "")
+    _project_id, _err = _sogni_plan_create_project_sync(
+        _session or {}, shaped, _ref, config.SOGNI_VIDEO_MODEL, "video")
+    if _ref:
+        try:
+            os.unlink(_ref)
+        except OSError:
+            pass
+    if not _project_id:
+        conn.execute("UPDATE sogni_plan_jobs SET status = 'failed', "
+                     "error = ? WHERE id = ?",
+                     (_err or "sogni rejected the project", job_id))
+        conn.commit()
+        return {"brief": "He asked for a video but Sogni would not "
+                         "start it (" + (_err or "unknown error") +
+                         "). Tell him honestly it did not start and "
+                         "why, in your own voice, short and warm; do "
+                         "not promise it is rendering."}
+    conn.execute("UPDATE sogni_plan_jobs SET status = 'rendering', "
+                 "project_id = ? WHERE id = ?", (_project_id, job_id))
+    conn.commit()
     _spawn_sogni_plan_job(job_id)
     who = f" of {target_name}" if target_name \
         and target_id != character_id else ""
@@ -6096,6 +6266,31 @@ def _handle_sogni_image_request(conn: sqlite3.Connection, user_id: str,
     job_id = _sogni_plan_enqueue(conn, user_id, character_id, shaped,
                                    kind="image",
                                    target_character_id=target_character_id)
+    _session2 = stored_sogni_session(conn)
+    from . import characters as _chars2
+    _girl2 = _chars2.get_character(target_character_id or character_id,
+                                   user_id=user_id)
+    _ref2 = _fetch_first_frame(_girl2.get("avatar_url") or "")
+    _project_id2, _err2 = _sogni_plan_create_project_sync(
+        _session2 or {}, shaped, _ref2, config.SOGNI_IMAGE_MODEL, "image")
+    if _ref2:
+        try:
+            os.unlink(_ref2)
+        except OSError:
+            pass
+    if not _project_id2:
+        conn.execute("UPDATE sogni_plan_jobs SET status = 'failed', "
+                     "error = ? WHERE id = ?",
+                     (_err2 or "sogni rejected the project", job_id))
+        conn.commit()
+        return {"brief": "He asked for a picture but Sogni would not "
+                         "start it (" + (_err2 or "unknown error") +
+                         "). Tell him honestly it did not start and "
+                         "why, in your own voice, short and warm; do "
+                         "not promise it is rendering."}
+    conn.execute("UPDATE sogni_plan_jobs SET status = 'rendering', "
+                 "project_id = ? WHERE id = ?", (_project_id2, job_id))
+    conn.commit()
     _spawn_sogni_plan_job(job_id)
     who = f" of {target_name}" if target_name \
         and target_character_id != character_id else ""
