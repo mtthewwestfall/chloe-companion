@@ -1285,6 +1285,15 @@ class PresetVideoIn(BaseModel):
 # Track last-sent clip per girl+preset to avoid immediate repeats.
 _LAST_PRESET_SENT: dict[tuple[str, str], str] = {}
 
+_GIVE_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+def _give_media_type(url: str) -> str:
+    """A give library holds pictures as well as videos (owner uploads and
+    approved generations). Label rows by file extension so the app renders
+    pictures as <img> instead of a broken <video> bubble."""
+    u = (url or "").split("?", 1)[0].lower()
+    return "image" if u.endswith(_GIVE_IMAGE_EXTS) else "video"
+
 @app.post("/api/v1/preset-video")
 async def preset_video(body: PresetVideoIn, request: Request):
     """Return a give clip following the escalation sequence.
@@ -1370,7 +1379,8 @@ async def preset_video(body: PresetVideoIn, request: Request):
                             (key[0],)).fetchall()
             except Exception:
                 db_rows = []
-        clips = [{"id": r["id"], "url": r["url"], "media_type": "video"} for r in db_rows]
+        clips = [{"id": r["id"], "url": r["url"],
+                  "media_type": _give_media_type(r["url"])} for r in db_rows]
         if not clips:
             # Static media-dir fallback (2026-10-10): staged give clips
             # shipped in chloe-companion-app/media/ work even when they
