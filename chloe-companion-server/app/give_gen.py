@@ -265,6 +265,31 @@ def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
             pass
 
 
+def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
+    """Private characters only: when no stored Sogni session is usable,
+    sign in fresh with the server-side login kept in the
+    SOGNI_LOGIN_USERNAME / SOGNI_LOGIN_PASSWORD env vars and store the
+    resulting pair. Public characters never trigger this sign-in."""
+    try:
+        if not characters.owner_of(girl_id):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    username = (os.environ.get("SOGNI_LOGIN_USERNAME") or "").strip()
+    password = os.environ.get("SOGNI_LOGIN_PASSWORD") or ""
+    if not username or not password:
+        return None
+    try:
+        session = assist._sogni_plan_login((username, password))
+    except Exception as e:  # noqa: BLE001 — log the kind, never the login
+        print(f"[give_gen] hardwired Sogni sign-in failed for {girl_id}: "
+              f"{type(e).__name__}", flush=True)
+        return None
+    assist.store_sogni_session(conn, session)
+    print(f"[give_gen] hardwired Sogni sign-in ok for {girl_id}", flush=True)
+    return session
+
+
 def _run_give_generation_job(gen_id: int) -> None:
     """Worker thread: render 15s Sogni video using the saved Sogni login session."""
     conn = db.connect()
@@ -275,6 +300,8 @@ def _run_give_generation_job(gen_id: int) -> None:
             return
 
         session = assist.stored_sogni_session(conn)
+        if not session:
+            session = _hardwired_sogni_session(conn, gen["girl_id"])
         if not session:
             print(f"[give_gen] gen #{gen_id} waiting: Sogni login missing", flush=True)
             update_give_generation_status(conn, gen_id, "failed", error="Sogni login missing")
@@ -308,6 +335,18 @@ def _run_give_generation_job(gen_id: int) -> None:
             assist.store_sogni_session(conn, fresh_session)
         if outcome.get("status") == "session_dead":
             assist.clear_sogni_session(conn)
+            # Private characters get one retry on a completely fresh
+            # hardwired sign-in before the job is allowed to fail.
+            retry_session = _hardwired_sogni_session(conn, gen["girl_id"])
+            if retry_session:
+                outcome, fresh_session = assist._sogni_plan_run(
+                    retry_session, prompt, ref_path,
+                    model=config.SOGNI_VIDEO_MODEL, duration=15
+                )
+                if fresh_session:
+                    assist.store_sogni_session(conn, fresh_session)
+                if outcome.get("status") == "session_dead":
+                    assist.clear_sogni_session(conn)
 
         if outcome.get("status") != "done" or not outcome.get("path"):
             err_msg = str(outcome.get("detail") or outcome.get("status") or "render failed")[:200]
