@@ -5434,13 +5434,7 @@ async def _sogni_plan_render(session: dict, prompt: str,
     fresh: dict | None = None
     client = None
     try:
-        media_gen._patch_websocket_quirk()
-        client = await SogniClient.create(
-            app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
-            disable_socket=False, websocket_factory=media_gen._ws_factory)
-        await client.set_tokens(token=session.get("token") or "",
-                                refresh_token=session.get(
-                                    "refreshToken") or "")
+        client = await _create_plan_client(session)
         project = await client.projects.create(
             _sogni_plan_params(prompt, ref_path, model, kind, duration=duration))
         outcome["project_id"] = project.id
@@ -5529,15 +5523,8 @@ def _sogni_plan_create_project_sync(session: dict, prompt: str,
     from . import media_gen
 
     async def _create():
-        media_gen._patch_websocket_quirk()
-        client = await SogniClient.create(
-            app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
-            disable_socket=False,
-            websocket_factory=media_gen._ws_factory)
+        client = await _create_plan_client(session)
         try:
-            await client.set_tokens(token=session.get("token") or "",
-                                    refresh_token=session.get(
-                                        "refreshToken") or "")
             project = await client.projects.create(
                 _sogni_plan_params(prompt, ref_path, model, kind,
                                    duration=duration))
@@ -5634,8 +5621,16 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
     return outcome, fresh
 
 
-async def await_sogni_client(session: dict):
-    """Create an authenticated SogniClient from a plan session."""
+async def _create_plan_client(session: dict):
+    """SogniClient with the plan session applied.
+
+    Restoring a stored pair can lose a race inside the SDK: the access
+    token lives only 60 seconds, so authenticate() renews inline, the
+    rotation advances the session, and the account check inside
+    set_tokens trips over it ("The account changed") even though the
+    pair is good. On that failure the client already holds the rotated
+    pair — back it up and apply it again, which takes the clean path.
+    """
     from sogni_client import SogniClient
     from . import media_gen
     media_gen._patch_websocket_quirk()
@@ -5643,9 +5638,23 @@ async def await_sogni_client(session: dict):
         app_id=_SOGNI_PLAN_APP_ID, auth_type="token",
         disable_socket=False,
         websocket_factory=media_gen._ws_factory)
-    await client.set_tokens(token=session.get("token") or "",
-                            refresh_token=session.get("refreshToken") or "")
+    try:
+        await client.set_tokens(token=session.get("token") or "",
+                                refresh_token=session.get(
+                                    "refreshToken") or "")
+    except Exception:
+        backup = await client.api_client.auth.backup()
+        if not backup or not backup.get("token") \
+                or not backup.get("refreshToken"):
+            raise
+        await client.set_tokens(token=backup["token"],
+                                refresh_token=backup["refreshToken"])
     return client
+
+
+async def await_sogni_client(session: dict):
+    """Create an authenticated SogniClient from a plan session."""
+    return await _create_plan_client(session)
 
 
 def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
