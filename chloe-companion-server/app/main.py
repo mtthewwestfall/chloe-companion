@@ -72,7 +72,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, media_gen, photos, shows, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, media_gen, photos, shows, sims, store, submit, trust, voice
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 app.add_middleware(
@@ -82,6 +82,12 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-Admin-Token"],
 )
+
+# Sims game think endpoint (POST /api/sims/think): token-gated, with its
+# own path-scoped CORS for the game's origin — see app/sims.py. Added
+# after the global CORS middleware so it sits outermost for that path.
+sims.register(app)
+app.add_middleware(sims.SimsCorsMiddleware)
 
 # Finished regular media-request generations are served from /generated/.
 os.makedirs(config.GENERATED_DIR, exist_ok=True)
