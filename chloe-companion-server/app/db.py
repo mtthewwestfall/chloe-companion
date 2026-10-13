@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS local_characters (
     verified_fictional INTEGER NOT NULL DEFAULT 0,  -- 2026-10-01: owner-verified not a real person
     photos           TEXT NOT NULL DEFAULT '[]',  -- 2026-10-01: creator photo set (JSON data URIs)
     owner_user_id    TEXT,  -- 2026-10-08: owner-only private character (NULL = public roster)
+    roleplay_locked  INTEGER NOT NULL DEFAULT 0,  -- 2026-10-13: persistent roleplay lock; owner's release word turns it off
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -538,6 +539,26 @@ def _migrate_owner_column(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_roleplay_lock_column(conn: sqlite3.Connection) -> None:
+    """2026-10-13: persistent roleplay lock. Existing installs get a
+    roleplay_locked flag on local_characters (default OFF for every
+    character). One-time seed: Brooklyn ships locked. The seed lives
+    inside the column-add branch, so it runs exactly once per install —
+    a later release by the owner is never re-locked by a restart."""
+    if _table_exists(conn, "local_characters") and not _column_exists(
+        conn, "local_characters", "roleplay_locked"
+    ):
+        conn.execute(
+            "ALTER TABLE local_characters ADD COLUMN roleplay_locked "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute(
+            "UPDATE local_characters SET roleplay_locked = 1 "
+            "WHERE id = 'brooklyn'"
+        )
+        conn.commit()
+
+
 def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     """One-time rebuild of girl_footage without the local_characters FK."""
     row = conn.execute(
@@ -619,6 +640,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_submission_columns(conn)
         _migrate_creator_columns(conn)
         _migrate_owner_column(conn)
+        _migrate_roleplay_lock_column(conn)
         _migrate_referral_columns(conn)
         _migrate_conversation_attachments(conn)
         _migrate_girl_media_stage(conn)

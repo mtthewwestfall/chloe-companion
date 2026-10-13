@@ -597,7 +597,7 @@ def list_local_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         for r in conn.execute(
             "SELECT id, name, avatar_url, persona, companion_voice, blurb, "
             "door_title, sort_order, enabled, verified_fictional, photos, "
-            "owner_user_id, created_at, updated_at "
+            "owner_user_id, roleplay_locked, created_at, updated_at "
             "FROM local_characters ORDER BY sort_order, name"
         ).fetchall()
     ]

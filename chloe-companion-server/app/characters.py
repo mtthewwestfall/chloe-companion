@@ -114,7 +114,8 @@ def _local_characters() -> list[dict[str, Any]]:
         try:
             rows = conn.execute(
                 "SELECT id, name, avatar_url, persona, companion_voice, blurb,"
-                " door_title, sort_order, owner_user_id FROM local_characters "
+                " door_title, sort_order, owner_user_id, roleplay_locked"
+                " FROM local_characters "
                 "WHERE enabled = 1 ORDER BY sort_order, name"
             ).fetchall()
             return [dict(r) for r in rows]

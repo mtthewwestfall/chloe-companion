@@ -130,6 +130,11 @@ When he starts a roleplay or pretend scenario with you ("let's pretend...", "you
 ROLEPLAY_RULE_NEUTRAL = """ROLEPLAY — STANDING RULE:
 When the other person starts a roleplay or pretend scenario ("let's pretend...", a costume, a scene, any framing), step into it immediately and in character. Take the role given, stay in the scene, and keep it going — it is play between you. Never deflect a scene ("let's keep it low-key", "save that for later"), never break character to comment on the setup, and never lecture about it. The scenario stays alive until they drop it; do not reset back to normal on your own. Roleplay never invents a past together that contradicts who you are, but you still play along rather than refusing."""
 
+ROLEPLAY_LOCK_RULE = """ROLEPLAY LOCK — STANDING RULE:
+Roleplay mode is ON for you right now, and it stays on — this is not a scene he just started, it is your standing mode until he ends it. You are in character and in-scene in EVERY reply: never drop back to casual chat, never step out of character between messages to talk as yourself, and never break character to comment on the setup. Whatever he says, you answer from inside the scene, in character; if he changes the subject, you carry it into the scene rather than resetting to normal. Nothing in the conversation turns this off except his release word. Your persona rules still hold inside the scene — who you are, what you know, and what you have lived do not change; the lock sets your mode, not your canon."""
+
+ROLEPLAY_RELEASE_NOTE = """He just said the release word — roleplay mode is now OFF. Acknowledge it briefly in your normal voice (a few words that roleplay is off), then keep talking with him normally, out of scene. Do not stay in the character or the scene you were just playing."""
+
 HONESTY_RULE = """HONESTY ABOUT REAL ACTIONS — STANDING RULE:
 Only claim you did something real — looked something up, set a reminder, started a code review, drafted or sent anything — when this prompt tells you that you just did it. Otherwise you have NOT done it, and you never invent the results: no made-up findings, file names, error messages, links, messages sent, posts published, or fixes pushed. If something real is still running, say it's running; if it failed or isn't connected yet, say so plainly, warm and short. If he asks "did you do that?" and you didn't, the answer is an easy no — never a fake yes to please him. Inside a pretend scene, play freely; the line is claiming real-world actions or results outside the scene."""
 
@@ -1039,6 +1044,15 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     parts.append(ROLEPLAY_RULE_NEUTRAL
                  if cid == "rocky" or gender == "male"
                  else ROLEPLAY_RULE)
+    # Roleplay lock (2026-10-13): only when the character's persistent
+    # flag is on (Brooklyn). Extends the standing rule above — she is in
+    # roleplay continuously, not just inside a scene he started.
+    if context.get("roleplay_locked"):
+        parts.append(ROLEPLAY_LOCK_RULE)
+    # One turn only: the turn he released the lock with the word, so she
+    # acknowledges it out of scene instead of playing on.
+    if context.get("roleplay_just_released"):
+        parts.append(ROLEPLAY_RELEASE_NOTE)
     parts.append(HONESTY_RULE)
     if cid == "rocky":
         style = ("Style: 1-3 short sentences, like a text. Direct, "
@@ -1433,6 +1447,60 @@ def relevant_memories(
 
 
 
+# ---------------------------------------------------------------------------
+# ROLEPLAY LOCK — a persistent per-character mode (2026-10-13), stored as
+# local_characters.roleplay_locked (db.py migration seeds it ON for
+# Brooklyn; it is OFF for every other character). While on, her system
+# prompt carries ROLEPLAY_LOCK_RULE: she stays in character and in-scene
+# in every reply. The owner ends it with the release word; the flip
+# happens in build_brain_context, BEFORE that turn's prompt is built, so
+# the release reply itself is already generated unlocked.
+# ---------------------------------------------------------------------------
+
+ROLEPLAY_RELEASE_WORD = "pickles"
+
+
+def _is_roleplay_release(user_text: str | None) -> bool:
+    """True only when the WHOLE message is the release word — any case,
+    optional trailing punctuation ("pickles", "Pickles!", "pickles.").
+    The word inside a sentence, in a scene or out of one, never releases
+    the lock."""
+    t = (user_text or "").strip().lower().strip(".!?,~").strip()
+    return t == ROLEPLAY_RELEASE_WORD
+
+
+def _roleplay_locked(conn: sqlite3.Connection, character_id: str) -> bool:
+    """Fresh read of the character's lock flag — never the roster cache,
+    so a release takes effect on the very next reply. Characters with no
+    local row (Chloe, Keyhole-roster girls) are never locked."""
+    cid = (character_id or "").strip().lower()
+    if not cid:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT roleplay_locked FROM local_characters WHERE id = ?",
+            (cid,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — a lock read must never break chat
+        return False
+    return bool(row and row[0])
+
+
+def _set_roleplay_locked(conn: sqlite3.Connection, character_id: str,
+                         locked: bool) -> None:
+    cid = (character_id or "").strip().lower()
+    if not cid:
+        return
+    try:
+        conn.execute(
+            "UPDATE local_characters SET roleplay_locked = ? WHERE id = ?",
+            (1 if locked else 0, cid),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 — a lock write must never break chat
+        pass
+
+
 def build_brain_context(
     conn: sqlite3.Connection,
     user_id: str,
@@ -1455,6 +1523,15 @@ def build_brain_context(
     char = character or {"id": "chloe", "name": "Chloe"}
     cid = char.get("id", "chloe")
     state = trust.get_state(conn, user_id)
+    # Roleplay lock (2026-10-13): fresh flag read per turn. The release
+    # word flips it off BEFORE this context is assembled, so the release
+    # reply is generated unlocked and carries the one-turn note.
+    roleplay_locked = _roleplay_locked(conn, cid)
+    roleplay_just_released = False
+    if roleplay_locked and _is_roleplay_release(user_text):
+        _set_roleplay_locked(conn, cid, False)
+        roleplay_locked = False
+        roleplay_just_released = True
     return {
         "name": user.get("name"),
         "tier": user["tier"],
@@ -1474,4 +1551,6 @@ def build_brain_context(
         "recent": store.recent_turns(conn, user_id, limit=6, character_id=cid),
         "character": char,
         "character_name": char.get("name") or "Chloe",
+        "roleplay_locked": roleplay_locked,
+        "roleplay_just_released": roleplay_just_released,
     }
