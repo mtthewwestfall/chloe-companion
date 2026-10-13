@@ -258,23 +258,31 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
         ref_path = _fetch_reference(avatar_url or "")
         outcome = _render_image_plan(
             session, _sfw_prompt(names, scene), ref_path)
+        if outcome.get("status") == "session_dead":
+            # Non-destructive recovery, same as give_gen: re-read the
+            # newest stored pair and retry once with it when another
+            # feature already refreshed the shared login; assist
+            # clears the pair (and tombstones the env seed) only when
+            # it is confirmed dead and a re-login has also failed.
+            recovered = None
+            try:
+                from . import assist
+
+                conn = db.connect()
+                try:
+                    recovered = assist.resolve_dead_sogni_session(
+                        conn, session)
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                recovered = None
+            if recovered:
+                outcome = _render_image_plan(
+                    recovered, _sfw_prompt(names, scene), ref_path)
         if outcome.get("status") != "done" or not outcome.get("path"):
             print(f"[her_day] sfw image failed ({moment_key}): "
                   f"{outcome.get('status')}: {outcome.get('detail')}",
                   flush=True)
-            if outcome.get("status") == "session_dead":
-                # Same recovery as give_gen: drop the dead pair so the
-                # next sign-in flow can store a fresh one.
-                try:
-                    from . import assist
-
-                    conn = db.connect()
-                    try:
-                        assist.clear_sogni_session(conn)
-                    finally:
-                        conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
             return ""
         os.makedirs(config.GENERATED_DIR, exist_ok=True)
         shutil.copyfile(outcome["path"], dest)

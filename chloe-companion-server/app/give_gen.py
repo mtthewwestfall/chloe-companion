@@ -265,11 +265,9 @@ def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
             pass
 
 
-def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
-    """Private characters only: when no stored Sogni session is usable,
-    sign in fresh with the server-side login kept in the
-    SOGNI_LOGIN_USERNAME / SOGNI_LOGIN_PASSWORD env vars and store the
-    resulting pair. Public characters never trigger this sign-in."""
+def _hardwired_login(girl_id: str) -> tuple[str, str] | None:
+    """The server-side Sogni login for a private character, or None
+    when she is not owner-scoped or the login is not configured."""
     try:
         if not characters.owner_of(girl_id):
             return None
@@ -279,13 +277,26 @@ def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
     password = os.environ.get("SOGNI_LOGIN_PASSWORD") or ""
     if not username or not password:
         return None
-    try:
-        session = assist._sogni_plan_login((username, password))
-    except Exception as e:  # noqa: BLE001 — log the kind, never the login
-        print(f"[give_gen] hardwired Sogni sign-in failed for {girl_id}: "
-              f"{type(e).__name__}", flush=True)
+    return (username, password)
+
+
+def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
+    """Private characters only: when no stored Sogni session is usable,
+    sign in fresh with the server-side login kept in the
+    SOGNI_LOGIN_USERNAME / SOGNI_LOGIN_PASSWORD env vars and store the
+    resulting pair. Public characters never trigger this sign-in.
+
+    The sign-in goes through assist's single-flight gate: the login is
+    shared by every feature, and a sign-in racing another feature's
+    sign-in invalidates the pair that feature just stored."""
+    login = _hardwired_login(girl_id)
+    if not login:
         return None
-    assist.store_sogni_session(conn, session)
+    session = assist.sogni_login_single_flight(conn, login)
+    if not session:
+        print(f"[give_gen] hardwired Sogni sign-in failed for {girl_id}",
+              flush=True)
+        return None
     print(f"[give_gen] hardwired Sogni sign-in ok for {girl_id}", flush=True)
     return session
 
@@ -334,10 +345,14 @@ def _run_give_generation_job(gen_id: int) -> None:
         if fresh_session:
             assist.store_sogni_session(conn, fresh_session)
         if outcome.get("status") == "session_dead":
-            assist.clear_sogni_session(conn)
-            # Private characters get one retry on a completely fresh
-            # hardwired sign-in before the job is allowed to fail.
-            retry_session = _hardwired_sogni_session(conn, gen["girl_id"])
+            # Non-destructive recovery (assist.resolve_dead_sogni_session):
+            # when another feature already refreshed the shared login,
+            # retry once with the newest stored pair; only when the
+            # stored pair is the one that just died does a single-flight
+            # hardwired sign-in happen, and the pair is cleared (env
+            # seed tombstoned) only after that sign-in fails.
+            retry_session = assist.resolve_dead_sogni_session(
+                conn, session, login=_hardwired_login(gen["girl_id"]))
             if retry_session:
                 outcome, fresh_session = assist._sogni_plan_run(
                     retry_session, prompt, ref_path,
@@ -345,8 +360,6 @@ def _run_give_generation_job(gen_id: int) -> None:
                 )
                 if fresh_session:
                     assist.store_sogni_session(conn, fresh_session)
-                if outcome.get("status") == "session_dead":
-                    assist.clear_sogni_session(conn)
 
         if outcome.get("status") != "done" or not outcome.get("path"):
             err_msg = str(outcome.get("detail") or outcome.get("status") or "render failed")[:200]

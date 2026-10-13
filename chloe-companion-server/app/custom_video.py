@@ -233,7 +233,11 @@ def run_custom_generation_with_login(request_id: int) -> None:
             if fresh_session:
                 assist.store_sogni_session(conn, fresh_session)
             if outcome.get("status") == "session_dead":
-                assist.clear_sogni_session(conn)
+                # Non-destructive recovery: the pair is cleared (env
+                # seed tombstoned) only when it is confirmed dead and
+                # a re-login has also failed — see
+                # assist.resolve_dead_sogni_session.
+                assist.resolve_dead_sogni_session(conn, session)
 
             if outcome.get("status") != "done" or not outcome.get("path"):
                 # Keep it in the admin queue for retry/manual review. Log a

@@ -4926,6 +4926,92 @@ def clear_sogni_session(conn: sqlite3.Connection) -> bool:
     return cur.rowcount > 0
 
 
+# Single-flight sign-in gate: every feature that signs in on its own
+# (give_gen's hardwired path, session_dead recovery) goes through here
+# so two sign-ins can never be in flight at once — a fresh sign-in
+# invalidates the token pair every other feature is about to render
+# with ("The account changed. Submit this request again.").
+_SOGNI_LOGIN_LOCK = threading.Lock()
+
+
+def _env_sogni_login() -> tuple[str, str] | None:
+    """The server-side Sogni login (env vars), when configured."""
+    username = (os.environ.get("SOGNI_LOGIN_USERNAME") or "").strip()
+    password = (os.environ.get("SOGNI_LOGIN_PASSWORD") or "").strip()
+    if username and password:
+        return (username, password)
+    return None
+
+
+def sogni_login_single_flight(conn: sqlite3.Connection,
+                              login: tuple[str, str],
+                              dead_session: dict | None = None
+                              ) -> dict | None:
+    """One sign-in in flight per process, shared by every feature.
+
+    A caller that waited on the gate re-reads the stored pair before
+    signing in: when it no longer matches the pair that died on them,
+    another feature already refreshed the login and they use that pair
+    instead of signing in again — concurrent sign-in attempts collapse
+    to one login. On success the fresh pair is stored. Returns the
+    pair, or None when the sign-in failed.
+    """
+    with _SOGNI_LOGIN_LOCK:
+        if dead_session:
+            current = stored_sogni_session(conn)
+            if current and not current.get("api_key") and \
+                    _session_fingerprint(current) != \
+                    _session_fingerprint(dead_session):
+                return current
+        try:
+            fresh = _sogni_plan_login(login)
+        except Exception as e:  # noqa: BLE001 — report the kind only
+            print("[assist] sogni sign-in failed ("
+                  + _sogni_failure_telemetry(e, redact=login) + ")",
+                  flush=True)
+            return None
+        if fresh:
+            store_sogni_session(conn, fresh)
+        return fresh
+
+
+def resolve_dead_sogni_session(conn: sqlite3.Connection,
+                               dead_session: dict | None,
+                               login: tuple[str, str] | None = None
+                               ) -> dict | None:
+    """Non-destructive session_dead recovery, shared by every render
+    path (gives, her-day images, chat renders, custom video).
+
+    1. Re-read the newest stored pair: when it differs from the pair
+       that just died, another feature already refreshed the login —
+       return it so the caller can retry its render once with it.
+       Nothing is cleared.
+    2. When the stored pair IS the dead one, try one single-flight
+       re-login (the given login, else the server-side env login) and
+       return the fresh pair on success.
+    3. Only a confirmed-dead pair plus a failed re-login clears the
+       stored pair — which is also the only moment the env seed gets
+       tombstoned (inside clear_sogni_session). One feature's dead
+       render can no longer wipe the session for everyone.
+
+    Returns the pair to retry with, or None when the session is gone.
+    """
+    current = stored_sogni_session(conn)
+    if current and not current.get("api_key") and dead_session and \
+            _session_fingerprint(current) != \
+            _session_fingerprint(dead_session):
+        return current
+    if login is None:
+        login = _env_sogni_login()
+    if login:
+        fresh = sogni_login_single_flight(conn, login,
+                                          dead_session=dead_session)
+        if fresh:
+            return fresh
+    clear_sogni_session(conn)
+    return None
+
+
 def _scrub_whole_message(conn: sqlite3.Connection, user_id: str,
                            character_id: str, needle: str,
                            placeholder: str) -> None:
@@ -5151,7 +5237,11 @@ def perform_sogni_login(conn: sqlite3.Connection, user_id: str,
               "stage=throttle error=TooManyAttempts", flush=True)
         return None
     try:
-        session = _sogni_plan_login(login)
+        # The single-flight gate: a user sign-in must never race a
+        # feature's own sign-in (one in flight per process, or the
+        # newer login invalidates the pair the other just stored).
+        with _SOGNI_LOGIN_LOCK:
+            session = _sogni_plan_login(login)
     except _SogniPlanError as e:
         _sogni_login_fail_times.setdefault(user_id, []).append(
             time.time())
@@ -6023,7 +6113,12 @@ def _run_sogni_plan_job(job_id: int) -> None:
         if fresh:
             store_sogni_session(conn, fresh)
         if outcome.get("status") == "session_dead":
-            clear_sogni_session(conn)
+            # Non-destructive recovery: a pair another feature already
+            # refreshed survives; the dead pair is cleared (env seed
+            # tombstoned) only after a failed re-login, and a fresh
+            # pair is stored in its place when the re-login lands —
+            # see resolve_dead_sogni_session.
+            resolve_dead_sogni_session(conn, session)
         media_url = None
         video_url = None
         if outcome.get("status") == "done" and outcome.get("path"):
