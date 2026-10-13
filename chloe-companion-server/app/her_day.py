@@ -17,9 +17,12 @@ pre-determined/reproducible for the next several days.
 Generation (6 AM cron or on-demand), per user x per girl:
   1. Build the day's content plan for every girl (solo + group moments).
   2. Sogni generates an SFW scene image per visual moment (fully clothed,
-     everyday activity, non-sexual). Images cached per participants+day+
-     moment on disk — all users share one generation. Any failure falls
-     back to a styled text card.
+     everyday activity, non-sexual) through the shared plan session
+     (assist.stored_sogni_session — subscription billing, the same path
+     as the plan renders; the dashboard API key is never used here).
+     Images cached per participants+day+moment on disk — all users
+     share one generation. Any failure falls back to a styled text
+     card.
   3. Caption via the centralized Gemini key manager PROXY
      (POST {PUBLIC_APP_URL}/v1/chat/completions, Bearer GEMINI_PROXY_TOKEN)
      — free keys first, never the paid key directly.
@@ -33,6 +36,8 @@ import asyncio
 import hashlib
 import os
 import random
+import shutil
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -176,72 +181,60 @@ def _build_all_plans(all_girls: list[dict[str, Any]],
     return plans
 
 
-async def _generate_sfw_image_async(names: list[str], avatar_url: str,
-                                    scene: str, dest: str) -> str:
-    """Run one SFW Sogni image job. Returns the /generated/... url."""
-    from sogni_client import SogniClient
-    from .media_gen import (
-        _download,
-        _fetch_reference,
-        _patch_websocket_quirk,
-        _ws_factory,
-    )
+def _plan_session() -> dict | None:
+    """The shared Sogni plan session (assist_secrets row
+    "sogni_plan_session", env seed as fallback), or None.
 
-    _patch_websocket_quirk()
-    ref_path = _fetch_reference(avatar_url or "")
-    params: dict[str, Any] = {
-        "positivePrompt": _sfw_prompt(names, scene),
-        "numberOfMedia": 1,
-        "type": "image",
-        "modelId": config.SOGNI_IMAGE_MODEL,
-        "width": 768,
-        "height": 1344,
-    }
-    if ref_path:
-        params["referenceImage"] = ref_path
+    This is the session every working render in the backend uses
+    (gives, chat plan renders). The dashboard API key is NOT a usable
+    session here: plan renders run on the subscription web plan
+    only, and stored_sogni_session's API-key fallback is treated as
+    no session (same stance as _sogni_plan_create_project_sync).
+    """
+    from . import assist
+
+    conn = db.connect()
     try:
-        client = await SogniClient.create(
-            api_key=config.SOGNI_API_KEY,
-            app_id="companion-her-day",
-            disable_socket=False,
-            websocket_factory=_ws_factory,
-        )
-        try:
-            project = await client.projects.create(params)
-            urls = await project.wait_for_completion(timeout=600)
-            if not urls:
-                info = await client.projects.get(project.id)
-                for wj in (info.get("completedWorkerJobs") or []):
-                    img_id = wj.get("imgID") or wj.get("id")
-                    if not img_id:
-                        continue
-                    try:
-                        u = await client.projects.media_download_url(
-                            {"jobId": project.id, "id": img_id,
-                             "type": "complete"})
-                        urls.append(u)
-                    except Exception as e:  # noqa: BLE001
-                        print(f"[her_day] mint failed for {img_id}: {e}",
-                              flush=True)
-            if not urls:
-                raise RuntimeError("no result urls from Sogni")
-            os.makedirs(config.GENERATED_DIR, exist_ok=True)
-            _download(urls[0], dest)
-            return "/generated/" + os.path.basename(dest)
-        finally:
-            await client.aclose()
+        session = assist.stored_sogni_session(conn)
     finally:
-        if ref_path:
-            try:
-                os.unlink(ref_path)
-            except OSError:
-                pass
+        conn.close()
+    if not session or session.get("api_key"):
+        return None
+    return session
+
+
+def _render_image_plan(session: dict, prompt: str,
+                       ref_path: str | None) -> dict:
+    """One plan-billed image render via assist's locked seam (sync).
+
+    assist._locked_render serializes renders on the shared login
+    (parallel renders on one refresh token end in "The account
+    changed"), re-reads the newest stored pair, and persists the
+    rotated pair afterwards. Returns assist's outcome dict
+    ({"status", "path", "detail", ...}).
+    """
+    from . import assist
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        outcome, _fresh = assist._locked_render(
+            loop, session,
+            lambda s: assist._sogni_plan_render(
+                s, prompt, ref_path,
+                model=config.SOGNI_IMAGE_MODEL, kind="image"))
+        return outcome
+    finally:
+        try:
+            loop.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _generate_sfw_image(names: list[str], avatar_url: str,
                         participant_ids: list[str], moment_key: str,
                         scene: str, date_str: str) -> str:
-    """Generate (or reuse today's cached) SFW image.
+    """Generate (or reuse today's cached) SFW image via the plan session.
 
     Returns the /generated/... url, or "" on any failure — the caller
     renders a styled text card instead.
@@ -249,16 +242,52 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
     dest = _herday_image_path(participant_ids, moment_key, date_str)
     if os.path.exists(dest):
         return "/generated/" + os.path.basename(dest)
-    if not config.SOGNI_API_KEY:
-        print("[her_day] SOGNI_API_KEY not set, text card fallback",
+    try:
+        session = _plan_session()
+    except Exception as e:  # noqa: BLE001
+        print(f"[her_day] plan session lookup failed: {e}", flush=True)
+        return ""
+    if not session:
+        print("[her_day] no Sogni plan session, text card fallback",
               flush=True)
         return ""
+    ref_path = None
     try:
-        return asyncio.run(_generate_sfw_image_async(
-            names, avatar_url, scene, dest))
+        from .media_gen import _fetch_reference
+
+        ref_path = _fetch_reference(avatar_url or "")
+        outcome = _render_image_plan(
+            session, _sfw_prompt(names, scene), ref_path)
+        if outcome.get("status") != "done" or not outcome.get("path"):
+            print(f"[her_day] sfw image failed ({moment_key}): "
+                  f"{outcome.get('status')}: {outcome.get('detail')}",
+                  flush=True)
+            if outcome.get("status") == "session_dead":
+                # Same recovery as give_gen: drop the dead pair so the
+                # next sign-in flow can store a fresh one.
+                try:
+                    from . import assist
+
+                    conn = db.connect()
+                    try:
+                        assist.clear_sogni_session(conn)
+                    finally:
+                        conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return ""
+        os.makedirs(config.GENERATED_DIR, exist_ok=True)
+        shutil.copyfile(outcome["path"], dest)
+        return "/generated/" + os.path.basename(dest)
     except Exception as e:  # noqa: BLE001
         print(f"[her_day] sfw image failed ({moment_key}): {e}", flush=True)
         return ""
+    finally:
+        if ref_path:
+            try:
+                os.unlink(ref_path)
+            except OSError:
+                pass
 
 
 def _generate_caption(girl_name: str, moment_key: str, desc: str,
@@ -419,7 +448,16 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                     from . import voice as _voice
                     voice_url = (_voice.maybe_generate_voice_note(
                         caption, user_id) or "")
-                except Exception:
+                    if not voice_url:
+                        # Voice notes are an owner-approved paid-TTS
+                        # feature (app/voice.py is stubbed until then);
+                        # log it so the empty voice_url is never a
+                        # silent failure again.
+                        print("[her_day] voice note unavailable "
+                              "(voice disabled/stubbed); voice post "
+                              "saved without audio", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[her_day] voice note failed: {e}", flush=True)
                     voice_url = ""
             post = store.save_her_day_post(
                 conn, user_id, gid,
@@ -474,3 +512,146 @@ def generate_daily() -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             report["errors"].append(f"{uid}: {e}")
     return report
+
+
+# ---------------------------------------------------------------------------
+# Backfill: repair today's already-generated posts in place.
+#
+# A day whose generation ran while image rendering was broken is left
+# with caption-only rows (media_url = ''). Regeneration is blocked by
+# her_day_exists_today, so instead pair today's rows back to the
+# deterministic plan — rows for a (user, girl) were inserted in plan
+# order — and fill each image post from the shared per-day render
+# cache. The ~2k user rows therefore cost one render per distinct
+# (participants, moment). Voice posts are counted, not filled: voice
+# notes sit behind the owner's paid-TTS gate (app/voice.py) and cannot
+# be synthesized here.
+# ---------------------------------------------------------------------------
+
+_backfill_lock = threading.Lock()
+_backfill_state: dict[str, Any] = {"running": False, "report": None,
+                                   "error": None, "started_at": None}
+
+
+def backfill_today_media(date_str: str | None = None,
+                         progress: dict[str, Any] | None = None
+                         ) -> dict[str, Any]:
+    """Fill today's empty Whispr Feed image posts in place.
+
+    Returns counts: pairs processed/skipped, image posts filled/still
+    empty, and voice posts left without audio (owner-gated TTS).
+    """
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+    all_girls = _get_all_girls()
+    plans = _build_all_plans(all_girls, date_str)
+    girl_map = {g["id"]: g for g in all_girls}
+    report: dict[str, Any] = {
+        "date": date_str, "pairs_processed": 0, "pairs_skipped": 0,
+        "image_posts_filled": 0, "image_posts_still_empty": 0,
+        "voice_posts_without_audio": 0,
+    }
+
+    def _progress() -> None:
+        if progress is not None:
+            progress.update(report)
+
+    conn = db.connect()
+    try:
+        pairs = conn.execute(
+            "SELECT DISTINCT user_id, girl_id FROM her_day_posts"
+            " WHERE date(created_at) = date('now')").fetchall()
+        for pair in pairs:
+            uid, gid = pair["user_id"], pair["girl_id"]
+            plan = plans.get(gid)
+            if not plan:
+                report["pairs_skipped"] += 1
+                _progress()
+                continue
+            rows = [dict(r) for r in conn.execute(
+                "SELECT id, post_type, media_url, voice_url"
+                " FROM her_day_posts WHERE user_id = ? AND girl_id = ?"
+                " AND date(created_at) = date('now') ORDER BY id",
+                (uid, gid)).fetchall()]
+            if len(rows) != len(plan):
+                # Cannot pair rows to moments reliably — leave them.
+                report["pairs_skipped"] += 1
+                _progress()
+                continue
+            report["pairs_processed"] += 1
+            ginfo = girl_map.get(gid) or {"id": gid, "name": gid,
+                                           "avatar_url": ""}
+            for row, (moment_key, is_group, pids, pnames) in zip(
+                    rows, plan):
+                if row["post_type"] == "voice":
+                    if not row["voice_url"]:
+                        report["voice_posts_without_audio"] += 1
+                    continue
+                if row["post_type"] != "image" or row["media_url"]:
+                    continue
+                _ptype, sfw_scene, _desc = _moment_def(moment_key)
+                if not sfw_scene:
+                    continue
+                if is_group:
+                    names = [(ginfo.get("name") or gid)] + pnames
+                    participants = [gid] + pids
+                else:
+                    names = [ginfo.get("name") or gid]
+                    participants = [gid]
+                url = _generate_sfw_image(
+                    names, ginfo.get("avatar_url") or "", participants,
+                    moment_key, sfw_scene, date_str)
+                if url:
+                    conn.execute(
+                        "UPDATE her_day_posts SET media_url = ?"
+                        " WHERE id = ?", (url, row["id"]))
+                    conn.commit()
+                    report["image_posts_filled"] += 1
+                else:
+                    report["image_posts_still_empty"] += 1
+            _progress()
+        return report
+    finally:
+        conn.close()
+
+
+def start_backfill_today_media() -> dict[str, Any]:
+    """Start the backfill on a daemon thread (renders are serialized
+    and can take a while); poll backfill_status() for the report."""
+    with _backfill_lock:
+        if _backfill_state.get("running"):
+            return {"ok": True, "started": False, "already_running": True}
+        _backfill_state.update({
+            "running": True, "report": None, "error": None,
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+
+    def _run() -> None:
+        try:
+            report = backfill_today_media(progress=_backfill_state)
+            _backfill_state["report"] = report
+        except Exception as e:  # noqa: BLE001
+            _backfill_state["error"] = str(e)[:300]
+            print(f"[her_day] backfill failed: {e}", flush=True)
+        finally:
+            _backfill_state["running"] = False
+
+    threading.Thread(target=_run, daemon=True,
+                     name="herday-backfill").start()
+    return {"ok": True, "started": True}
+
+
+def backfill_status() -> dict[str, Any]:
+    """Current backfill state (live counters while running)."""
+    state: dict[str, Any] = {"ok": True,
+                             "running": bool(_backfill_state.get("running")),
+                             "started_at": _backfill_state.get("started_at"),
+                             "error": _backfill_state.get("error")}
+    report = _backfill_state.get("report")
+    if report is not None:
+        state["report"] = report
+    # Live counters (the running backfill merges them into the state).
+    for key in ("date", "pairs_processed", "pairs_skipped",
+                "image_posts_filled", "image_posts_still_empty",
+                "voice_posts_without_audio"):
+        if key in _backfill_state:
+            state[key] = _backfill_state[key]
+    return state

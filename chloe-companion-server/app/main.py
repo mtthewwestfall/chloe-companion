@@ -2034,6 +2034,29 @@ def admin_her_day_generate_all(request: Request):
             "errors": errors}
 
 
+@app.post("/api/v1/admin/her-day/backfill-media")
+def admin_her_day_backfill_media(request: Request):
+    """Admin: repair TODAY's Whispr Feed posts in place.
+
+    For days whose generation ran while image rendering was broken,
+    rows were saved caption-only (media_url='') and regeneration is
+    blocked by her_day_exists_today. This fills each image post from
+    the shared per-day render cache (one plan-session render per
+    distinct moment) on a background thread; poll the status endpoint
+    for counters. Voice posts are counted, not filled — voice notes
+    are behind the owner's paid-TTS gate (app/voice.py).
+    """
+    _require_admin(request)
+    return her_day.start_backfill_today_media()
+
+
+@app.get("/api/v1/admin/her-day/backfill-media/status")
+def admin_her_day_backfill_media_status(request: Request):
+    """Admin: backfill progress/final report (see backfill-media)."""
+    _require_admin(request)
+    return her_day.backfill_status()
+
+
 # ---------------------------------------------------------------------------
 # Admin: girl media library (2026-10-06)
 # Manage gives, mains, typing mains, activities per character.
