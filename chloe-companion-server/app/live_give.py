@@ -7,6 +7,10 @@ a brand-new give scene during the conversation itself:
 
 - He explicitly asks for something new ("make me one", "send me
   something new", "make me a fresh video", "show me you ..."), or
+  plainly asks for a give of her with an explicit action ("make me
+  a video of you taking off your bra") — the routing fix of
+  2026-10-14: those asks are claimed by this hook BEFORE the
+  assistant lane can take the turn, or
 - on her own initiative when his message carries the chat path's
   existing explicit-heat action signal (the same detector family
   main._maybe_save_requested_action uses) — initiative renders a
@@ -87,14 +91,20 @@ _SHOW_ME_YOU_RE = re.compile(r"\bshow\s+me\s+you\b", re.IGNORECASE)
 # Mirrors main._get_action_re — the chat path's existing explicit-action
 # detector (it saves these asks as give presets). Kept in step
 # deliberately: main imports this module, so the pattern is mirrored
-# here rather than imported.
+# here rather than imported. Gerund forms included (2026-10-14):
+# "taking off your bra" is how the ask actually arrives mid-sentence;
+# the bare imperatives alone missed it.
 _ACTION_ASK_RE = re.compile(
-    r"\b(show me|let me see|wanna see|want to see|suck|lick|touch|"
-    r"show|strip|take off|remove)\b.{0,40}\b"
+    r"\b(show me|let me see|wanna see|want to see|sucking|suck|"
+    r"licking|lick|touching|touch|showing|show|stripping|strip|"
+    r"taking off|take off|removing|remove)\b.{0,40}\b"
     r"(tits|titties|boobs|breasts|pussy|ass|dick|cock|nipples|body|"
     r"thighs|panties|bra)\b",
     re.IGNORECASE,
 )
+
+# "... of you ..." — the ask is about HER (not a barn, not the site).
+_OF_YOU_RE = re.compile(r"\bof\s+(?:you|yourself)\b", re.IGNORECASE)
 
 # Chat-context scene flavor: a fixed vocabulary of settings, scanned
 # over the last few turns and rephrased — his words themselves never
@@ -140,9 +150,14 @@ def detect_live_give_ask(text: str) -> dict[str, Any] | None:
     """An explicit ask for a NEW give scene, or None.
 
     Tight by design: a creation verb plus novelty/freshness language,
-    a direct "make me one", or "show me you ..." backed by fresh or
-    explicit-heat wording. Generic media asks ("make me a video of
-    you dancing") belong to the assistant lane and never match here.
+    a direct "make me one", "show me you ..." backed by fresh or
+    explicit-heat wording — or (2026-10-14 routing fix) a plain
+    "make me a video/pic of you ..." carrying an explicit action or
+    adult signal: that is exactly how the owner asks a private girl
+    for a give, and it used to fall through to the assistant lane,
+    which ate it silently. A plain scene ask with no heat ("make me
+    a video of you dancing") still belongs to the assistant lane and
+    never matches here.
     """
     t = re.sub(r"\s+", " ", (text or "").strip())
     if not t or assist._VIDEO_CALL_RE.search(t):
@@ -154,6 +169,11 @@ def detect_live_give_ask(text: str) -> dict[str, Any] | None:
         hit = True
     elif _FRESH_RE.search(t) and _CREATE_VERB_RE.search(t) \
             and _MEDIA_NOUN_RE.search(t):
+        hit = True
+    elif _CREATE_VERB_RE.search(t) and _MEDIA_NOUN_RE.search(t) \
+            and _OF_YOU_RE.search(t) and (
+                _ACTION_ASK_RE.search(t)
+                or assist._STRONG_ADULT_MEDIA_RE.search(t)):
         hit = True
     elif _SHOW_ME_YOU_RE.search(t) and (
             _FRESH_RE.search(t) or _ACTION_ASK_RE.search(t)
@@ -353,6 +373,17 @@ def _run_seam(session: dict, kind: str, prompt: str,
 
 def _render_fresh(conn: Any, girl: dict[str, Any], kind: str,
                   scene: str, stage: int) -> dict | None:
+    """One fresh render of her, holding the live-render priority
+    signal for the whole attempt (session fetch + render + heal):
+    while a live request is in flight the give_gen queue pauses
+    between jobs instead of competing for the session or consuming
+    the single-flight sign-in first."""
+    with assist.live_render_priority():
+        return _render_fresh_inner(conn, girl, kind, scene, stage)
+
+
+def _render_fresh_inner(conn: Any, girl: dict[str, Any], kind: str,
+                        scene: str, stage: int) -> dict | None:
     """One fresh render of her, or None when no plan session exists.
     Mirrors give_gen's job: stored pair first, her hardwired
     single-flight sign-in when absent. A pair that dies mid-render is
@@ -365,7 +396,8 @@ def _render_fresh(conn: Any, girl: dict[str, Any], kind: str,
     if session and session.get("api_key"):
         session = None
     if not session:
-        session = give_gen._hardwired_sogni_session(conn, girl_id)
+        session = give_gen._hardwired_sogni_session(
+            conn, girl_id, caller="live_give")
     if not session:
         return None
     ref_path = None
@@ -390,7 +422,8 @@ def _render_fresh(conn: Any, girl: dict[str, Any], kind: str,
             # (and marked the outcome); a second resolve+retry here
             # would stack another sign-in on the same render.
             retry = assist.resolve_dead_sogni_session(
-                conn, session, login=give_gen._hardwired_login(girl_id))
+                conn, session, login=give_gen._hardwired_login(girl_id),
+                caller="live_give")
             if retry:
                 outcome, fresh = _run_seam(retry, kind, prompt, ref_path)
                 if fresh:
@@ -526,6 +559,27 @@ _BRIEF_HOLDOVER = (
     "process.")
 
 
+def _log_eval(gid: str, user_id: str, det: dict[str, Any] | None,
+              assist_claimed: bool, action: str,
+              stage: int | None = None) -> None:
+    """The one [live_give] line EVERY hook evaluation that passes the
+    girl/owner gates leaves behind (2026-10-14): before this, the
+    hook printed only on job end, so a full day of eaten asks left
+    zero lines and silence was compatible with five different
+    causes. Fields: which detector fired (explicit / initiative /
+    none), whether the assistant lane had claimed the turn, and the
+    action taken (start with stage / holdover preset / the exact
+    reason not)."""
+    kind = ("none" if det is None else
+            "initiative" if det.get("initiative") else "explicit")
+    line = (f"[live_give] eval girl={gid} user={user_id} "
+            f"detector={kind} "
+            f"assist_claimed={bool(assist_claimed)} action={action}")
+    if stage is not None:
+        line += f" stage={stage}"
+    print(line, flush=True)
+
+
 def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
                           text: str, *, assist_claimed: bool = False,
                           now: float | None = None) -> dict[str, Any] | None:
@@ -538,10 +592,17 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
             return None
         if not user_id or user_id not in assist._owner_ids():
             return None
-        if assist_claimed:
-            return None  # the assistant lane already owns this turn
         det = detect_live_give_ask(text) or detect_initiative_ask(text)
+        if assist_claimed:
+            # The assistant lane already owns this turn. (A matched
+            # explicit ask never arrives here from main.chat any
+            # more — the chat path gives this hook first claim on it;
+            # what yields here is initiative and unmatched turns.)
+            _log_eval(gid, user_id, det, assist_claimed,
+                      "yield_assist_claimed")
+            return None
         if not det:
+            _log_eval(gid, user_id, None, assist_claimed, "no_match")
             return None
         ts = time.time() if now is None else float(now)
         key = (user_id, gid)
@@ -549,13 +610,18 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
             st = _state_for(key)
             if st["in_flight"]:
                 if st["preset_sent_in_flight"]:
+                    _log_eval(gid, user_id, det, assist_claimed,
+                              "in_flight_quiet")
                     return None
                 st["preset_sent_in_flight"] = True
                 action = "preset"
             elif ts - st["last_start"] < COOLDOWN_S:
+                _log_eval(gid, user_id, det, assist_claimed, "cooldown")
                 return None
             elif det["initiative"] \
                     and ts - st["last_initiative"] < INITIATIVE_COOLDOWN_S:
+                _log_eval(gid, user_id, det, assist_claimed,
+                          "initiative_cooldown")
                 return None
             else:
                 st["in_flight"] = True
@@ -567,9 +633,13 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
         if action == "preset":
             preset = _pick_preset(conn, user_id, gid, det["kind"])
             if not preset:
+                _log_eval(gid, user_id, det, assist_claimed,
+                          "holdover_no_preset")
                 return None
             _deliver_preset(conn, user_id, gid, preset,
                             during_render=True)
+            _log_eval(gid, user_id, det, assist_claimed,
+                      "holdover_preset")
             return {"brief": _BRIEF_HOLDOVER, "kind": det["kind"],
                     "initiative": det["initiative"],
                     "fallback_preset": True}
@@ -586,6 +656,8 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
                 if st is not None:
                     st["in_flight"] = False
             raise
+        _log_eval(gid, user_id, det, assist_claimed, "start",
+                  stage=stage)
         noun = "picture" if det["kind"] == "image" else "video"
         brief = (_BRIEF_INITIATIVE if det["initiative"]
                  else _BRIEF_EXPLICIT.format(noun=noun))

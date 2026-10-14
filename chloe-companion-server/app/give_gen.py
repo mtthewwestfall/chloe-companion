@@ -282,7 +282,8 @@ def _hardwired_login(girl_id: str) -> tuple[str, str] | None:
     return (username, password)
 
 
-def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
+def _hardwired_sogni_session(conn, girl_id: str,
+                             caller: str = "give_gen") -> dict | None:
     """Private characters only: when no stored Sogni session is usable,
     sign in fresh with the server-side login kept in the
     SOGNI_LOGIN_USERNAME / SOGNI_LOGIN_PASSWORD env vars and store the
@@ -290,11 +291,14 @@ def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
 
     The sign-in goes through assist's single-flight gate: the login is
     shared by every feature, and a sign-in racing another feature's
-    sign-in invalidates the pair that feature just stored."""
+    sign-in invalidates the pair that feature just stored. ``caller``
+    names the feature that asked (give_gen itself, or live_give,
+    which borrows this helper) for the sign-in failure log tag."""
     login = _hardwired_login(girl_id)
     if not login:
         return None
-    session = assist.sogni_login_single_flight(conn, login)
+    session = assist.sogni_login_single_flight(conn, login,
+                                               caller=caller)
     if not session:
         print(f"[give_gen] hardwired Sogni sign-in failed for {girl_id}",
               flush=True)
@@ -381,7 +385,8 @@ def _run_give_generation_job(gen_id: int) -> str | None:
             # (outcome["seam_healed"]): a second recovery here would
             # stack another sign-in on the same render.
             retry_session = assist.resolve_dead_sogni_session(
-                conn, session, login=_hardwired_login(gen["girl_id"]))
+                conn, session, login=_hardwired_login(gen["girl_id"]),
+                caller="give_gen")
             if retry_session:
                 outcome, fresh_session = assist._sogni_plan_run(
                     retry_session, prompt, ref_path,
@@ -400,7 +405,12 @@ def _run_give_generation_job(gen_id: int) -> str | None:
             return _park_give_generation(conn, gen_id)
 
         if outcome.get("status") != "done" or not outcome.get("path"):
-            err_msg = str(outcome.get("detail") or outcome.get("status") or "render failed")[:200]
+            # Never a blank error: production rows carried a
+            # two-space error when the render's detail came back
+            # whitespace (see assist._sogni_error_detail).
+            err_msg = assist._sogni_error_detail(
+                outcome.get("status") or "failed",
+                outcome.get("detail"))
             update_give_generation_status(conn, gen_id, "failed", error=err_msg)
             print(f"[give_gen] gen #{gen_id} failed: {err_msg}", flush=True)
             return
@@ -411,7 +421,7 @@ def _run_give_generation_job(gen_id: int) -> str | None:
         print(f"[give_gen] gen #{gen_id} ready: {video_url} (15s)", flush=True)
 
     except Exception as e:  # noqa: BLE001
-        err_msg = str(e)[:200]
+        err_msg = assist._sogni_error_detail("failed", str(e), e)
         update_give_generation_status(conn, gen_id, "failed", error=err_msg)
         print(f"[give_gen] gen #{gen_id} exception: {e}\n{traceback.format_exc()}", flush=True)
     finally:
@@ -481,15 +491,39 @@ def trigger_daily_give_generations(day: str | None = None,
 
     # Spawn background generation jobs
     if queued_ids:
-        t = threading.Thread(
-            target=_process_queued_give_generations,
-            args=(queued_ids,),
-            daemon=True,
-            name="daily-give-batch",
-        )
-        t.start()
+        _spawn_processor(queued_ids, "daily-give-batch")
+    elif _has_unrendered_pending():
+        # Nothing new to queue, but a parked backlog exists (rows a
+        # dead session left pending): a bare trigger must still kick
+        # the processor's sweep, or the queue only ever moves on a
+        # boot. (2026-10-14: an admin re-probe queued 0 rows and the
+        # parked queue never drained.)
+        _spawn_processor([], "daily-give-sweep")
 
     return queued_ids
+
+
+def _spawn_processor(gen_ids: list[int], name: str) -> None:
+    t = threading.Thread(
+        target=_process_queued_give_generations,
+        args=(list(gen_ids),),
+        daemon=True,
+        name=name,
+    )
+    t.start()
+
+
+def _has_unrendered_pending() -> bool:
+    """Any queued row still waiting for its render (status pending,
+    no result url) — the sweep fodder a bare trigger must kick."""
+    conn = db.connect()
+    try:
+        row = conn.execute(
+            "SELECT id FROM give_generations WHERE status = 'pending' "
+            "AND (url IS NULL OR url = '') LIMIT 1").fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +585,30 @@ def _boot_grace_wait() -> None:
         time.sleep(remaining)
 
 
+# Live-render priority pause (2026-10-14): between jobs the
+# processor waits out any live chat render holding assist's
+# live-render signal — a live request is a person waiting in chat,
+# this queue is background. The pause is bounded so a wedged signal
+# can never stall the queue forever (a live render's own ceiling is
+# its 900s project wait).
+_LIVE_PAUSE_POLL_S = 0.5
+_LIVE_PAUSE_MAX_S = 1200.0
+
+
+def _wait_out_live_render() -> None:
+    waited = 0.0
+    while assist.live_render_active():
+        if waited <= 0.0:
+            print("[give_gen] pausing between jobs: live render "
+                  "in flight", flush=True)
+        if waited >= _LIVE_PAUSE_MAX_S:
+            print("[give_gen] live-render pause hit its cap; "
+                  "resuming the queue", flush=True)
+            return
+        time.sleep(_LIVE_PAUSE_POLL_S)
+        waited += _LIVE_PAUSE_POLL_S
+
+
 def _claim_next_queued_give_id(exclude: set[int]) -> int | None:
     """Oldest unrendered queued generation (status 'pending' with no
     result url yet), skipping ids this processor run already handled,
@@ -601,6 +659,7 @@ def _process_queued_give_generations(gen_ids: list[int]) -> None:
             if gen_id in processed:
                 continue
             processed.add(gen_id)
+            _wait_out_live_render()
             if _run_give_generation_job(gen_id) == "parked":
                 # Session unavailable: stand down for this drain.
                 # The parked row and everything behind it stay

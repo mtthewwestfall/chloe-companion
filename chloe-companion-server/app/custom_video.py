@@ -237,7 +237,8 @@ def run_custom_generation_with_login(request_id: int) -> None:
                 # seed tombstoned) only when it is confirmed dead and
                 # a re-login has also failed — see
                 # assist.resolve_dead_sogni_session.
-                assist.resolve_dead_sogni_session(conn, session)
+                assist.resolve_dead_sogni_session(
+                    conn, session, caller="custom_video")
 
             if outcome.get("status") != "done" or not outcome.get("path"):
                 # Keep it in the admin queue for retry/manual review. Log a

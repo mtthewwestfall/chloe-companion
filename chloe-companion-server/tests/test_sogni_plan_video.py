@@ -15,11 +15,13 @@ Run:  python -m unittest tests.test_sogni_plan_video -v
 from __future__ import annotations
 
 import inspect
+import io
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -529,6 +531,76 @@ class WorkerTest(SogniPlanCase):
         self.assertEqual(self._jobs()[0]["status"], "session_dead")
         self.assertIsNone(assist.stored_sogni_session(self.conn))
         self.assertIn("sign-in expired", self._turns()[-1]["text"])
+
+
+class ErrorDetailTest(unittest.TestCase):
+    """Non-blank render errors (2026-10-14): assist._sogni_error_detail
+    is the funnel every failure path records through — a whitespace
+    detail used to be stored verbatim (a two-space error) and the
+    real reason a render died was lost."""
+
+    def test_detail_with_substance_passes_through(self):
+        self.assertEqual(
+            assist._sogni_error_detail("blocked", "sensitive content"),
+            "sensitive content")
+
+    def test_whitespace_detail_becomes_status_placeholder(self):
+        d = assist._sogni_error_detail("failed", "  ")
+        self.assertTrue(d.strip())
+        self.assertIn("status=failed", d)
+
+    def test_empty_detail_without_exception_is_not_blank(self):
+        d = assist._sogni_error_detail("plan_rejected", "")
+        self.assertTrue(d.strip())
+        self.assertIn("plan_rejected", d)
+
+    def test_exception_with_empty_message_uses_class_name(self):
+        d = assist._sogni_error_detail("failed", "", ValueError(""))
+        self.assertIn("ValueError", d)
+        self.assertTrue(d.strip())
+
+    def test_exception_message_is_kept(self):
+        d = assist._sogni_error_detail(
+            "failed", "", RuntimeError("socket died"))
+        self.assertIn("RuntimeError", d)
+        self.assertIn("socket died", d)
+
+
+class VideoRequestLoggingTest(SogniPlanCase):
+    """Branch logging (2026-10-14): _handle_sogni_video_request's
+    early exits (no stored session, job already active) used to
+    print nothing, so an eaten ask was indistinguishable from five
+    other causes. Each exit — and the enqueue — now leaves a line."""
+
+    def _call(self, subject="you taking off your top"):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            hit = assist._handle_sogni_video_request(
+                self.conn, "owner_1", "hannah", subject,
+                raw_text="make a video of " + subject)
+        return hit, buf.getvalue()
+
+    def test_no_session_exit_is_logged(self):
+        hit, out = self._call()
+        self.assertTrue(hit.get("sogni_login_box"))
+        self.assertIn("no stored session", out)
+
+    def test_active_job_exit_is_logged(self):
+        assist.store_sogni_session(self.conn, dict(TOKENS))
+        assist._sogni_plan_enqueue(self.conn, "owner_1", "hannah",
+                                    "you waving", kind="video")
+        hit, out = self._call()
+        self.assertIn("still rendering", hit["brief"])
+        self.assertIn("already active", out)
+        self.assertEqual(len(self._jobs()), 1)
+
+    def test_enqueue_is_logged_with_job_id(self):
+        assist.store_sogni_session(self.conn, dict(TOKENS))
+        hit, out = self._call()
+        self.assertEqual(hit.get("sogni_media_kind"), "video")
+        jobs = self._jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertIn(f"sogni video job #{jobs[0]['id']} enqueued", out)
 
 
 if __name__ == "__main__":

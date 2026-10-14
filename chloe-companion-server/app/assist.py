@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hmac
 import html.parser as _html_parser
 import http.client
@@ -4060,6 +4061,49 @@ _SOGNI_GATE = threading.RLock()
 # The render seam's historical name — the SAME lock object, so
 # _locked_render and every other gated path serialize together.
 _SOGNI_RENDER_LOCK = _SOGNI_GATE
+
+# Live-render priority signal (2026-10-14): a chat live-give render
+# (live_give) registers here for its whole attempt — session fetch,
+# render, and the session heal — because a live request is a person
+# waiting in chat, while the give_gen queue is background work. The
+# queue processor checks the signal BETWEEN jobs and pauses while
+# any live render is in flight, so queue work never competes with a
+# live render and never consumes the single-flight sign-in ahead of
+# one (the queue only signs in inside a job; not starting a job
+# while the signal is up is the whole ordering guard). In-process
+# and advisory — the render gate above still does the serializing.
+_LIVE_RENDER_LOCK = threading.Lock()
+_LIVE_RENDER_COUNT = 0
+
+
+def note_live_render_start() -> None:
+    """Mark a live chat render as in flight (priority signal up)."""
+    global _LIVE_RENDER_COUNT
+    with _LIVE_RENDER_LOCK:
+        _LIVE_RENDER_COUNT += 1
+
+
+def note_live_render_end() -> None:
+    """Release one live-render priority registration."""
+    global _LIVE_RENDER_COUNT
+    with _LIVE_RENDER_LOCK:
+        _LIVE_RENDER_COUNT = max(0, _LIVE_RENDER_COUNT - 1)
+
+
+def live_render_active() -> bool:
+    """True while any live chat render holds the priority signal."""
+    with _LIVE_RENDER_LOCK:
+        return _LIVE_RENDER_COUNT > 0
+
+
+@contextlib.contextmanager
+def live_render_priority():
+    """Hold the live-render priority signal for a render attempt."""
+    note_live_render_start()
+    try:
+        yield
+    finally:
+        note_live_render_end()
 _SOGNI_PLAN_APP_ID = "companion-hannah-plan"
 _SOGNI_PLAN_PLACEHOLDER = "[sogni login]"
 _SOGNI_PLAN_WIDTH = 768
@@ -5064,9 +5108,15 @@ def _env_sogni_login() -> tuple[str, str] | None:
 
 def sogni_login_single_flight(conn: sqlite3.Connection,
                               login: tuple[str, str],
-                              dead_session: dict | None = None
+                              dead_session: dict | None = None,
+                              caller: str = ""
                               ) -> dict | None:
     """One sign-in in flight per process, shared by every feature.
+
+    ``caller`` names the feature asking for the sign-in; it is
+    tagged onto the failure print so a dead-login line in the log
+    says WHO was signing in (2026-10-14: an unattributed failure
+    line could not be told apart from a user login attempt).
 
     A caller that waited on the gate re-reads the stored pair before
     signing in: when it no longer matches the pair that died on them,
@@ -5098,13 +5148,15 @@ def sogni_login_single_flight(conn: sqlite3.Connection,
             if cooldown:
                 print("[assist] sogni sign-in skipped "
                       f"(login_cooldown, {cooldown['remaining']}s "
-                      "left)", flush=True)
+                      f"left, caller={caller or 'unknown'})",
+                      flush=True)
                 return None
             try:
                 fresh = _sogni_plan_login(login)
             except Exception as e:  # noqa: BLE001 — report the kind only
                 print("[assist] sogni sign-in failed ("
-                      + _sogni_failure_telemetry(e, redact=login) + ")",
+                      + _sogni_failure_telemetry(e, redact=login)
+                      + f" caller={caller or 'unknown'})",
                       flush=True)
                 _set_sogni_login_cooldown(
                     conn, _login_failure_is_transient(e))
@@ -5117,7 +5169,8 @@ def sogni_login_single_flight(conn: sqlite3.Connection,
 
 def resolve_dead_sogni_session(conn: sqlite3.Connection,
                                dead_session: dict | None,
-                               login: tuple[str, str] | None = None
+                               login: tuple[str, str] | None = None,
+                               caller: str = ""
                                ) -> dict | None:
     """Non-destructive session_dead recovery, shared by every render
     path (gives, her-day images, chat renders, custom video).
@@ -5152,7 +5205,8 @@ def resolve_dead_sogni_session(conn: sqlite3.Connection,
         login = _env_sogni_login()
     if login:
         fresh = sogni_login_single_flight(conn, login,
-                                          dead_session=dead_session)
+                                          dead_session=dead_session,
+                                          caller=caller)
         if fresh:
             return fresh
         state = sogni_login_cooldown_state(conn)
@@ -5376,11 +5430,13 @@ def sogni_login_lock_remaining(user_id: str) -> int:
 
 
 def perform_sogni_login(conn: sqlite3.Connection, user_id: str,
-                        login: tuple[str, str]) -> dict | None:
+                        login: tuple[str, str],
+                        caller: str = "") -> dict | None:
     """The one sign-in path, shared by chat intake and the secure
     login box. On success the session pair is stored (never the
     password) and earlier missed pastes are swept; on failure the
-    sanitized telemetry line is logged and the throttle ticks.
+    sanitized telemetry line is logged (tagged with ``caller`` —
+    chat intake vs the secure login box) and the throttle ticks.
     Returns the stored session, or None."""
     if sogni_login_lock_remaining(user_id):
         print("[assist] sogni sign-in skipped (throttled): "
@@ -5399,7 +5455,8 @@ def perform_sogni_login(conn: sqlite3.Connection, user_id: str,
         _sogni_login_fail_times.setdefault(user_id, []).append(
             time.time())
         print("[assist] sogni sign-in failed ("
-              + _sogni_failure_telemetry(e, redact=login) + ")",
+              + _sogni_failure_telemetry(e, redact=login)
+              + f" caller={caller or 'unknown'})",
               flush=True)
         return None
     _sogni_login_fail_times.pop(user_id, None)
@@ -5444,7 +5501,8 @@ def _handle_sogni_login_intake(conn: sqlite3.Connection, user_id: str,
     # sitting in the persisted history.
     _scrub_whole_message(conn, user_id, character_id, login[1],
                          _SOGNI_PLAN_PLACEHOLDER)
-    if perform_sogni_login(conn, user_id, login) is None:
+    if perform_sogni_login(conn, user_id, login,
+                           caller="chat_login") is None:
         return {"brief": FIXED_REPLY_PREFIX
                 + sogni_login_failed_reply(character_id),
                 "sogni_login_box": True}
@@ -5564,6 +5622,31 @@ def _classify_sogni_failure(text: str) -> str:
     return "failed"
 
 
+def _sogni_error_detail(status: str, detail: object = "",
+                        exc: BaseException | None = None) -> str:
+    """The error text a failed render records — NEVER blank.
+
+    Production give rows were found carrying a two-space error: the
+    no-result branch of _sogni_plan_render built its detail as
+    " ".join of three empty project fields, and a whitespace string
+    is truthy, so it defeated every caller's `or "render failed"`
+    fallback and the real reason the render died was lost. Every
+    failure path now funnels through here: the Sogni detail when it
+    has substance, else the exception class + message, else an
+    explicit status-bearing placeholder."""
+    text = str(detail or "").strip()
+    if text:
+        return text[:200]
+    if exc is not None:
+        msg = str(exc).strip()
+        if msg:
+            return f"{type(exc).__name__}: {msg}"[:200]
+        return (f"{type(exc).__name__} raised with no message "
+                f"(status={status or 'failed'})")[:200]
+    return (f"render failed (status={status or 'failed'}, "
+            "no detail from Sogni)")[:200]
+
+
 
 async def _sogni_plan_render_api_key(api_key: str, prompt: str,
                                      ref_path: str | None,
@@ -5647,7 +5730,8 @@ async def _sogni_plan_render_api_key(api_key: str, prompt: str,
         outcome["project_id"] = res.get("project_id", outcome["project_id"])
     except Exception as e:  # noqa: BLE001
         outcome["status"] = _classify_sogni_failure(str(e))
-        outcome["detail"] = str(e)[:200]
+        outcome["detail"] = _sogni_error_detail(
+            outcome["status"], str(e), e)
     return outcome, None
 
 
@@ -5710,8 +5794,8 @@ async def _sogni_plan_render(session: dict, prompt: str,
                     str(info.get(k) or "")
                     for k in ("status", "reason", "error"))
                 outcome["status"] = _classify_sogni_failure(blob)
-                outcome["detail"] = blob[:200] or \
-                    "render ended with no result"
+                outcome["detail"] = _sogni_error_detail(
+                    outcome["status"], blob)
                 return outcome, fresh
         os.makedirs(config.GENERATED_DIR, exist_ok=True)
         if kind == "image":
@@ -5730,7 +5814,8 @@ async def _sogni_plan_render(session: dict, prompt: str,
     except Exception as e:  # noqa: BLE001 — classify, never crash the thread
         if outcome["status"] == "failed":
             outcome["status"] = _classify_sogni_failure(str(e))
-            outcome["detail"] = str(e)[:200]
+            outcome["detail"] = _sogni_error_detail(
+                outcome["status"], str(e), e)
     finally:
         if client is not None:
             try:
@@ -5833,7 +5918,8 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
             blob = " ".join(str(info.get(k) or "")
                             for k in ("status", "reason", "error"))
             outcome["status"] = _classify_sogni_failure(blob)
-            outcome["detail"] = blob[:200] or "render ended with no result"
+            outcome["detail"] = _sogni_error_detail(
+                outcome["status"], blob)
             return outcome, fresh
         os.makedirs(config.GENERATED_DIR, exist_ok=True)
         if kind == "image":
@@ -5852,7 +5938,8 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
     except Exception as e:  # noqa: BLE001
         if outcome["status"] == "failed":
             outcome["status"] = _classify_sogni_failure(str(e))
-            outcome["detail"] = str(e)[:200]
+            outcome["detail"] = _sogni_error_detail(
+                outcome["status"], str(e), e)
     finally:
         if client is not None:
             try:
@@ -5969,7 +6056,7 @@ def _heal_session_dead_render(conn, loop, make_coro, used_session,
     non-session outcome. Returns the (possibly re-run) outcome and
     the fresh pair to persist."""
     dead = fresh or used_session
-    healed = resolve_dead_sogni_session(conn, dead)
+    healed = resolve_dead_sogni_session(conn, dead, caller="render_seam")
     if not healed:
         return outcome, fresh
     print("[assist] session_dead render healed at the seam; "
@@ -6003,9 +6090,10 @@ def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,
             except Exception:
                 pass
     except Exception as e:  # noqa: BLE001
-        return ({"status": _classify_sogni_failure(str(e)),
+        status = _classify_sogni_failure(str(e))
+        return ({"status": status,
                  "project_id": None, "path": None,
-                 "detail": str(e)[:200]}, None)
+                 "detail": _sogni_error_detail(status, str(e), e)}, None)
 
 
 def _sogni_plan_image_run(session: dict, prompt: str,
@@ -6024,9 +6112,10 @@ def _sogni_plan_image_run(session: dict, prompt: str,
             except Exception:
                 pass
     except Exception as e:  # noqa: BLE001
-        return ({"status": _classify_sogni_failure(str(e)),
+        status = _classify_sogni_failure(str(e))
+        return ({"status": status,
                  "project_id": None, "path": None,
-                 "detail": str(e)[:200]}, None)
+                 "detail": _sogni_error_detail(status, str(e), e)}, None)
 
 
 def _fetch_first_frame(avatar_url: str) -> str | None:
@@ -6334,7 +6423,8 @@ def _run_sogni_plan_job(job_id: int) -> None:
             # tombstoned) only after a failed re-login, and a fresh
             # pair is stored in its place when the re-login lands —
             # see resolve_dead_sogni_session.
-            resolve_dead_sogni_session(conn, session)
+            resolve_dead_sogni_session(conn, session,
+                                       caller="sogni_plan_job")
         media_url = None
         video_url = None
         if outcome.get("status") == "done" and outcome.get("path"):
@@ -6390,11 +6480,20 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
     _media_topic_touch(conn, user_id, kind="video", subject=subject,
                        target_character_id=target_id)
     if not stored_sogni_session(conn):
+        # Silent-exit logging (2026-10-14): every early exit of this
+        # handler used to print nothing, so an eaten ask was
+        # indistinguishable from five other causes in the logs.
+        print(f"[assist] sogni video request held: no stored session "
+              f"(user={user_id} character={character_id} "
+              f"target={target_id}); login-box brief", flush=True)
         return {"brief": FIXED_REPLY_PREFIX
                 + _sogni_no_session_reply(character_id),
                 "sogni_login_box": True}
     intent = detect_sogni_media_intent(raw_text or subject)
     if _is_vague_media_subject(subject):
+        print(f"[assist] sogni video request: vague subject "
+              f"{subject!r} (user={user_id} character={character_id} "
+              f"target={target_id}); options menu", flush=True)
         options = _media_situations("video", intent)
         _media_options_set(conn, user_id, kind="video",
                            options=options,
@@ -6403,6 +6502,10 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
         return _media_options_reply("video", options, target_name,
                                     character_id)
     if _sogni_plan_active_job(conn, user_id):
+        print(f"[assist] sogni video request held: a plan job is "
+              f"already active (user={user_id} "
+              f"character={character_id} target={target_id}); "
+              f"still-rendering brief", flush=True)
         return {"brief": "He asked for another video, but the last "
                          "one is still rendering. Tell him it's on its "
                          "way and will land right here when it's done; "
@@ -6435,6 +6538,9 @@ def _handle_sogni_video_request(conn: sqlite3.Connection, user_id: str,
                          "to log in again with 'sogni login Lockeddoor', "
                          "short and warm."}
     _spawn_sogni_plan_job(job_id)
+    print(f"[assist] sogni video job #{job_id} enqueued "
+          f"(user={user_id} character={character_id} "
+          f"target={target_id})", flush=True)
     who = f" of {target_name}" if target_name \
         and target_id != character_id else ""
     return {"brief": "You're starting that video" + who +

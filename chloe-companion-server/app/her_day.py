@@ -276,7 +276,7 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
                 conn = db.connect()
                 try:
                     recovered = assist.resolve_dead_sogni_session(
-                        conn, session)
+                        conn, session, caller="her_day")
                 finally:
                     conn.close()
             except Exception:  # noqa: BLE001

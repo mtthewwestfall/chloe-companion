@@ -3,17 +3,21 @@ fresh give scene in a heated owner chat instead of only serving
 presets. The render seam is mocked throughout — no real renders."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app import assist, characters, config, db, give_gen, live_give  # noqa: E402
+from app import assist, brain, characters, config, db, give_gen, live_give, store  # noqa: E402
+from app import main as api  # noqa: E402
 
 OWNER_ID = "owner_1"
 TOKENS = {"token": "tok-aaa", "refreshToken": "ref-bbb"}
@@ -84,6 +88,36 @@ class MatcherTest(unittest.TestCase):
         ):
             self.assertIsNone(live_give.detect_live_give_ask(text), text)
 
+    def test_explicit_ask_hits_plain_of_you_action_asks(self):
+        # The routing fix (2026-10-14): the natural way the owner
+        # asks a private girl — plain "make me a video/pic of you
+        # <explicit action>", imperative or gerund — is owned by
+        # this detector now. The first case is his exact phrasing
+        # from the failed live test.
+        cases = {
+            "Make me a video of you taking off your bra": "video",
+            "make me a pic of you taking off your bra": "image",
+            "send me a video of you taking off your top": "video",
+            "make a video of you taking off your bra": "video",
+            "record a video of you sucking my cock": "video",
+            "make me a video of you topless": "video",
+        }
+        for text, kind in cases.items():
+            det = live_give.detect_live_give_ask(text)
+            self.assertIsNotNone(det, text)
+            self.assertEqual(det["kind"], kind, text)
+            self.assertFalse(det["initiative"], text)
+
+    def test_plain_scene_asks_still_belong_to_assistant_lane(self):
+        # No explicit action / adult signal -> not a give ask, even
+        # in the widened shape.
+        for text in (
+            "make me a video of you dancing on the beach",
+            "make a video of you waving",
+            "send me a pic of you smiling in the garden",
+        ):
+            self.assertIsNone(live_give.detect_live_give_ask(text), text)
+
     def test_media_choice_first_word_wins(self):
         det = live_give.detect_live_give_ask("make me a new video and a pic")
         self.assertEqual(det["kind"], "video")
@@ -93,6 +127,20 @@ class MatcherTest(unittest.TestCase):
     def test_initiative_hits_on_existing_heat_signal(self):
         for text in ("show me your tits", "take off your bra",
                      "suck my cock", "let me see your body"):
+            det = live_give.detect_initiative_ask(text)
+            self.assertIsNotNone(det, text)
+            self.assertEqual(det["kind"], "image", text)
+            self.assertTrue(det["initiative"], text)
+
+    def test_initiative_hits_on_gerund_actions(self):
+        # Gerund forms (2026-10-14): the action detector's verbs are
+        # no longer literal-only — "taking off" mid-sentence matches
+        # like the bare imperative did.
+        for text in ("taking off your bra",
+                     "she is taking off her bra",
+                     "touching your boobs",
+                     "stripping your panties off",
+                     "sucking my dick"):
             det = live_give.detect_initiative_ask(text)
             self.assertIsNotNone(det, text)
             self.assertEqual(det["kind"], "image", text)
@@ -453,6 +501,24 @@ class WorkerTest(unittest.TestCase):
         fetch.assert_not_called()
         self.assertEqual(run.call_args[0][2], self.ref_path)
 
+    def test_render_holds_live_priority_signal(self):
+        # Priority (2026-10-14): the whole render attempt runs with
+        # assist's live-render signal up (the give_gen queue pauses
+        # between jobs while it is), and the signal is released when
+        # the job ends.
+        seen = []
+
+        def fake_run(*a, **k):
+            seen.append(assist.live_render_active())
+            return self.done_video
+
+        with mock.patch.object(assist, "_sogni_plan_run",
+                               side_effect=fake_run):
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        self.assertEqual(seen, [True])
+        self.assertFalse(assist.live_render_active())
+
 
 class SceneTest(unittest.TestCase):
     def setUp(self):
@@ -633,6 +699,212 @@ class MainHookupTest(unittest.TestCase):
     def test_main_imports_and_wires_live_give(self):
         from app import main as api
         self.assertIs(api.live_give, live_give)
+
+
+class HookLoggingTest(unittest.TestCase):
+    """Start logging (2026-10-14): EVERY hook evaluation that passes
+    the girl/owner gates leaves one [live_give] eval line — detector
+    outcome, assist_claimed, and the action or the reason not. Before
+    this, the hook printed only when a job ended, so eaten asks were
+    indistinguishable from silence."""
+
+    def setUp(self):
+        self._env = os.environ.get("ASSIST_OWNER_IDS")
+        os.environ["ASSIST_OWNER_IDS"] = OWNER_ID
+        live_give._reset_state_for_tests()
+        self.conn = _db()
+        self.spawns: list = []
+        self._spawn_patch = mock.patch.object(
+            live_give, "_spawn_live_give",
+            side_effect=lambda *a: self.spawns.append(a))
+        self._spawn_patch.start()
+
+    def tearDown(self):
+        self._spawn_patch.stop()
+        self.conn.close()
+        if self._env is None:
+            os.environ.pop("ASSIST_OWNER_IDS", None)
+        else:
+            os.environ["ASSIST_OWNER_IDS"] = self._env
+
+    def _eval(self, *args, **kwargs):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            hit = live_give.maybe_start_live_give(*args, **kwargs)
+        return hit, buf.getvalue()
+
+    def test_start_evaluation_logs_detector_and_stage(self):
+        hit, out = self._eval(
+            self.conn, OWNER_ID, "brooklyn",
+            "Make me a video of you taking off your bra", now=1000.0)
+        self.assertIsNotNone(hit)
+        self.assertIn("[live_give] eval girl=brooklyn", out)
+        self.assertIn("detector=explicit", out)
+        self.assertIn("assist_claimed=False", out)
+        self.assertIn("action=start", out)
+        self.assertIn("stage=1", out)
+
+    def test_unmatched_evaluation_logs_no_match(self):
+        hit, out = self._eval(
+            self.conn, OWNER_ID, "mia", "how was your day", now=1000.0)
+        self.assertIsNone(hit)
+        self.assertIn("[live_give] eval girl=mia", out)
+        self.assertIn("detector=none", out)
+        self.assertIn("action=no_match", out)
+
+    def test_assist_claimed_evaluation_logs_the_yield(self):
+        hit, out = self._eval(
+            self.conn, OWNER_ID, "mia", "show me your tits",
+            assist_claimed=True, now=1000.0)
+        self.assertIsNone(hit)
+        self.assertIn("assist_claimed=True", out)
+        self.assertIn("action=yield_assist_claimed", out)
+        self.assertEqual(self.spawns, [])
+
+    def test_cooldown_evaluation_logs_the_reason(self):
+        self._eval(self.conn, OWNER_ID, "brooklyn", "make me one",
+                   now=1000.0)
+        live_give._STATE[(OWNER_ID, "brooklyn")]["in_flight"] = False
+        hit, out = self._eval(
+            self.conn, OWNER_ID, "brooklyn", "make me one", now=1060.0)
+        self.assertIsNone(hit)
+        self.assertIn("action=cooldown", out)
+
+
+def _char(cid, name):
+    return {"id": cid, "name": name, "avatar_url": "", "persona": "",
+            "companion_voice": "liora", "blurb": "", "door_title": "",
+            "sort_order": 1}
+
+
+class _Req:
+    def __init__(self, token):
+        self.headers = {"authorization": f"Bearer {token}"} if token \
+            else {}
+
+
+class MainRoutingTest(unittest.TestCase):
+    """Chat-path routing (2026-10-14): an owner's plain media ask to
+    one of the four private girls is claimed by the live-give hook
+    BEFORE maybe_assist runs — the assistant Sogni lane matches the
+    same phrasing and used to eat the turn upstream, so the hook
+    only ever saw assist_claimed=True and yielded silently."""
+
+    PHRASING = "Make me a video of you taking off your bra"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmp.name, "test.db")
+        db.init_db(self.db_path)
+        self._real_conn = api._conn
+        api._conn = lambda: db.connect(self.db_path)  # noqa: E731
+        self._real_db_path = config.DB_PATH
+        config.DB_PATH = self.db_path
+        self._old_owners = os.environ.get("ASSIST_OWNER_IDS")
+        os.environ["ASSIST_OWNER_IDS"] = OWNER_ID
+        self._real_cache = characters._cache
+        characters._cache = {"ts": time.time(), "chars": [], "local": [
+            _char("brooklyn", "Brooklyn"), _char("mara", "Mara")]}
+        self.contexts: list = []
+        self.assist_calls: list = []
+        self.spawns: list = []
+
+        def fake_compose(message, context, cid):
+            self.contexts.append(dict(context))
+            return "a real reply"
+
+        def fake_assist(conn, user, msg, cid, attachments=None):
+            self.assist_calls.append((cid, msg))
+            return {"brief": "ASSIST LANE CLAIM",
+                    "sogni_media_kind": "video"}
+
+        self._real_compose = brain.compose_reply
+        self._real_context = brain.build_brain_context
+        self._real_learn = brain.learn_from_turn
+        self._real_assist = assist.maybe_assist
+        brain.compose_reply = fake_compose
+        brain.build_brain_context = \
+            lambda conn, uid, user, msg, char: {}
+        brain.learn_from_turn = lambda conn, uid, msg, cid: None
+        assist.maybe_assist = fake_assist
+        self._spawn_patch = mock.patch.object(
+            live_give, "_spawn_live_give",
+            side_effect=lambda *a: self.spawns.append(a))
+        self._spawn_patch.start()
+        live_give._reset_state_for_tests()
+        self.owner_tok = self._mk_user(OWNER_ID)
+        self.cust_tok = self._mk_user("cust_1")
+
+    def tearDown(self):
+        self._spawn_patch.stop()
+        api._conn = self._real_conn
+        config.DB_PATH = self._real_db_path
+        if self._old_owners is None:
+            os.environ.pop("ASSIST_OWNER_IDS", None)
+        else:
+            os.environ["ASSIST_OWNER_IDS"] = self._old_owners
+        characters._cache = self._real_cache
+        brain.compose_reply = self._real_compose
+        brain.build_brain_context = self._real_context
+        brain.learn_from_turn = self._real_learn
+        assist.maybe_assist = self._real_assist
+        live_give._reset_state_for_tests()
+        self.tmp.cleanup()
+
+    def _mk_user(self, uid):
+        conn = db.connect(self.db_path)
+        try:
+            store.get_or_create_user(conn, uid)
+            conn.execute(
+                "UPDATE users SET messages_remaining = 5, "
+                "voice_notes_remaining = 0 WHERE user_id = ?", (uid,))
+            conn.commit()
+            token = f"tok-{uid}"
+            store.create_session(conn, uid, token)
+            return token
+        finally:
+            conn.close()
+
+    def _chat(self, token, character_id, message):
+        body = api.ChatIn(message=message, character_id=character_id)
+        return api.chat(body, _Req(token))
+
+    def test_owner_exact_phrasing_wins_first_claim(self):
+        resp = self._chat(self.owner_tok, "brooklyn", self.PHRASING)
+        self.assertEqual(resp["reply_text"], "a real reply")
+        # The assistant lane never ran: the hook claimed the turn.
+        self.assertEqual(self.assist_calls, [])
+        self.assertEqual(len(self.spawns), 1)
+        brief = self.contexts[0].get("assist_result") or ""
+        self.assertIn("brand-new", brief)
+        self.assertNotIn("ASSIST LANE CLAIM", brief)
+
+    def test_plain_chat_still_flows_through_assist(self):
+        resp = self._chat(self.owner_tok, "brooklyn", "how was your day")
+        self.assertEqual(resp["reply_text"], "a real reply")
+        self.assertEqual(len(self.assist_calls), 1)
+        self.assertEqual(self.spawns, [])
+        self.assertEqual(self.contexts[0].get("assist_result"),
+                         "ASSIST LANE CLAIM")
+
+    def test_initiative_still_yields_to_an_assist_claim(self):
+        # Only EXPLICIT asks got first claim; her initiative path
+        # still runs after maybe_assist and yields to its claim.
+        self._chat(self.owner_tok, "brooklyn", "show me your tits")
+        self.assertEqual(len(self.assist_calls), 1)
+        self.assertEqual(self.spawns, [])
+        self.assertEqual(self.contexts[0].get("assist_result"),
+                         "ASSIST LANE CLAIM")
+
+    def test_non_owner_phrasing_stays_with_assist(self):
+        self._chat(self.cust_tok, "brooklyn", self.PHRASING)
+        self.assertEqual(len(self.assist_calls), 1)
+        self.assertEqual(self.spawns, [])
+
+    def test_owner_other_girl_phrasing_stays_with_assist(self):
+        self._chat(self.owner_tok, "mara", self.PHRASING)
+        self.assertEqual(len(self.assist_calls), 1)
+        self.assertEqual(self.spawns, [])
 
 
 if __name__ == "__main__":

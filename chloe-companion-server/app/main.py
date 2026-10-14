@@ -838,9 +838,13 @@ def _get_action_re():
     if _ACTION_REQUEST_RE is None:
         import re
         # Matches "show me your X", "suck my X", "let me see your X", etc.
+        # Gerund forms included (2026-10-14, in step with
+        # live_give._ACTION_ASK_RE): "taking off your bra" mid-
+        # sentence is how the ask actually arrives.
         _ACTION_REQUEST_RE = re.compile(
-            r"\b(show me|let me see|wanna see|want to see|suck|lick|touch|"
-            r"show|strip|take off|remove)\b.{0,40}\b"
+            r"\b(show me|let me see|wanna see|want to see|sucking|suck|"
+            r"licking|lick|touching|touch|showing|show|stripping|strip|"
+            r"taking off|take off|removing|remove)\b.{0,40}\b"
             r"(tits|titties|boobs|breasts|pussy|ass|dick|cock|nipples|body|"
             r"thighs|panties|bra)\b",
             re.IGNORECASE,
@@ -993,38 +997,64 @@ def chat(body: ChatIn, request: Request):
         context = brain.build_brain_context(conn, user_id, user,
                                             effective_message, character)
 
-        # Assistant capabilities ("her hands"): web search, reminders, email
-        # drafts, job lookup. Tier-gated, owner-only until rollout. Never
-        # raises — fail open. Credential rule: user logins never touch us;
-        # they live on the user's device (see js/assist.js).
-        if attachment_records:
-            assist_hit = assist.maybe_assist(
-                conn, user, effective_message, cid,
-                attachments=attachment_records)
-        else:
-            assist_hit = assist.maybe_assist(
-                conn, user, effective_message, cid)
-        if assist_hit and assist_hit.get("brief"):
-            context["assist_result"] = assist_hit["brief"]
+        # Live give creation — FIRST CLAIM on an explicit ask
+        # (2026-10-14 routing fix): for the four private girls, an
+        # owner's plain "make me a video of you ..." ask is evaluated
+        # by the live-give hook BEFORE the assistant lane runs. The
+        # assistant's Sogni lane matches the same phrasing, claimed
+        # the turn first, and the hook yielded on assist_claimed —
+        # the ask was eaten silently and no render was ever started.
+        # When the hook takes the turn (starts a render, or serves
+        # the holdover preset), maybe_assist is skipped for it. When
+        # the detector does not match, the turn flows exactly as
+        # before: maybe_assist first, then the hook for initiative.
+        assist_hit = None
+        lg_hit = None
+        lg_evaluated = False
+        if cid in live_give.LIVE_GIVE_GIRLS and is_owner \
+                and live_give.detect_live_give_ask(effective_message):
+            lg_evaluated = True
+            try:
+                lg_hit = live_give.maybe_start_live_give(
+                    conn, user_id, cid, effective_message,
+                    assist_claimed=False)
+            except Exception:
+                lg_hit = None
+        if lg_hit is None:
+            # Assistant capabilities ("her hands"): web search, reminders,
+            # email drafts, job lookup. Tier-gated, owner-only until
+            # rollout. Never raises — fail open. Credential rule: user
+            # logins never touch us; they live on the user's device
+            # (see js/assist.js).
+            if attachment_records:
+                assist_hit = assist.maybe_assist(
+                    conn, user, effective_message, cid,
+                    attachments=attachment_records)
+            else:
+                assist_hit = assist.maybe_assist(
+                    conn, user, effective_message, cid)
+            if assist_hit and assist_hit.get("brief"):
+                context["assist_result"] = assist_hit["brief"]
 
-        # Live give creation (2026-10-14): for the four private girls,
-        # an owner ask for something NEW — or her own initiative on an
-        # explicit-heat moment — starts a fresh give render in the
-        # background. Her reply never waits on it; the finished scene
-        # lands in this chat when it's ready. Yields whenever the
-        # assistant lane already claimed the turn. Never raises.
-        try:
-            lg_hit = live_give.maybe_start_live_give(
-                conn, user_id, cid, effective_message,
-                assist_claimed=bool(
-                    context.get("assist_result")
-                    or (assist_hit and (assist_hit.get("sogni_media_kind")
-                                        or assist_hit.get("image_url")))))
-            if lg_hit and lg_hit.get("brief") \
-                    and not context.get("assist_result"):
-                context["assist_result"] = lg_hit["brief"]
-        except Exception:
-            pass
+            # Live give creation: her own initiative on an
+            # explicit-heat moment (explicit asks were given first
+            # claim above; an already-evaluated hook is not run
+            # twice). Yields whenever the assistant lane claimed the
+            # turn. Never raises.
+            if not lg_evaluated:
+                try:
+                    lg_hit = live_give.maybe_start_live_give(
+                        conn, user_id, cid, effective_message,
+                        assist_claimed=bool(
+                            context.get("assist_result")
+                            or (assist_hit and (
+                                assist_hit.get("sogni_media_kind")
+                                or assist_hit.get("image_url")))))
+                except Exception:
+                    lg_hit = None
+        if lg_hit and lg_hit.get("brief") \
+                and not context.get("assist_result"):
+            context["assist_result"] = lg_hit["brief"]
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
         reply_text = brain.compose_reply(effective_message, context, cid)
@@ -2637,7 +2667,7 @@ def assist_sogni_login(body: AssistSogniLoginIn, request: Request):
     conn = _conn()
     try:
         session = assist.perform_sogni_login(
-            conn, user_id, (username, password))
+            conn, user_id, (username, password), caller="login_box")
         if session is None:
             # Same fixed words as the chat intake failure, in-thread.
             store.log_turn(conn, user_id, character,

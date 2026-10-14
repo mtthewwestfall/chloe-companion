@@ -1,10 +1,13 @@
 import sqlite3
+import threading
+import time
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import assist, config, db, give_gen
+from app import assist, characters, config, db, give_gen
 from app import main as api
 
 
@@ -268,6 +271,155 @@ class GiveGenAdminApiTest(unittest.TestCase):
              mock.patch("os.close"), mock.patch("os.unlink"), \
              mock.patch("subprocess.run", return_value=bad):
             self.assertIsNone(give_gen._topless_reference_frame(self.conn, "eli"))
+
+
+class ProcessorPriorityTest(unittest.TestCase):
+    """Live-render priority (2026-10-14): between jobs the single
+    processor pauses while a live chat render holds assist's
+    live-render signal — the queue is background work and must not
+    compete with, or sign in ahead of, a live request."""
+
+    def setUp(self):
+        self.conn = _db()
+        give_gen._PENDING_GIVE_IDS.clear()
+        with give_gen._PROCESSOR_GUARD:
+            give_gen._GIVE_PROCESSOR_ACTIVE = False
+        while assist.live_render_active():
+            assist.note_live_render_end()
+        self._nc = mock.MagicMock(wraps=self.conn)
+        self._nc.close = mock.MagicMock()
+
+    def tearDown(self):
+        while assist.live_render_active():
+            assist.note_live_render_end()
+        give_gen._PENDING_GIVE_IDS.clear()
+        self.conn.close()
+
+    def test_processor_pauses_between_jobs_for_live_render(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "mara", 1, "p", "2026-10-14", status="pending")
+        ran: list[int] = []
+        with mock.patch("app.give_gen.db.connect",
+                        return_value=self._nc), \
+                mock.patch.object(
+                    give_gen, "_run_give_generation_job",
+                    side_effect=lambda gid: ran.append(gid) or None), \
+                mock.patch.object(give_gen, "_LIVE_PAUSE_POLL_S", 0.01):
+            assist.note_live_render_start()
+            t = threading.Thread(
+                target=give_gen._process_queued_give_generations,
+                args=([gen_id],))
+            t.start()
+            try:
+                time.sleep(0.25)
+                self.assertEqual(ran, [])
+            finally:
+                assist.note_live_render_end()
+            t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(ran, [gen_id])
+
+    def test_no_pause_when_no_live_render(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "mara", 1, "p", "2026-10-14", status="pending")
+        ran: list[int] = []
+        with mock.patch("app.give_gen.db.connect",
+                        return_value=self._nc), \
+                mock.patch.object(
+                    give_gen, "_run_give_generation_job",
+                    side_effect=lambda gid: ran.append(gid) or None):
+            give_gen._process_queued_give_generations([gen_id])
+        self.assertEqual(ran, [gen_id])
+
+
+class TriggerSweepKickTest(unittest.TestCase):
+    """Bare-trigger sweep kick (2026-10-14): generate-daily used to
+    spawn the processor only when it queued >= 1 new row, so a
+    parked queue (every row already pending) never drained on a
+    trigger — only on a boot."""
+
+    def setUp(self):
+        self.conn = _db()
+        self._nc = mock.MagicMock(wraps=self.conn)
+        self._nc.close = mock.MagicMock()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _trigger(self, spawns, **kwargs):
+        with mock.patch("app.give_gen.db.connect",
+                        return_value=self._nc), \
+                mock.patch("app.give_gen.characters.get_characters",
+                           return_value=[{"id": "mara",
+                                          "name": "Mara"}]), \
+                mock.patch.object(
+                    give_gen, "_spawn_processor",
+                    side_effect=lambda ids, name:
+                        spawns.append((list(ids), name))):
+            return give_gen.trigger_daily_give_generations(**kwargs)
+
+    def test_bare_trigger_kicks_sweep_for_parked_rows(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for stage in range(1, 10):
+            give_gen.create_give_generation(
+                self.conn, "mara", stage, "p", today, status="pending")
+        spawns: list = []
+        queued = self._trigger(spawns)
+        self.assertEqual(queued, [])
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(spawns[0][0], [])
+
+    def test_trigger_with_only_rendered_rows_spawns_nothing(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for stage in range(1, 10):
+            gen_id = give_gen.create_give_generation(
+                self.conn, "mara", stage, "p", today, status="pending")
+            give_gen.update_give_generation_status(
+                self.conn, gen_id, "pending", url="/generated/x.mp4")
+        spawns: list = []
+        queued = self._trigger(spawns)
+        self.assertEqual(queued, [])
+        self.assertEqual(spawns, [])
+
+
+class BlankErrorTest(unittest.TestCase):
+    """Non-blank failure records (2026-10-14): a render outcome
+    whose detail is whitespace must not be recorded as a two-space
+    error — the row records the real, status-bearing error text."""
+
+    def setUp(self):
+        self.conn = _db()
+        self._nc = mock.MagicMock(wraps=self.conn)
+        self._nc.close = mock.MagicMock()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_whitespace_detail_records_a_real_error(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "mara", 1, "p", "2026-10-14", status="pending")
+        blank = ({"status": "failed", "project_id": None,
+                  "path": None, "detail": "  "}, None)
+        with mock.patch("app.give_gen.db.connect",
+                        return_value=self._nc), \
+                mock.patch.object(
+                    assist, "stored_sogni_session",
+                    return_value={"token": "t", "refreshToken": "r"}), \
+                mock.patch.object(
+                    characters, "get_character",
+                    return_value={"id": "mara", "name": "Mara",
+                                  "avatar_url": "http://x/a.jpg"}), \
+                mock.patch.object(characters, "owner_of",
+                                  return_value=None), \
+                mock.patch.object(assist, "_fetch_first_frame",
+                                  return_value="/tmp/ref.jpg"), \
+                mock.patch.object(assist, "_sogni_plan_run",
+                                  return_value=blank):
+            give_gen._run_give_generation_job(gen_id)
+        row = give_gen.get_give_generation(self.conn, gen_id)
+        self.assertEqual(row["status"], "failed")
+        self.assertTrue(row["error"].strip())
+        self.assertIn("render failed (status=failed", row["error"])
 
 
 if __name__ == "__main__":
