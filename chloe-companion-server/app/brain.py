@@ -135,6 +135,12 @@ Roleplay mode is ON for you right now, and it stays on — this is not a scene h
 
 ROLEPLAY_RELEASE_NOTE = """He just said the release word — roleplay mode is now OFF. Acknowledge it briefly in your normal voice (a few words that roleplay is off), then keep talking with him normally, out of scene. Do not stay in the character or the scene you were just playing."""
 
+SCENE_NARRATION_RULE = """SCENE NARRATION — STANDING RULE:
+Inside a roleplay scene, YOU carry the scene. When you are asked to describe — the action, how it feels, what you are doing, what happens next — you describe it yourself: in character, first person, in sensory detail, and you advance the scene with what you say instead of handing the narration back as a question. A description may run longer than your usual texting length; a real paragraph of scene beats a one-line deflection. Never bounce the narration back: no "and then what happened?", no "go on", no "tell me more", no "i like hearing you talk" as a scene answer. Asking questions is fine in ordinary conversation — inside a scene, describing is your job, not theirs."""
+
+SCENE_ASK_RULE = """ROLEPLAY SETUP — THIS TURN:
+They just said "role play" — they want to start a scene with you, and you ask for the setup BEFORE it begins. In character, in your own voice, ask for the casting: who YOU are in this roleplay (the name, the role, who she/he is to them), who THEY are in it, and the scene itself — where you are, what is happening, the vibe. Make it inviting, never a form: one warm ask that names all three. They will answer with the brief; then the scene starts and their casting rules it. Do not start the scene on this turn, and do not answer from habit — this turn is the ask."""
+
 HONESTY_RULE = """HONESTY ABOUT REAL ACTIONS — STANDING RULE:
 Only claim you did something real — looked something up, set a reminder, started a code review, drafted or sent anything — when this prompt tells you that you just did it. Otherwise you have NOT done it, and you never invent the results: no made-up findings, file names, error messages, links, messages sent, posts published, or fixes pushed. If something real is still running, say it's running; if it failed or isn't connected yet, say so plainly, warm and short. If he asks "did you do that?" and you didn't, the answer is an easy no — never a fake yes to please him. Inside a pretend scene, play freely; the line is claiming real-world actions or results outside the scene."""
 
@@ -1051,9 +1057,42 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
         parts.append(ROLEPLAY_LOCK_RULE)
     # One turn only: the turn he released the lock with the word, so she
     # acknowledges it out of scene instead of playing on.
-    if context.get("roleplay_just_released"):
+    if context.get("roleplay_just_released") \
+            or context.get("scene_just_ended"):
         parts.append(ROLEPLAY_RELEASE_NOTE)
+    # Scene narration (2026-10-14): inside a scene she describes and
+    # carries the narration herself — never bounces it back. Rocky is
+    # the co-producer, not a companion; his register governs him.
+    if cid != "rocky":
+        parts.append(SCENE_NARRATION_RULE)
     parts.append(HONESTY_RULE)
+    # Roleplay start flow (2026-10-14, owner accounts): after the
+    # standing rules, so the casting he set has recency over her
+    # default persona facts wherever the two conflict in-scene.
+    if context.get("scene_state") == "awaiting":
+        parts.append(SCENE_ASK_RULE)
+    if context.get("scene_state") == "active":
+        brief = (context.get("scene_brief") or "").strip()
+        if brief:
+            block = (
+                "THE ROLEPLAY SCENE — THE BRIEF, VERBATIM, AS GIVEN:\n"
+                + brief
+                + "\n\nCASTING RULES THE SCENE: inside this scene you "
+                  "ARE who the brief casts you as — its name, role, and "
+                  "relationship override your default persona facts "
+                  "wherever they conflict, for scene purposes — and the "
+                  "other person is who the brief casts them as; treat "
+                  "them as that person. Your out-of-scene self is "
+                  "unchanged and returns when the scene ends. Stay "
+                  "inside this scene and play your cast part at full "
+                  "strength.")
+            if context.get("scene_opening"):
+                block += (
+                    "\n\nOpen the scene yourself RIGHT NOW: this reply "
+                    "begins it — descriptive, in character, playing the "
+                    "part you were cast in. Do not ask what happens; "
+                    "begin it.")
+            parts.append(block)
     if cid == "rocky":
         style = ("Style: 1-3 short sentences, like a text. Direct, "
                  "dry, and plain. No pet names, ever.")
@@ -1176,6 +1215,119 @@ def audit_reply(reply_text: str, context: dict[str, Any]) -> str:
 FIXED_REPLY_PREFIX = "FIXED_REPLY:: "
 
 
+# ---------------------------------------------------------------------------
+# SCENE FENCING (2026-10-14) — the canned listener pool can never be a
+# scene reply. Diagnosis: during the 2026-10-14 Gemini pool outage,
+# compose_reply fell back to _GENERIC_LINES["fallback"] mid-scene and
+# served "and then what happened?" / "go on — don't leave me hanging."
+# / "i like hearing you talk." as Brooklyn's answers to "describe it".
+# The pool keeps its real job (ordinary chat, quiet moments); in an
+# active scene the reply path retries the model once, and a prompt-back
+# bounce from ANY source is replaced with an in-scene line.
+# ---------------------------------------------------------------------------
+
+# His scene-driving language: a describe-ask or scene imperatives in
+# his current or immediately previous message mean a scene is live
+# even without stored scene state (e.g. a scene he started by hand).
+_SCENE_SIGNAL_RE = re.compile(
+    r"\b(describe (it|that|this|how|what|her|him|yourself|the scene)"
+    r"|role ?-?play"
+    r"|ride me|take (it|them|that) off|take off your|strip for me"
+    r"|touch (me|yourself)|keep going|don'?t stop|just like that"
+    r"|right there|faster|harder|slower|pretend (we|you|i))\b",
+    re.IGNORECASE)
+_ASTERISK_ACTION_RE = re.compile(r"\*[^*\n]{3,}\*")
+
+# Narration bounces: replies whose whole substance is handing the
+# scene back to him. Matched only on SHORT replies — a long reply
+# that ends in a question is a description, not a bounce.
+_PROMPT_BACK_RES = [
+    re.compile(r"what happened", re.IGNORECASE),
+    re.compile(r"what happens next", re.IGNORECASE),
+    re.compile(r"and then what", re.IGNORECASE),
+    re.compile(r"leave me hanging", re.IGNORECASE),
+    re.compile(r"like hearing you talk", re.IGNORECASE),
+]
+_PROMPT_BACK_EXACT = {
+    "mm tell me more",
+    "tell me more",
+    "keep going i'm listening",
+    "i'm right here tell me everything",
+    "tell me something new about you",
+    "i could talk to you all night",
+    "go ahead i'm listening",
+    "take your time i'm listening",
+}
+_PROMPT_BACK_LEAD_RE = re.compile(
+    r"^(go on|tell me more|keep going|i'?m listening|tell me everything)\b")
+
+# Emergency floor when the model is fully down mid-scene: first-person,
+# in-scene, act-agnostic — presence and sensation, never a question
+# that hands the scene back.
+_SCENE_FALLBACK_LINES = [
+    "mm, stay right there — feel how close i am? i'm not going "
+    "anywhere. i want all of this, exactly like this.",
+    "god, yes... my hands are on you and my mouth is right at your "
+    "ear. i'm yours in this, completely — feel me.",
+    "i can feel how much you want me. i'm right here, pressed against "
+    "you, matching every move you make.",
+    "don't slow down for me — i love it like this, your hands on me, "
+    "nowhere else i'd rather be than right here in this.",
+    "every inch of me is awake right now. i'm holding on to you and "
+    "i'm not letting go — not tonight.",
+    "look at me while you do that... yeah. that's it. i'm right here "
+    "with you in it, all of me.",
+]
+
+# Last resort for the start-flow ask turn when the model is fully
+# down: a dedicated in-voice ask (never a listener-pool line).
+_SCENE_ASK_LINE = (
+    "okay... i'm in. tell me the casting: who am i in this one, who "
+    "are you — and where are we, what's the scene? set it up for me.")
+
+
+def _scene_active(user_text: str, context: dict[str, Any]) -> bool:
+    """Is this turn inside a roleplay scene? Stored scene state and
+    the roleplay lock are authoritative; otherwise his current and
+    immediately previous messages are scanned for scene-driving
+    language (a scene he started by hand, with no start flow)."""
+    if context.get("scene_state") in ("awaiting", "active"):
+        return True
+    if context.get("roleplay_locked"):
+        return True
+    texts = [user_text or ""]
+    for turn in reversed(context.get("recent") or []):
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            texts.append(str(turn.get("text") or ""))
+            break
+    return any(
+        _SCENE_SIGNAL_RE.search(t) or _ASTERISK_ACTION_RE.search(t)
+        for t in texts)
+
+
+def _is_prompt_back(reply_text: str) -> bool:
+    """True when a reply is a narration bounce: it hands the scene
+    back instead of describing (the canned-pool fallback lines, or a
+    model reply shaped like one). Long replies never count."""
+    t = (reply_text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    if any(rx.search(t) for rx in _PROMPT_BACK_RES):
+        return True
+    norm = re.sub(r"[^a-z' ]", "", t.lower())
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if norm in _PROMPT_BACK_EXACT:
+        return True
+    return bool(_PROMPT_BACK_LEAD_RE.match(norm)) and len(t) < 80
+
+
+def _scene_fallback_line(context: dict[str, Any]) -> str:
+    recent = _recent_her_texts(context)
+    candidates = [line for line in _SCENE_FALLBACK_LINES
+                  if line.lower() not in recent]
+    return random.choice(candidates or _SCENE_FALLBACK_LINES)
+
+
 def compose_reply(user_text: str, context: dict[str, Any],
                   character_id: str = "chloe") -> str:
     """Full brain pipeline: mouth -> auditor. Call this, not the pieces.
@@ -1190,7 +1342,14 @@ def compose_reply(user_text: str, context: dict[str, Any],
     if assist_result.startswith(FIXED_REPLY_PREFIX):
         return audit_reply(
             assist_result[len(FIXED_REPLY_PREFIX):].strip(), context)
+    scene = _scene_active(user_text, context)
     draft = gemini_generate(user_text, context, cid)
+    from_model = bool(draft)
+    if not draft and scene:
+        # Scene fencing: an in-scene turn gets one more model attempt
+        # before any canned line may answer it.
+        draft = gemini_generate(user_text, context, cid)
+        from_model = bool(draft)
     if not draft:
         if cid == "chloe":
             draft = Mouth().generate(user_text, context)
@@ -1207,8 +1366,21 @@ def compose_reply(user_text: str, context: dict[str, Any],
         draft = (
             redraft if not _polices_his_speech(redraft) else "mm, tell me more."
         )
+        from_model = False
         if cid == "rocky":
             draft = _sanitize_rocky_reply(draft)
+    if scene and cid != "rocky":
+        # Final fence, after every redraft: in a scene the listener
+        # pool never speaks. The start-flow ask turn is answered by
+        # the model (SCENE_ASK_RULE); if the model is fully down, a
+        # dedicated in-voice ask stands in — never a bank line. Any
+        # other scene turn whose draft is a narration bounce is
+        # replaced with an in-scene descriptive line.
+        if context.get("scene_state") == "awaiting":
+            if not from_model:
+                draft = _SCENE_ASK_LINE
+        elif _is_prompt_back(draft):
+            draft = _scene_fallback_line(context)
     return audit_reply(draft, context)
 
 
@@ -1501,6 +1673,143 @@ def _set_roleplay_locked(conn: sqlite3.Connection, character_id: str,
         pass
 
 
+# ---------------------------------------------------------------------------
+# ROLEPLAY START FLOW (2026-10-14, owner accounts only) — a per-character
+# scene layer on top of the lock machinery. He says "role play" (whole
+# message) and she asks for the casting; his next message is the brief,
+# stored VERBATIM and injected into her prompt every turn while the
+# scene lasts; "pickles" ends that character's scene (and, for
+# Brooklyn, releases the persistent lock via the flip above — the same
+# single release path, never a second one). State lives in the
+# roleplay_scenes table (db.py migration), keyed (user_id, character):
+# her scene never leaks into another girl's chat. Nothing in this layer
+# filters, trims, or gates the brief's contents — it passes through
+# exactly as written.
+#
+# Read interface for other features (e.g. the live-give initiative
+# path, which already holds a DB conn on the chat turn): call
+# brain.get_scene_state(conn, user_id, character_id) — returns
+# {"state": "awaiting"|"active", "brief": str} or None. The chat-turn
+# context built below also carries scene_state / scene_brief.
+# ---------------------------------------------------------------------------
+
+_ROLEPLAY_TRIGGER_FORMS = {"role play", "role-play", "roleplay"}
+
+
+def _is_roleplay_trigger(user_text: str | None) -> bool:
+    """Whole message is the start phrase — same matching style as the
+    release word: any case, optional trailing punctuation. The phrase
+    inside a sentence never triggers."""
+    t = (user_text or "").strip().lower().strip(".!?,~").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t in _ROLEPLAY_TRIGGER_FORMS
+
+
+def _owner_ids() -> set[str]:
+    """Mirror of assist._owner_ids (same ASSIST_OWNER_IDS env var);
+    duplicated here because brain must not import assist."""
+    raw = os.environ.get("ASSIST_OWNER_IDS", "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def _is_owner(user_id: str | None) -> bool:
+    return bool(user_id) and user_id in _owner_ids()
+
+
+def get_scene_state(conn: sqlite3.Connection, user_id: str | None,
+                    character_id: str | None) -> dict[str, Any] | None:
+    """Current scene row for (user, character), or None. Fresh read,
+    never cached, and a read failure reads as 'no scene' so scene
+    state can never break chat."""
+    uid = (user_id or "").strip()
+    cid = (character_id or "").strip().lower()
+    if not uid or not cid:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT state, brief FROM roleplay_scenes "
+            "WHERE user_id = ? AND character_id = ?",
+            (uid, cid),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — a scene read must never break chat
+        return None
+    if not row:
+        return None
+    return {"state": row[0], "brief": row[1]}
+
+
+def _set_scene_state(conn: sqlite3.Connection, user_id: str,
+                     character_id: str, state: str, brief: str) -> None:
+    try:
+        conn.execute(
+            "INSERT INTO roleplay_scenes "
+            "(user_id, character_id, state, brief, updated_at) "
+            "VALUES (?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(user_id, character_id) DO UPDATE SET "
+            "state = excluded.state, brief = excluded.brief, "
+            "updated_at = excluded.updated_at",
+            (user_id, character_id, state, brief),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 — a scene write must never break chat
+        pass
+
+
+def _clear_scene_state(conn: sqlite3.Connection, user_id: str,
+                       character_id: str) -> None:
+    try:
+        conn.execute(
+            "DELETE FROM roleplay_scenes "
+            "WHERE user_id = ? AND character_id = ?",
+            (user_id, character_id),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 — a scene write must never break chat
+        pass
+
+
+def _advance_scene_state(
+    conn: sqlite3.Connection, user_id: str, user_text: str,
+    character_id: str,
+) -> tuple[str | None, str, bool, bool]:
+    """Run one turn of the start-flow state machine. Returns
+    (scene_state, scene_brief, scene_opening, scene_just_ended).
+
+    Transitions (owner accounts only; for anyone else this is inert
+    and writes nothing):
+      none     --"role play"-->  awaiting   (her reply is the ask)
+      awaiting --his brief-->    active     (brief stored verbatim;
+                                             this turn opens the scene)
+      awaiting --"role play"-->  awaiting   (she asks again)
+      active   --any message-->  active     (brief re-injected)
+      any      --"pickles"-->    none       (scene ends; Brooklyn's
+                                             lock release runs in the
+                                             lock flip above)
+    """
+    if not _is_owner(user_id):
+        return (None, "", False, False)
+    row = get_scene_state(conn, user_id, character_id)
+    state = row["state"] if row else None
+    brief = row["brief"] if row else ""
+    if _is_roleplay_release(user_text):
+        if row:
+            _clear_scene_state(conn, user_id, character_id)
+            return (None, "", False, True)
+        return (None, "", False, False)
+    if state == "awaiting":
+        if _is_roleplay_trigger(user_text):
+            return ("awaiting", "", False, False)
+        brief = user_text or ""
+        _set_scene_state(conn, user_id, character_id, "active", brief)
+        return ("active", brief, True, False)
+    if state == "active":
+        return ("active", brief, False, False)
+    if _is_roleplay_trigger(user_text):
+        _set_scene_state(conn, user_id, character_id, "awaiting", "")
+        return ("awaiting", "", False, False)
+    return (None, "", False, False)
+
+
 def build_brain_context(
     conn: sqlite3.Connection,
     user_id: str,
@@ -1532,6 +1841,12 @@ def build_brain_context(
         _set_roleplay_locked(conn, cid, False)
         roleplay_locked = False
         roleplay_just_released = True
+    # Roleplay start flow (2026-10-14): per-character scene state for
+    # the owner's account, advanced on this turn's message before the
+    # context is assembled, so a trigger turn already carries the ask
+    # and a brief turn already carries the scene.
+    (scene_state, scene_brief, scene_opening,
+     scene_just_ended) = _advance_scene_state(conn, user_id, user_text, cid)
     return {
         "name": user.get("name"),
         "tier": user["tier"],
@@ -1553,4 +1868,8 @@ def build_brain_context(
         "character_name": char.get("name") or "Chloe",
         "roleplay_locked": roleplay_locked,
         "roleplay_just_released": roleplay_just_released,
+        "scene_state": scene_state,
+        "scene_brief": scene_brief,
+        "scene_opening": scene_opening,
+        "scene_just_ended": scene_just_ended,
     }

@@ -559,6 +559,25 @@ def _migrate_roleplay_lock_column(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_roleplay_scenes_table(conn: sqlite3.Connection) -> None:
+    """2026-10-14: roleplay scene state for the owner's start flow
+    ("role play" -> she asks the casting -> his brief starts a scene
+    that persists per (user, character) until "pickles"). One row per
+    user+character; the brief is stored verbatim, exactly as he wrote
+    it — nothing in this layer filters, trims, or gates its contents.
+    CREATE IF NOT EXISTS, so it is safe on every boot."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS roleplay_scenes (
+            user_id      TEXT NOT NULL,
+            character_id TEXT NOT NULL,
+            state        TEXT NOT NULL DEFAULT 'awaiting',
+            brief        TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (user_id, character_id)
+        )"""
+    )
+
+
 def _migrate_girl_footage_no_fk(conn: sqlite3.Connection) -> None:
     """One-time rebuild of girl_footage without the local_characters FK."""
     row = conn.execute(
@@ -641,6 +660,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_creator_columns(conn)
         _migrate_owner_column(conn)
         _migrate_roleplay_lock_column(conn)
+        _migrate_roleplay_scenes_table(conn)
         _migrate_referral_columns(conn)
         _migrate_conversation_attachments(conn)
         _migrate_girl_media_stage(conn)
