@@ -1,7 +1,7 @@
 """AI line generator for the owner's Sims game (2026-10-13).
 
 POST /api/sims/think — the browser game (served from its own service at
-https://godstown.lockeddoor.ai) sends one sim's situation; this returns ONE
+https://godstank.lockeddoor.ai) sends one sim's situation; this returns ONE
 short in-character line (dialogue or thought) produced through the app's
 existing Gemini key manager (app/gemini_keys.py — free keys first, same
 path brain.py uses, fast lite model). The prompt is deliberately tiny and
@@ -43,7 +43,7 @@ from . import gemini_keys
 
 _GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
                "gemini-3.1-flash-lite:generateContent")
-_GAME_ORIGIN = "https://godstown.lockeddoor.ai"
+_GAME_ORIGIN = "https://godstank.lockeddoor.ai"
 _PATH = "/api/sims/think"
 _MAX_BODY = 4096
 _RATE_LIMIT = 60

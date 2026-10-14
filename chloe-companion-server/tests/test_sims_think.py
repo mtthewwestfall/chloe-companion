@@ -1,6 +1,6 @@
 """Sims game think endpoint: POST /api/sims/think (2026-10-13).
 
-The browser game (godstown.lockeddoor.ai) sends a sim's situation and
+The browser game (godstank.lockeddoor.ai) sends a sim's situation and
 gets ONE short in-character line back, generated through the shared
 Gemini key manager. The endpoint is token-gated (X-Sims-Token vs env
 SIMS_THINK_TOKEN), origin-restricted when an Origin/Referer is present,
@@ -26,7 +26,7 @@ from app import gemini_keys, sims  # noqa: E402
 from app import main as api  # noqa: E402
 
 TOKEN = "test-token-123"
-GAME_ORIGIN = "https://godstown.lockeddoor.ai"
+GAME_ORIGIN = "https://godstank.lockeddoor.ai"
 
 
 def _gemini_ok(text: str) -> dict:
@@ -127,7 +127,7 @@ class SimsThinkTest(unittest.TestCase):
                                return_value=_gemini_ok("Hi.")):
             r = self._post(headers={
                 "X-Sims-Token": TOKEN,
-                "Origin": "https://godstown.lockeddoor.ai.evil.com"})
+                "Origin": "https://godstank.lockeddoor.ai.evil.com"})
         self.assertEqual(r.status_code, 403)
 
     # -- CORS preflight ----------------------------------------------------
