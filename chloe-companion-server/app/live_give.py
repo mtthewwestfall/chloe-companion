@@ -409,9 +409,20 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
     """Background worker: render, then land the media in her chat.
     Opens its own connection (connections are not shared across
     threads). Any failure falls back to her library; with no preset
-    either, nothing is surfaced — the conversation just continues."""
-    conn = db.connect()
+    either, nothing is surfaced — the conversation just continues.
+
+    Exit-path contract (the hook strands the in-flight flag on this
+    worker, so EVERY way out of here must honour it): the registry
+    entry is cleared in the finally on every path — including
+    db.connect() itself failing, which is why the connect sits
+    INSIDE the try — and when the render path dies by exception
+    before delivering anything, the finally makes the one preset-
+    fallback attempt the design promises, exactly once."""
+    conn = None
+    delivered = False
+    preset_attempted = False
     try:
+        conn = db.connect()
         girl = characters.get_character(girl_id, user_id=user_id)
         scene = _build_scene(conn, user_id, girl_id, stage, trigger_text)
         outcome = _render_fresh(conn, girl, kind, scene, stage)
@@ -431,23 +442,48 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
             }]
             store.log_turn(conn, user_id, girl_id, _delivery_line(kind),
                            girl_id, attachments)
+            delivered = True
             print(f"[live_give] {girl_id} {kind} delivered for "
                   f"{user_id}", flush=True)
-            return
-        preset = _pick_preset(conn, user_id, girl_id, kind)
-        if preset:
-            _deliver_preset(conn, user_id, girl_id, preset,
-                            during_render=False)
-            print(f"[live_give] {girl_id} render missed; preset "
-                  f"fallback delivered for {user_id}", flush=True)
+        else:
+            preset_attempted = True
+            preset = _pick_preset(conn, user_id, girl_id, kind)
+            if preset:
+                _deliver_preset(conn, user_id, girl_id, preset,
+                                during_render=False)
+                delivered = True
+                print(f"[live_give] {girl_id} render missed; preset "
+                      f"fallback delivered for {user_id}", flush=True)
     except Exception as e:  # noqa: BLE001 — a worker must never break chat
         print(f"[live_give] job failed for {girl_id}: {e}", flush=True)
     finally:
+        if not delivered and not preset_attempted:
+            # The render path died by exception before the fallback
+            # could run: she still gets her library preset, once.
+            # (A preset already ATTEMPTED by the main path is never
+            # retried here — exactly one fallback attempt per job.)
+            try:
+                fconn = conn if conn is not None else db.connect()
+                try:
+                    preset = _pick_preset(fconn, user_id, girl_id, kind)
+                    if preset:
+                        _deliver_preset(fconn, user_id, girl_id, preset,
+                                        during_render=False)
+                        print(f"[live_give] {girl_id} job failed; "
+                              f"preset fallback delivered for "
+                              f"{user_id}", flush=True)
+                finally:
+                    if fconn is not conn:
+                        fconn.close()
+            except Exception as e:  # noqa: BLE001
+                print(f"[live_give] preset fallback failed for "
+                      f"{girl_id}: {e}", flush=True)
         with _STATE_LOCK:
             st = _STATE.get((user_id, girl_id))
             if st is not None:
                 st["in_flight"] = False
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _spawn_live_give(user_id: str, girl_id: str, kind: str, stage: int,
@@ -532,7 +568,18 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
                     "initiative": det["initiative"],
                     "fallback_preset": True}
         stage = _next_stage(conn, user_id, gid)
-        _spawn_live_give(user_id, gid, det["kind"], stage, text)
+        try:
+            _spawn_live_give(user_id, gid, det["kind"], stage, text)
+        except Exception:
+            # The flag above is cleared only by the worker; if the
+            # worker never starts there is no worker — clear it here
+            # or every later turn reports a render that does not
+            # exist ("still processing" forever).
+            with _STATE_LOCK:
+                st = _STATE.get(key)
+                if st is not None:
+                    st["in_flight"] = False
+            raise
         noun = "picture" if det["kind"] == "image" else "video"
         brief = (_BRIEF_INITIATIVE if det["initiative"]
                  else _BRIEF_EXPLICIT.format(noun=noun))

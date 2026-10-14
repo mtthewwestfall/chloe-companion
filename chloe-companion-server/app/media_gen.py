@@ -97,14 +97,71 @@ def _download(url: str, dest: str, timeout: int = 300) -> None:
     raise RuntimeError(f"download failed: {last}")
 
 
+def _local_media_file(url: str) -> str | None:
+    """On-disk file for an app-relative media URL this process serves
+    (/generated/... lives in config.GENERATED_DIR, /media/... in the
+    PWA media dir — the same mapping main uses to serve them), or None
+    when the URL is not one of ours or the file is not on this disk.
+
+    The returned path is the SERVED library file itself: callers must
+    copy it, never mutate or delete it."""
+    if not url or not url.startswith("/"):
+        return None
+    rel = url.split("?", 1)[0]
+    if rel.startswith("/generated/"):
+        base = config.GENERATED_DIR
+        name = rel[len("/generated/"):]
+    elif rel.startswith("/media/"):
+        base = os.path.join(os.path.dirname(config.DATA_DIR),
+                            "chloe-companion-app", "media")
+        name = rel[len("/media/"):]
+    else:
+        return None
+    if not name:
+        return None
+    base = os.path.abspath(base)
+    path = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([base, path]) != base:
+        return None  # escapes the served dir — not ours to hand out
+    return path if os.path.isfile(path) else None
+
+
 def _fetch_reference(avatar_url: str) -> str | None:
     """Download the girl's avatar as the face-lock reference frame."""
     if not avatar_url:
         return None
+    url = avatar_url
+    if url.startswith("/"):
+        # App-relative media URL (her girl_media rows carry these —
+        # e.g. owner uploads at /generated/<file>): urllib cannot open
+        # a scheme-less URL at all ("unknown url type"), so resolve it
+        # here instead of handing the raw path to _download. The file
+        # is one this process serves: prefer the on-disk file, COPIED
+        # to a temp file (callers delete the path we return — the
+        # library original must survive), and fall back to fetching
+        # it from the app's public base when it is not on this disk.
+        local = _local_media_file(url)
+        if local:
+            try:
+                fd, path = tempfile.mkstemp(suffix=".ref")
+                with os.fdopen(fd, "wb") as out, \
+                        open(local, "rb") as src:
+                    while True:
+                        chunk = src.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                if os.path.getsize(path) > 1024:
+                    return path
+                os.unlink(path)  # stub-sized: fall through to download
+            except OSError as e:  # noqa: BLE001
+                print(f"[media_gen] local reference copy failed: {e}",
+                      flush=True)
+        url = config.PUBLIC_APP_URL + url
     try:
         fd, path = tempfile.mkstemp(suffix=".ref")
         os.close(fd)
-        _download(avatar_url, path, timeout=60)
+        _download(url, path, timeout=60)
         return path
     except Exception as e:  # noqa: BLE001
         print(f"[media_gen] reference download failed: {e}", flush=True)

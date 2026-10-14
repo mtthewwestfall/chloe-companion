@@ -458,6 +458,156 @@ class SceneTest(unittest.TestCase):
         self.assertEqual(scene, give_gen.stage_description_for("mia", 3))
 
 
+class WorkerHardeningTest(unittest.TestCase):
+    """Exit-path contract (2026-10-14 fix): whatever dies inside the
+    worker — the render seam raising, db.connect failing — the
+    (user, girl) in-flight entry is ALWAYS cleared and, when nothing
+    was delivered, the preset fallback is attempted exactly once.
+    Before the fix an exception skipped the fallback entirely, and a
+    connect failure stranded in_flight=True forever (every later
+    turn: "still processing")."""
+
+    def setUp(self):
+        self._env = os.environ.get("ASSIST_OWNER_IDS")
+        os.environ["ASSIST_OWNER_IDS"] = OWNER_ID
+        live_give._reset_state_for_tests()
+        self.conn = _db()
+        self._nc = _NoClose(self.conn)
+        fd, self.ref_path = tempfile.mkstemp(suffix=".jpg")
+        os.write(fd, b"fake-ref")
+        os.close(fd)
+        self.patches = [
+            mock.patch.object(config, "DATA_DIR",
+                              tempfile.mkdtemp(prefix="live-give-data-")),
+            mock.patch.object(db, "connect", return_value=self._nc),
+            mock.patch.object(
+                characters, "get_character",
+                side_effect=lambda cid, user_id=None: {
+                    "id": cid, "name": cid.title(),
+                    "avatar_url": "http://x/avatar.jpg"}),
+            mock.patch.object(assist, "stored_sogni_session",
+                              return_value=dict(TOKENS)),
+            mock.patch.object(assist, "_fetch_first_frame",
+                              return_value=self.ref_path),
+            mock.patch.object(give_gen, "_hardwired_login",
+                              return_value=None),
+            mock.patch.object(give_gen, "_hardwired_sogni_session",
+                              return_value=None),
+            mock.patch.object(give_gen, "_topless_reference_frame",
+                              return_value=None),
+        ]
+        for p in self.patches:
+            p.start()
+        live_give._STATE[(OWNER_ID, "brooklyn")] = {
+            "in_flight": True, "last_start": 0.0, "last_initiative": 0.0,
+            "preset_sent_in_flight": False}
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.conn.close()
+        try:
+            os.unlink(self.ref_path)
+        except OSError:
+            pass
+        if self._env is None:
+            os.environ.pop("ASSIST_OWNER_IDS", None)
+        else:
+            os.environ["ASSIST_OWNER_IDS"] = self._env
+
+    def _turns(self):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT role, text, attachments FROM conversation "
+            "WHERE user_id = ? AND character_id = 'brooklyn'",
+            (OWNER_ID,)).fetchall()]
+
+    def _seed_preset(self):
+        self.conn.execute(
+            "INSERT INTO girl_media (girl_id, kind, url, preset, stage) "
+            "VALUES ('brooklyn', 'give', '/media/brooklyn-s2.mp4', "
+            "'give', 2)")
+        self.conn.commit()
+
+    def _in_flight(self):
+        return live_give._STATE[(OWNER_ID, "brooklyn")]["in_flight"]
+
+    def test_seam_crash_delivers_preset_and_clears_registry(self):
+        self._seed_preset()
+        with mock.patch.object(assist, "_sogni_plan_run",
+                               side_effect=RuntimeError("seam exploded")):
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        turns = self._turns()
+        self.assertEqual(len(turns), 1)
+        atts = json.loads(turns[0]["attachments"])
+        self.assertEqual(atts[0]["url"], "/media/brooklyn-s2.mp4")
+        self.assertFalse(self._in_flight())
+
+    def test_seam_crash_without_library_still_clears_registry(self):
+        with mock.patch.object(assist, "_sogni_plan_run",
+                               side_effect=RuntimeError("seam exploded")):
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        self.assertEqual(self._turns(), [])
+        self.assertFalse(self._in_flight())
+
+    def test_db_connect_failure_falls_back_and_clears_registry(self):
+        self._seed_preset()
+        # First connect (the worker's own) dies; the fallback's
+        # connect succeeds against the same in-memory db.
+        with mock.patch.object(
+                db, "connect",
+                side_effect=[RuntimeError("db down"), self._nc]):
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        turns = self._turns()
+        self.assertEqual(len(turns), 1)
+        atts = json.loads(turns[0]["attachments"])
+        self.assertEqual(atts[0]["url"], "/media/brooklyn-s2.mp4")
+        self.assertFalse(self._in_flight())
+
+    def test_preset_attempted_exactly_once_when_delivery_raises(self):
+        self._seed_preset()
+        failed = ({"status": "failed", "project_id": None,
+                   "path": None, "detail": "boom"}, None)
+        with mock.patch.object(assist, "_sogni_plan_run",
+                               return_value=failed), \
+                mock.patch.object(
+                    live_give, "_deliver_preset",
+                    side_effect=RuntimeError("log write died")) as deliver:
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        self.assertEqual(deliver.call_count, 1)
+        self.assertFalse(self._in_flight())
+
+
+class HookSpawnFailureTest(unittest.TestCase):
+    def setUp(self):
+        self._env = os.environ.get("ASSIST_OWNER_IDS")
+        os.environ["ASSIST_OWNER_IDS"] = OWNER_ID
+        live_give._reset_state_for_tests()
+        self.conn = _db()
+
+    def tearDown(self):
+        self.conn.close()
+        if self._env is None:
+            os.environ.pop("ASSIST_OWNER_IDS", None)
+        else:
+            os.environ["ASSIST_OWNER_IDS"] = self._env
+
+    def test_spawn_failure_clears_in_flight(self):
+        # The flag is set in the hook and cleared only by the worker;
+        # a worker that never starts must not strand it.
+        with mock.patch.object(live_give, "_spawn_live_give",
+                               side_effect=RuntimeError("no threads")):
+            hit = live_give.maybe_start_live_give(
+                self.conn, OWNER_ID, "brooklyn", "make me one",
+                now=1000.0)
+        self.assertIsNone(hit)
+        st = live_give._STATE[(OWNER_ID, "brooklyn")]
+        self.assertFalse(st["in_flight"])
+
+
 class MainHookupTest(unittest.TestCase):
     def test_main_imports_and_wires_live_give(self):
         from app import main as api
