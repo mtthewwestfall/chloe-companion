@@ -5065,10 +5065,13 @@ def sogni_login_cooldown_remaining(conn: sqlite3.Connection) -> int:
 
 
 def _set_sogni_login_cooldown(conn: sqlite3.Connection,
-                              transient: bool) -> None:
+                              transient: bool,
+                              seconds: int | None = None) -> None:
     ensure_tables(conn)
     value = json.dumps({
-        "until": time.time() + _SOGNI_LOGIN_COOLDOWN_SECONDS,
+        "until": time.time() + (
+            _SOGNI_LOGIN_COOLDOWN_SECONDS if seconds is None
+            else int(seconds)),
         "transient": bool(transient),
     })
     conn.execute(
@@ -5622,6 +5625,170 @@ def _classify_sogni_failure(text: str) -> str:
     return "failed"
 
 
+def _sogni_error_payload(exc: BaseException | None) -> dict | None:
+    """The structured error dict an SDK exception carries, when it
+    carries one: ProjectError.error is the server's {code, message}
+    dict verbatim (wait_for_completion raises it from the socket
+    failure event); ApiError.payload is the REST error body. The
+    render paths used to discard the wait exception outright, which
+    is how a refusal with a plain-English reason became "no detail
+    from Sogni" (2026-10-14)."""
+    if exc is None:
+        return None
+    err = getattr(exc, "error", None)
+    if isinstance(err, dict) and err:
+        return err
+    payload = getattr(exc, "payload", None)
+    if isinstance(payload, dict) and payload:
+        return payload
+    return None
+
+
+def _sogni_payload_code(payload: dict):
+    for key in ("code", "errorCode", "error_code"):
+        if payload.get(key) is not None:
+            return payload.get(key)
+    return None
+
+
+def _format_sogni_error_payload(payload: dict) -> str:
+    """A structured Sogni error dict as "<code>: <message>" — the
+    server's own words, code first so logs and recorded errors can
+    be matched against Sogni's error table."""
+    code = _sogni_payload_code(payload)
+    message = str(payload.get("message") or payload.get("reason")
+                  or "").strip()
+    if code is not None and message:
+        return f"{code}: {message}"
+    if message:
+        return message
+    if code is not None:
+        return f"Sogni error {code}"
+    return ""
+
+
+# Sogni reconnection throttle (diagnosed 2026-10-14): when the
+# account reconnects too often, Sogni's socket server drops the
+# connection with {"code": 4056, "reason": "Connection temporarily
+# blocked due to excessive reconnections. Please try again in 36
+# minutes"}. The SDK masks that kill as a payload-free
+# RequestSessionError ("The account changed"), so renders classified
+# it session_dead — and the recovery (re-login + reconnect) kept
+# feeding the very throttle it was trying to cure. A throttle is a
+# COOLDOWN, never a session death: the render outcome is
+# "throttled", no sign-in is attempted, and callers park for the
+# duration Sogni stated.
+_SOGNI_THROTTLE_CODE = 4056
+_SOGNI_THROTTLE_DEFAULT_SECONDS = 1800
+
+
+def _sogni_throttle_seconds(code: object, text: str) -> int | None:
+    """The wait Sogni imposed, in seconds, when (code, text) names a
+    reconnection throttle — socket code 4056, or the throttle's own
+    wording ("excessive reconnections" / "temporarily blocked").
+    The duration parses out of the message ("...in 36 minutes");
+    an unparseable duration defaults to 1800s. None when the pair
+    is not a throttle signal."""
+    is_throttle = False
+    if code is not None:
+        try:
+            is_throttle = int(code) == _SOGNI_THROTTLE_CODE
+        except (TypeError, ValueError):
+            is_throttle = False
+    low = (text or "").lower()
+    if not is_throttle:
+        is_throttle = "excessive reconnections" in low \
+            or "temporarily blocked" in low
+    if not is_throttle:
+        return None
+    m = re.search(r"in\s+(\d+)\s*(hours?|hrs?|minutes?|mins?|"
+                  r"seconds?|secs?)", low)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("h"):
+            return n * 3600
+        if unit.startswith("s"):
+            return n
+        return n * 60
+    return _SOGNI_THROTTLE_DEFAULT_SECONDS
+
+
+def _sogni_throttle_signal(payload: dict | None = None,
+                           disconnect: dict | None = None,
+                           text: str = "") -> tuple[str, int] | None:
+    """(detail, seconds) when any captured layer names a
+    reconnection throttle: the wait exception's structured error
+    payload first, then the socket's disconnect payload, then the
+    failure text itself. The detail is Sogni's own words, formatted
+    "<code>: <message>"."""
+    for source in (payload, disconnect):
+        if isinstance(source, dict) and source:
+            words = str(source.get("message")
+                        or source.get("reason") or "")
+            seconds = _sogni_throttle_seconds(
+                _sogni_payload_code(source), words)
+            if seconds is not None:
+                return (_format_sogni_error_payload(source)
+                        or words.strip()), seconds
+    seconds = _sogni_throttle_seconds(None, text)
+    if seconds is not None:
+        detail = (text or "").strip() \
+            or f"{_SOGNI_THROTTLE_CODE}: Sogni reconnection throttle"
+        return detail, seconds
+    return None
+
+
+def _tap_sogni_disconnect(client) -> dict:
+    """Capture a plan client's terminal socket disconnect payload
+    ({"code", "reason"}) as it happens. The SDK masks a throttled
+    socket as a payload-free RequestSessionError; the API client's
+    "disconnected" event is the layer that keeps Sogni's words —
+    including the 4056 throttle and how long it lasts. The returned
+    dict is mutated in place; read it on the failure paths."""
+    captured: dict = {}
+
+    def _on_disconnected(data):
+        if isinstance(data, dict):
+            captured.clear()
+            captured.update(data)
+
+    try:
+        client.api_client.on("disconnected", _on_disconnected)
+    except Exception:  # noqa: BLE001 — a tap must never break a render
+        pass
+    return captured
+
+
+def _mark_throttled(outcome: dict, detail: str, seconds: int) -> dict:
+    outcome["status"] = "throttled"
+    outcome["detail"] = detail[:200]
+    outcome["throttle_seconds"] = int(seconds)
+    return outcome
+
+
+def _sogni_failure_blob(info: dict) -> str:
+    """Every failure word a stored project record carries, as one
+    classification/detail blob: the top-level status/reason/error
+    (an error dict contributes its formatted message), plus the
+    PER-JOB reasons — a failed job's reason (e.g. "genfailure")
+    lives on its worker-job records, not the project's top level,
+    and reading only the top level is what produced the blank
+    production errors."""
+    parts = [str(info.get("status") or ""),
+             str(info.get("reason") or "")]
+    error = info.get("error")
+    if isinstance(error, dict):
+        parts.append(_format_sogni_error_payload(error))
+    elif error:
+        parts.append(str(error))
+    for key in ("completedWorkerJobs", "workerJobs"):
+        for wj in (info.get(key) or []):
+            if isinstance(wj, dict) and wj.get("reason"):
+                parts.append(str(wj["reason"]))
+    return " ".join(p for p in parts if p)
+
+
 def _sogni_error_detail(status: str, detail: object = "",
                         exc: BaseException | None = None) -> str:
     """The error text a failed render records — NEVER blank.
@@ -5638,6 +5805,11 @@ def _sogni_error_detail(status: str, detail: object = "",
     if text:
         return text[:200]
     if exc is not None:
+        payload = _sogni_error_payload(exc)
+        if payload:
+            formatted = _format_sogni_error_payload(payload)
+            if formatted:
+                return formatted[:200]
         msg = str(exc).strip()
         if msg:
             return f"{type(exc).__name__}: {msg}"[:200]
@@ -5744,9 +5916,10 @@ async def _sogni_plan_render(session: dict, prompt: str,
 
     Returns (outcome, fresh_session): outcome is
     {"status", "project_id", "path", "detail"} with status one of
-    done / blocked / plan_rejected / session_dead / failed; the
-    fresh session (the SDK rotates the pair) must be persisted by
-    the caller. Every failure is classified, never retried on
+    done / blocked / plan_rejected / session_dead / throttled /
+    failed (a throttled outcome also carries "throttle_seconds");
+    the fresh session (the SDK rotates the pair) must be persisted
+    by the caller. Every failure is classified, never retried on
     another billing mode.
     
     When session has api_key=True, uses the dashboard API key via
@@ -5763,15 +5936,23 @@ async def _sogni_plan_render(session: dict, prompt: str,
                      "path": None, "detail": ""}
     fresh: dict | None = None
     client = None
+    disconnect: dict = {}
     try:
         client = await _create_plan_client(session)
+        disconnect = _tap_sogni_disconnect(client)
         project = await client.projects.create(
             _sogni_plan_params(prompt, ref_path, model, kind, duration=duration))
         outcome["project_id"] = project.id
         urls: list = []
+        wait_exc: BaseException | None = None
         try:
             urls = await project.wait_for_completion(timeout=900) or []
-        except Exception:  # noqa: BLE001 — classify from project state
+        except Exception as e:  # noqa: BLE001 — the exception IS the
+            # detail: ProjectError carries the server's {code,
+            # message} verbatim. Keep it for the failure path below
+            # instead of discarding it and re-reading a record that
+            # may not exist yet.
+            wait_exc = e
             urls = []
         if not urls:
             info: dict = {}
@@ -5790,12 +5971,25 @@ async def _sogni_plan_render(session: dict, prompt: str,
                 except Exception:  # noqa: BLE001
                     pass
             if not urls:
-                blob = " ".join(
-                    str(info.get(k) or "")
-                    for k in ("status", "reason", "error"))
+                blob = _sogni_failure_blob(info)
+                # A throttle outranks every other classification:
+                # it is a cooldown, not a session death — check the
+                # wait exception's payload, the stored record's own
+                # error dict, the socket's disconnect payload, and
+                # the failure text, in that order.
+                throttle = _sogni_throttle_signal(
+                    payload=_sogni_error_payload(wait_exc),
+                    disconnect=disconnect) \
+                    or _sogni_throttle_signal(
+                        payload=info.get("error")
+                        if isinstance(info.get("error"), dict)
+                        else None) \
+                    or _sogni_throttle_signal(text=blob)
+                if throttle:
+                    return _mark_throttled(outcome, *throttle), fresh
                 outcome["status"] = _classify_sogni_failure(blob)
                 outcome["detail"] = _sogni_error_detail(
-                    outcome["status"], blob)
+                    outcome["status"], blob, wait_exc)
                 return outcome, fresh
         os.makedirs(config.GENERATED_DIR, exist_ok=True)
         if kind == "image":
@@ -5816,6 +6010,15 @@ async def _sogni_plan_render(session: dict, prompt: str,
             outcome["status"] = _classify_sogni_failure(str(e))
             outcome["detail"] = _sogni_error_detail(
                 outcome["status"], str(e), e)
+            # A socket-level kill reaches here as a payload-free
+            # "account changed" (RequestSessionError): the
+            # disconnect tap is the only place Sogni's words
+            # survived, and a throttle there outranks the
+            # session_dead it masquerades as.
+            throttle = _sogni_throttle_signal(
+                payload=_sogni_error_payload(e), disconnect=disconnect)
+            if throttle:
+                _mark_throttled(outcome, *throttle)
     finally:
         if client is not None:
             try:
@@ -5889,8 +6092,10 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
                      "path": None, "detail": ""}
     fresh: dict | None = None
     client = None
+    disconnect: dict = {}
     try:
         client = await await_sogni_client(session)
+        disconnect = _tap_sogni_disconnect(client)
         # Poll project status until complete/failed or timeout (15 min).
         info: dict = {}
         for _ in range(90):
@@ -5915,8 +6120,19 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
             except Exception:
                 pass
         if not urls:
-            blob = " ".join(str(info.get(k) or "")
-                            for k in ("status", "reason", "error"))
+            blob = _sogni_failure_blob(info)
+            # Same capture discipline as _sogni_plan_render: the
+            # record's own error dict, the per-job reasons (in the
+            # blob), and the socket's disconnect payload all carry
+            # the server's words — and a reconnection throttle
+            # outranks the session_dead it masquerades as.
+            throttle = _sogni_throttle_signal(
+                payload=info.get("error")
+                if isinstance(info.get("error"), dict) else None,
+                disconnect=disconnect) \
+                or _sogni_throttle_signal(text=blob)
+            if throttle:
+                return _mark_throttled(outcome, *throttle), fresh
             outcome["status"] = _classify_sogni_failure(blob)
             outcome["detail"] = _sogni_error_detail(
                 outcome["status"], blob)
@@ -5940,6 +6156,10 @@ async def _sogni_plan_wait_project(session: dict, project_id: str,
             outcome["status"] = _classify_sogni_failure(str(e))
             outcome["detail"] = _sogni_error_detail(
                 outcome["status"], str(e), e)
+            throttle = _sogni_throttle_signal(
+                payload=_sogni_error_payload(e), disconnect=disconnect)
+            if throttle:
+                _mark_throttled(outcome, *throttle)
     finally:
         if client is not None:
             try:
@@ -6016,6 +6236,20 @@ def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
             outcome, fresh = loop.run_until_complete(make_coro(session))
             if fresh:
                 store_sogni_session(conn, fresh)
+            if outcome.get("status") == "throttled":
+                # A reconnection throttle is a cooldown, NOT a
+                # session death: no heal, no re-login, no reconnect
+                # (reconnecting is the behaviour being punished).
+                # Set the shared login cooldown for the duration
+                # Sogni stated so every other path respects the
+                # same wait, and let the outcome surface as-is —
+                # callers park (queue) or fall back (live chat).
+                seconds = outcome.get("throttle_seconds") \
+                    or _SOGNI_THROTTLE_DEFAULT_SECONDS
+                _set_sogni_login_cooldown(conn, True, seconds=seconds)
+                print("[assist] Sogni reconnection throttle: "
+                      f"renders parked ~{seconds}s, no sign-in "
+                      "attempted", flush=True)
             if outcome.get("status") == "session_dead" \
                     and not session.get("api_key"):
                 outcome, fresh = _heal_session_dead_render(

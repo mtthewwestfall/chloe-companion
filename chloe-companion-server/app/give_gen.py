@@ -307,7 +307,9 @@ def _hardwired_sogni_session(conn, girl_id: str,
     return session
 
 
-def _park_give_generation(conn, gen_id: int) -> str:
+def _park_give_generation(conn, gen_id: int,
+                          error: str = "waiting: session unavailable",
+                          reason: str = "session unavailable") -> str:
     """Leave a job pending for a later drain instead of failing it:
     the Sogni session is temporarily unavailable (dead session
     unhealed, login missing, login cooldown) — a later trigger, the
@@ -317,8 +319,8 @@ def _park_give_generation(conn, gen_id: int) -> str:
     its (girl, stage, day) and no duplicate is ever queued. Returns
     the "parked" signal the single processor stands down on."""
     update_give_generation_status(
-        conn, gen_id, "pending", error="waiting: session unavailable")
-    print(f"[give_gen] gen #{gen_id} parked: session unavailable",
+        conn, gen_id, "pending", error=error)
+    print(f"[give_gen] gen #{gen_id} parked: {reason}",
           flush=True)
     return "parked"
 
@@ -327,7 +329,8 @@ def _run_give_generation_job(gen_id: int) -> str | None:
     """Worker thread: render 15s Sogni video using the saved Sogni login session.
 
     Returns "parked" when the session path ended unavailable
-    (session_dead unhealed, login missing, login cooldown): the row
+    (session_dead unhealed, login missing, login cooldown, or a
+    Sogni reconnection throttle): the row
     was left pending, not failed, and the caller — the single
     processor — stands down for this drain. Returns None otherwise
     (rendered, or genuinely failed: blocked / plan_rejected / other
@@ -403,6 +406,21 @@ def _run_give_generation_job(gen_id: int) -> str | None:
             # failing here is what burned a whole queue in seconds
             # whenever the session died (2026-10-14).
             return _park_give_generation(conn, gen_id)
+
+        if outcome.get("status") == "throttled":
+            # Sogni throttled the account's reconnections (socket
+            # 4056): not the job's fault and NOT a dead session —
+            # nobody signs in or reconnects over it (assist's seam
+            # already set the shared login cooldown for the stated
+            # wait). Park exactly like a session park — the single
+            # processor stands down on "parked" — with the wait in
+            # the row's error so the queue says why it is waiting.
+            seconds = outcome.get("throttle_seconds") \
+                or assist._SOGNI_THROTTLE_DEFAULT_SECONDS
+            minutes = max(1, round(seconds / 60))
+            note = f"Sogni throttled (retry after ~{minutes} min)"
+            return _park_give_generation(
+                conn, gen_id, error=f"waiting: {note}", reason=note)
 
         if outcome.get("status") != "done" or not outcome.get("path"):
             # Never a blank error: production rows carried a

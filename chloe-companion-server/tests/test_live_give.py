@@ -481,6 +481,27 @@ class WorkerTest(unittest.TestCase):
         atts = json.loads(self._turns()[0]["attachments"])
         self.assertEqual(atts[0]["url"], "/media/brooklyn-s2.mp4")
 
+    def test_throttled_falls_back_to_preset_without_heal(self):
+        # A reconnection throttle is a cooldown, not a dead
+        # session: live_give must not resolve/re-login over it
+        # (reconnecting is the behaviour being punished) — the
+        # render miss falls back to her preset like any other.
+        self._seed_preset()
+        throttled = ({"status": "throttled", "project_id": None,
+                      "path": None,
+                      "detail": "4056: Connection temporarily blocked",
+                      "throttle_seconds": 2160}, None)
+        with mock.patch.object(assist, "_sogni_plan_run",
+                               return_value=throttled) as run, \
+                mock.patch.object(assist,
+                                  "resolve_dead_sogni_session") as resolve:
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        run.assert_called_once()
+        resolve.assert_not_called()
+        atts = json.loads(self._turns()[0]["attachments"])
+        self.assertEqual(atts[0]["url"], "/media/brooklyn-s2.mp4")
+
     def test_reference_is_her_own_avatar(self):
         with mock.patch.object(assist, "_sogni_plan_run",
                                return_value=self.done_video), \

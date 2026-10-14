@@ -68,6 +68,22 @@ and the deploy-overlap boot grace:
 - the boot grace (armed by main.py's boot path) makes the first
   processor drain wait out the rest of the window.
 
+Fifth fix (2026-10-14, later still): the reconnection throttle.
+Diagnosis found Sogni's socket server dropping the account with
+{"code": 4056, "reason": "Connection temporarily blocked due to
+excessive reconnections. Please try again in 36 minutes"} — and
+the SDK masking that kill as "The account changed", so renders
+classified it session_dead and the heal's re-login + reconnect
+kept re-arming the penalty. A throttle is a cooldown, never a
+session death. Coverage:
+- a throttled outcome passes the seam unhealed: zero sign-ins,
+  the shared login cooldown set for the duration Sogni stated
+  (~2160s, not the 600s login-failure default), the stored pair
+  untouched,
+- a throttled give job parks pending with the wait in its error
+  and the single processor stands down without attempting the
+  next job.
+
 Run:  python -m unittest tests.test_sogni_session_churn -v
 """
 from __future__ import annotations
@@ -984,6 +1000,126 @@ class GiveParkTest(GateBase):
             self.assertIsNone(assist.sogni_login_cooldown_state(conn))
         finally:
             conn.close()
+
+
+THROTTLE_DETAIL = ("4056: Connection temporarily blocked due to "
+                   "excessive reconnections. Please try again in "
+                   "36 minutes")
+
+
+def _throttled_render(calls):
+    """Fake assist._sogni_plan_render returning a throttle outcome
+    (as the real render now does when the wait exception or the
+    socket's disconnect payload carries Sogni's 4056 refusal)."""
+    async def render(session, prompt, ref_path, model=None,
+                     kind="video", duration=None):
+        calls.append(dict(session))
+        return ({"status": "throttled", "project_id": None,
+                 "path": None, "detail": THROTTLE_DETAIL,
+                 "throttle_seconds": 2160}, None)
+    return render
+
+
+class ThrottleReplayTest(GateBase):
+    """The throttle replay: Sogni refuses renders for ~36 minutes
+    after this morning's reconnect churn. The outcome must behave
+    as a cooldown at every layer — the seam does not heal it (zero
+    sign-ins), the shared login cooldown is set for the stated
+    duration, the give job parks instead of failing, and the
+    single processor stands down for the drain."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["SOGNI_LOGIN_USERNAME"] = "lockeddoor"
+        os.environ["SOGNI_LOGIN_PASSWORD"] = "pw"
+
+    def tearDown(self):
+        with give_gen._PROCESSOR_GUARD:
+            give_gen._PENDING_GIVE_IDS.clear()
+        super().tearDown()
+
+    def _forbidden_login(self):
+        logins = []
+
+        def fake_login(login):
+            logins.append(login)
+            raise AssertionError("a throttle must never sign in")
+        return logins, fake_login
+
+    def _cooldown_state(self):
+        conn = self._conn()
+        try:
+            return assist.sogni_login_cooldown_state(conn)
+        finally:
+            conn.close()
+
+    def test_throttled_render_cools_down_without_signin(self):
+        calls = []
+        logins, fake_login = self._forbidden_login()
+        with mock.patch.object(assist, "_sogni_plan_render",
+                               _throttled_render(calls)), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            outcome, _fresh = assist._sogni_plan_run(
+                dict(PAIR_A), "a prompt", None)
+        self.assertEqual(outcome["status"], "throttled")
+        self.assertNotIn("seam_healed", outcome)
+        self.assertEqual(len(calls), 1)  # no heal re-run either
+        self.assertEqual(logins, [])
+        state = self._cooldown_state()
+        self.assertIsNotNone(state)
+        self.assertTrue(state["transient"])
+        # ~the 36 minutes Sogni stated (2160s), not the 600s
+        # login-failure default.
+        self.assertGreater(state["remaining"], 2000)
+        self.assertLessEqual(state["remaining"], 2160)
+        conn = self._conn()
+        try:
+            self.assertEqual(assist.stored_sogni_session(conn), PAIR_A)
+        finally:
+            conn.close()
+
+    def test_throttled_give_job_parks_and_processor_stands_down(self):
+        first = self._make_give_row(stage=1)
+        second = self._make_give_row(stage=2)
+        calls = []
+        logins, fake_login = self._forbidden_login()
+        fd, ref = tempfile.mkstemp(suffix=".jpg")
+        os.close(fd)
+        try:
+            with mock.patch.object(assist, "_sogni_plan_render",
+                                   _throttled_render(calls)), \
+                 mock.patch.object(assist, "_sogni_plan_login",
+                                   fake_login), \
+                 mock.patch.object(characters, "get_character",
+                                   return_value={"name": "Mara",
+                                                 "avatar_url": "x"}), \
+                 mock.patch.object(characters, "owner_of",
+                                   return_value=None), \
+                 mock.patch.object(assist, "_fetch_first_frame",
+                                   return_value=ref):
+                give_gen._process_queued_give_generations(
+                    [first, second])
+        finally:
+            try:
+                os.unlink(ref)  # the job unlinks its ref; may be gone
+            except OSError:
+                pass
+        self.assertEqual(logins, [])
+        self.assertEqual(len(calls), 1)  # second job never attempted
+        conn = self._conn()
+        try:
+            row1 = give_gen.get_give_generation(conn, first)
+            row2 = give_gen.get_give_generation(conn, second)
+        finally:
+            conn.close()
+        self.assertEqual(row1["status"], "pending")
+        self.assertFalse(row1["url"])
+        self.assertEqual(
+            row1["error"],
+            "waiting: Sogni throttled (retry after ~36 min)")
+        self.assertEqual(row2["status"], "pending")
+        self.assertFalse(row2["error"])
+        self.assertFalse(give_gen._GIVE_PROCESSOR_ACTIVE)
 
 
 class BootGraceTest(unittest.TestCase):

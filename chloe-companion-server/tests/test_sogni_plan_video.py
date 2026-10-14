@@ -14,6 +14,7 @@ Run:  python -m unittest tests.test_sogni_plan_video -v
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import io
 import os
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -564,6 +566,194 @@ class ErrorDetailTest(unittest.TestCase):
             "failed", "", RuntimeError("socket died"))
         self.assertIn("RuntimeError", d)
         self.assertIn("socket died", d)
+
+    def test_exception_error_payload_formats_code_and_message(self):
+        # ProjectError shape: the server's {code, message} dict
+        # rides on .error while str() is the bare message. The
+        # recorded detail must carry BOTH — the code is what a log
+        # search keys on.
+        class _ProjectError(Exception):
+            def __init__(self, error):
+                self.error = error
+                super().__init__(str(error.get("message") or ""))
+
+        d = assist._sogni_error_detail(
+            "failed", "", _ProjectError(
+                {"code": 4056, "message": "temporarily blocked"}))
+        self.assertEqual(d, "4056: temporarily blocked")
+
+    def test_exception_rest_payload_formats_code_and_message(self):
+        # ApiError shape: the body rides on .payload, the code
+        # under errorCode.
+        class _ApiError(Exception):
+            def __init__(self, payload):
+                self.payload = payload
+                super().__init__(str(payload.get("message") or ""))
+
+        d = assist._sogni_error_detail(
+            "failed", "", _ApiError(
+                {"errorCode": 1234, "message": "nope"}))
+        self.assertEqual(d, "1234: nope")
+
+    def test_exception_without_payload_keeps_class_fallback(self):
+        # The pre-payload behavior, pinned: no structured dict
+        # anywhere -> "TypeName: message", exactly as before.
+        d = assist._sogni_error_detail(
+            "session_dead", "", RuntimeError("The account changed"))
+        self.assertEqual(d, "RuntimeError: The account changed")
+
+
+class _ProjectError(Exception):
+    """Duck-typed sogni_client.ProjectError: the server's error
+    dict rides on .error; str() is the server's message."""
+
+    def __init__(self, error):
+        self.error = error
+        self.code = error.get("code")
+        super().__init__(str(error.get("message") or "Project failed"))
+
+
+class _FakeProject:
+    def __init__(self, wait_exc=None, urls=()):
+        self.id = "proj-fake"
+        self._wait_exc = wait_exc
+        self._urls = list(urls)
+
+    async def wait_for_completion(self, timeout=None):
+        if self._wait_exc is not None:
+            raise self._wait_exc
+        return list(self._urls)
+
+
+class _FakeProjects:
+    def __init__(self, project=None, create_exc=None, record=None,
+                 on_create=None):
+        self._project = project
+        self._create_exc = create_exc
+        self._record = record or {}
+        self._on_create = on_create
+
+    async def create(self, params):
+        if self._on_create is not None:
+            self._on_create()
+        if self._create_exc is not None:
+            raise self._create_exc
+        return self._project
+
+    async def get(self, project_id):
+        return dict(self._record)
+
+    async def media_download_url(self, payload):
+        raise RuntimeError("no download in a failure test")
+
+
+class _FakeAuth:
+    async def backup(self):
+        return None
+
+
+class _FakeApiClient:
+    """EventEmitter stand-in: .on registers, .fire delivers."""
+
+    def __init__(self):
+        self.auth = _FakeAuth()
+        self._listeners = {}
+
+    def on(self, event, listener):
+        self._listeners.setdefault(event, []).append(listener)
+
+    def fire(self, event, data):
+        for listener in self._listeners.get(event, []):
+            listener(data)
+
+
+class _FakeClient:
+    def __init__(self, projects):
+        self.projects = projects
+        self.api_client = _FakeApiClient()
+
+    async def aclose(self):
+        pass
+
+
+THROTTLE_MESSAGE = (
+    "Connection temporarily blocked due to excessive "
+    "reconnections. Please try again in 36 minutes")
+
+
+class RenderFailureCaptureTest(unittest.TestCase):
+    """Error capture at the render seam (2026-10-14): the wait
+    exception's structured payload and the socket's disconnect
+    payload are the layers that carry Sogni's own words; discarding
+    them is what turned refusals into "no detail from Sogni", and
+    misreading the throttle as session death is what kept the
+    recovery reconnecting into it."""
+
+    def _render(self, client):
+        async def fake_create_client(session):
+            return client
+
+        with mock.patch.object(assist, "_create_plan_client",
+                               fake_create_client):
+            return asyncio.run(assist._sogni_plan_render(
+                dict(TOKENS), "a prompt", None))
+
+    def test_wait_error_payload_becomes_the_detail(self):
+        project = _FakeProject(wait_exc=_ProjectError(
+            {"code": 4711, "message": "worker exploded"}))
+        client = _FakeClient(_FakeProjects(project=project))
+        outcome, _fresh = self._render(client)
+        self.assertEqual(outcome["status"], "failed")
+        self.assertEqual(outcome["detail"], "4711: worker exploded")
+
+    def test_wait_throttle_payload_classifies_throttled(self):
+        project = _FakeProject(wait_exc=_ProjectError(
+            {"code": 4056, "message": THROTTLE_MESSAGE}))
+        client = _FakeClient(_FakeProjects(project=project))
+        outcome, _fresh = self._render(client)
+        self.assertEqual(outcome["status"], "throttled")
+        self.assertEqual(outcome["throttle_seconds"], 2160)
+        self.assertEqual(outcome["detail"],
+                         "4056: " + THROTTLE_MESSAGE)
+
+    def test_create_throttle_disconnect_outranks_account_changed(self):
+        # The production shape: the socket connects, Sogni drops
+        # it with the 4056 payload, and projects.create surfaces
+        # only the SDK's payload-free "account changed". The
+        # disconnect tap is the layer that kept the server's words.
+        client = _FakeClient(_FakeProjects(
+            create_exc=Exception(
+                "The account changed. Submit this request again."),
+            on_create=lambda: client.api_client.fire(
+                "disconnected",
+                {"code": 4056, "reason": THROTTLE_MESSAGE})))
+        outcome, _fresh = self._render(client)
+        self.assertEqual(outcome["status"], "throttled")
+        self.assertEqual(outcome["throttle_seconds"], 2160)
+        self.assertEqual(outcome["detail"],
+                         "4056: " + THROTTLE_MESSAGE)
+
+    def test_create_account_changed_alone_stays_session_dead(self):
+        # Regression: a genuine account change (no throttle signal
+        # anywhere) still classifies session_dead, so the seam heal
+        # engages exactly as before.
+        client = _FakeClient(_FakeProjects(create_exc=Exception(
+            "The account changed. Submit this request again.")))
+        outcome, _fresh = self._render(client)
+        self.assertEqual(outcome["status"], "session_dead")
+
+    def test_per_job_reason_reaches_the_detail(self):
+        # wait returns nothing (no exception); the stored record's
+        # only failure word is the per-job reason.
+        project = _FakeProject(urls=())
+        record = {"status": "failed",
+                  "completedWorkerJobs": [
+                      {"imgID": "job-1", "reason": "genfailure"}]}
+        client = _FakeClient(_FakeProjects(project=project,
+                                            record=record))
+        outcome, _fresh = self._render(client)
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("genfailure", outcome["detail"])
 
 
 class VideoRequestLoggingTest(SogniPlanCase):

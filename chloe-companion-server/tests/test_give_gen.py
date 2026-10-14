@@ -422,5 +422,54 @@ class BlankErrorTest(unittest.TestCase):
         self.assertIn("render failed (status=failed", row["error"])
 
 
+class ThrottledParkTest(unittest.TestCase):
+    """Reconnection throttle (2026-10-14): a throttled render
+    outcome parks the row pending — never failed — with the stated
+    wait in the error, and the job returns the "parked" signal the
+    single processor stands down on."""
+
+    def setUp(self):
+        self.conn = _db()
+        self._nc = mock.MagicMock(wraps=self.conn)
+        self._nc.close = mock.MagicMock()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_throttled_outcome_parks_with_the_wait(self):
+        gen_id = give_gen.create_give_generation(
+            self.conn, "mara", 1, "p", "2026-10-14", status="pending")
+        throttled = ({"status": "throttled", "project_id": None,
+                      "path": None,
+                      "detail": "4056: Connection temporarily "
+                                "blocked due to excessive "
+                                "reconnections. Please try again "
+                                "in 36 minutes",
+                      "throttle_seconds": 2160}, None)
+        with mock.patch("app.give_gen.db.connect",
+                        return_value=self._nc), \
+                mock.patch.object(
+                    assist, "stored_sogni_session",
+                    return_value={"token": "t", "refreshToken": "r"}), \
+                mock.patch.object(
+                    characters, "get_character",
+                    return_value={"id": "mara", "name": "Mara",
+                                  "avatar_url": "http://x/a.jpg"}), \
+                mock.patch.object(characters, "owner_of",
+                                  return_value=None), \
+                mock.patch.object(assist, "_fetch_first_frame",
+                                  return_value="/tmp/ref.jpg"), \
+                mock.patch.object(assist, "_sogni_plan_run",
+                                  return_value=throttled):
+            result = give_gen._run_give_generation_job(gen_id)
+        self.assertEqual(result, "parked")
+        row = give_gen.get_give_generation(self.conn, gen_id)
+        self.assertEqual(row["status"], "pending")
+        self.assertFalse(row["url"])
+        self.assertEqual(
+            row["error"],
+            "waiting: Sogni throttled (retry after ~36 min)")
+
+
 if __name__ == "__main__":
     unittest.main()
