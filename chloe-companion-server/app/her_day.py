@@ -209,9 +209,10 @@ def _render_image_plan(session: dict, prompt: str,
 
     assist._locked_render serializes renders on the shared login
     (parallel renders on one refresh token end in "The account
-    changed"), re-reads the newest stored pair, and persists the
-    rotated pair afterwards. Returns assist's outcome dict
-    ({"status", "path", "detail", ...}).
+    changed"), re-reads the newest stored pair, persists the
+    rotated pair afterwards, and heals a session_dead outcome
+    once in-seam (resolve + re-run, marked "seam_healed"). Returns
+    assist's outcome dict ({"status", "path", "detail", ...}).
     """
     from . import assist
 
@@ -258,12 +259,16 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
         ref_path = _fetch_reference(avatar_url or "")
         outcome = _render_image_plan(
             session, _sfw_prompt(names, scene), ref_path)
-        if outcome.get("status") == "session_dead":
+        if outcome.get("status") == "session_dead" \
+                and not outcome.get("seam_healed"):
             # Non-destructive recovery, same as give_gen: re-read the
             # newest stored pair and retry once with it when another
             # feature already refreshed the shared login; assist
             # clears the pair (and tombstones the env seed) only when
             # it is confirmed dead and a re-login has also failed.
+            # Skipped when the seam already healed and re-ran this
+            # render (outcome["seam_healed"] — _render_image_plan goes
+            # through assist._locked_render, which owns the heal).
             recovered = None
             try:
                 from . import assist

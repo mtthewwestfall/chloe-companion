@@ -345,13 +345,17 @@ def _run_give_generation_job(gen_id: int) -> None:
         )
         if fresh_session:
             assist.store_sogni_session(conn, fresh_session)
-        if outcome.get("status") == "session_dead":
+        if outcome.get("status") == "session_dead" \
+                and not outcome.get("seam_healed"):
             # Non-destructive recovery (assist.resolve_dead_sogni_session):
             # when another feature already refreshed the shared login,
             # retry once with the newest stored pair; only when the
             # stored pair is the one that just died does a single-flight
             # hardwired sign-in happen, and the pair is cleared (env
-            # seed tombstoned) only after that sign-in fails.
+            # seed tombstoned) only after that sign-in fails. Skipped
+            # when the seam already healed and re-ran this render
+            # (outcome["seam_healed"]): a second recovery here would
+            # stack another sign-in on the same render.
             retry_session = assist.resolve_dead_sogni_session(
                 conn, session, login=_hardwired_login(gen["girl_id"]))
             if retry_session:

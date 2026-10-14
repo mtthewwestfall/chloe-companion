@@ -355,8 +355,10 @@ def _render_fresh(conn: Any, girl: dict[str, Any], kind: str,
                   scene: str, stage: int) -> dict | None:
     """One fresh render of her, or None when no plan session exists.
     Mirrors give_gen's job: stored pair first, her hardwired
-    single-flight sign-in when absent, resolve + one retry when the
-    pair dies mid-render. An api_key-typed stored session is not a
+    single-flight sign-in when absent. A pair that dies mid-render is
+    healed at the seam (assist._locked_render resolves + re-runs
+    once); the resolve + one retry below remains only for an outcome
+    the seam could not heal. An api_key-typed stored session is not a
     plan session (her_day's stance) and is never used here."""
     girl_id = girl["id"]
     session = assist.stored_sogni_session(conn)
@@ -382,7 +384,11 @@ def _render_fresh(conn: Any, girl: dict[str, Any], kind: str,
         outcome, fresh = _run_seam(session, kind, prompt, ref_path)
         if fresh:
             assist.store_sogni_session(conn, fresh)
-        if outcome.get("status") == "session_dead":
+        if outcome.get("status") == "session_dead" \
+                and not outcome.get("seam_healed"):
+            # The seam already resolved + re-ran once when it could
+            # (and marked the outcome); a second resolve+retry here
+            # would stack another sign-in on the same render.
             retry = assist.resolve_dead_sogni_session(
                 conn, session, login=give_gen._hardwired_login(girl_id))
             if retry:

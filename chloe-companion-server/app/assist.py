@@ -5776,7 +5776,15 @@ def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
     """One render at a time on the shared login, each starting from the
     newest stored pair and persisting the rotated pair before the next
     starts: parallel renders on one refresh token end in "The account
-    changed"."""
+    changed".
+
+    A render that still ends session_dead is healed HERE, once, before
+    the caller ever sees the failure: _heal_session_dead_render runs
+    the shared recovery (single-flight re-login) inside this gate and
+    re-runs the render on the recovered pair. The re-run's outcome
+    carries "seam_healed" so callers with their own resolve+retry
+    (give_gen, live_give, her_day) do not stack a second recovery —
+    and a second sign-in — on top of this one."""
     from . import db as _db
     with _SOGNI_RENDER_LOCK:
         conn = _db.connect()
@@ -5786,9 +5794,57 @@ def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
             outcome, fresh = loop.run_until_complete(make_coro(session))
             if fresh:
                 store_sogni_session(conn, fresh)
+            if outcome.get("status") == "session_dead" \
+                    and not session.get("api_key"):
+                outcome, fresh = _heal_session_dead_render(
+                    conn, loop, make_coro, session, fresh, outcome)
             return outcome, fresh
         finally:
             conn.close()
+
+
+def _heal_session_dead_render(conn, loop, make_coro, used_session,
+                              fresh, outcome) -> tuple[dict, dict | None]:
+    """Re-login once and re-run a render that ended session_dead.
+
+    The dead pair handed to resolve_dead_sogni_session is the pair
+    this render actually used INCLUDING its rotation: a render that
+    dies at the SDK's account check still returns the pair its client
+    rotated to while setting up (the caller persists that rotation
+    before calling here), and the rotation is exactly what defeated
+    the caller-side recovery. resolve's first step ("the stored pair
+    differs from the dead one, so another feature already refreshed
+    it") mistook every attempt's own rotation for a foreign refresh,
+    handed the rotated-but-dead pair straight back, and the job
+    burned its one retry and failed without a sign-in ever running —
+    the 2026-10-14 post-restart burst: eleven give jobs failed inside
+    four seconds. Here the rotation is known to be this render's own,
+    so it is passed as the dead pair: when the stored pair IS that
+    rotation, resolve falls through to the single-flight re-login;
+    when another feature genuinely refreshed the login in the
+    meantime, resolve returns that pair and no sign-in runs. The
+    re-login and the re-run both happen inside the render gate
+    (resolve's sign-in re-enters it via sogni_login_single_flight),
+    serialized with every other render and sign-in.
+
+    At most one heal per render call: when resolve produces no pair,
+    or the re-run also ends session_dead, the failure surfaces to the
+    caller exactly as it would have without the heal. Never called
+    for API-key sessions (a different auth mode entirely) or for any
+    non-session outcome. Returns the (possibly re-run) outcome and
+    the fresh pair to persist."""
+    dead = fresh or used_session
+    healed = resolve_dead_sogni_session(conn, dead)
+    if not healed:
+        return outcome, fresh
+    print("[assist] session_dead render healed at the seam; "
+          "re-running once", flush=True)
+    outcome2, fresh2 = loop.run_until_complete(make_coro(healed))
+    if fresh2:
+        store_sogni_session(conn, fresh2)
+    outcome2 = dict(outcome2)
+    outcome2["seam_healed"] = True
+    return outcome2, fresh2
 
 
 def _sogni_plan_run(session: dict, prompt: str, ref_path: str | None,

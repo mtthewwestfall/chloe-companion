@@ -412,6 +412,27 @@ class WorkerTest(unittest.TestCase):
         atts = json.loads(self._turns()[0]["attachments"])
         self.assertEqual(atts[0]["url"], "/media/brooklyn-s2.mp4")
 
+    def test_session_dead_healed_at_seam_skips_second_recovery(self):
+        # The seam already resolved + re-ran once and marked the
+        # outcome ("seam_healed"); live_give must not stack its own
+        # resolve + second render (and another sign-in) on top —
+        # the still-dead outcome falls back to her preset like any
+        # other render miss.
+        self._seed_preset()
+        healed_dead = ({"status": "session_dead", "project_id": None,
+                        "path": None, "detail": "account changed",
+                        "seam_healed": True}, None)
+        with mock.patch.object(assist, "_sogni_plan_run",
+                               return_value=healed_dead) as run, \
+                mock.patch.object(assist,
+                                  "resolve_dead_sogni_session") as resolve:
+            live_give._run_live_give_job(
+                OWNER_ID, "brooklyn", "video", 1, "make me one")
+        run.assert_called_once()
+        resolve.assert_not_called()
+        atts = json.loads(self._turns()[0]["attachments"])
+        self.assertEqual(atts[0]["url"], "/media/brooklyn-s2.mp4")
+
     def test_reference_is_her_own_avatar(self):
         with mock.patch.object(assist, "_sogni_plan_run",
                                return_value=self.done_video), \

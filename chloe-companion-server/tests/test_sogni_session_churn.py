@@ -31,6 +31,20 @@ give_gen's single processor:
 - the account check inside a give render runs under the same gate,
 - a sign-in never overlaps a render (sign-ins run inside the gate).
 
+Third fix (2026-10-14): heal at the seam. A render that ended
+session_dead STILL failed its job in production: the render's client
+rotated the pair while setting up, the rotated pair was persisted,
+and the caller-side resolve mistook that rotation for another
+feature's refresh — handing the rotated-but-dead pair back for the
+retry, which died the same way. Eleven give jobs failed inside four
+seconds after a deploy restart, no sign-in ever ran. Coverage for
+assist._heal_session_dead_render (inside assist._locked_render):
+- dead once (used pair AND its rotation) -> one re-login, re-run
+  inside the same seam call, job completes,
+- dead twice -> failure surfaces, exactly one re-login,
+- two concurrent dead renders -> exactly one sign-in total,
+- non-session failures and API-key sessions are never healed.
+
 Run:  python -m unittest tests.test_sogni_session_churn -v
 """
 from __future__ import annotations
@@ -491,6 +505,180 @@ class SingleProcessorTest(GateBase):
         threads = {t for _g, t in self.processed}
         self.assertEqual(len(threads), 1)  # one processor thread
         self.assertEqual(self.max_concurrent, 1)
+
+
+PAIR_A2 = {"token": "tok-a2", "refreshToken": "ref-a2"}  # PAIR_A rotated
+
+
+def _fp(pair):
+    return assist._session_fingerprint(pair)
+
+
+def _dead_render(dead_fps, rotated=None, delay=0.0):
+    """Fake assist._sogni_plan_render: session_dead for any session
+    whose fingerprint is in dead_fps — returning `rotated` as the
+    fresh pair, like the real render's finally-block backup of the
+    pair its client rotated to while setting up — done otherwise.
+    Records every session it rendered with."""
+    calls = []
+
+    async def render(session, prompt, ref_path, model=None, kind="video",
+                     duration=None):
+        calls.append(dict(session))
+        if delay:
+            await asyncio.sleep(delay)
+        if _fp(session) in dead_fps:
+            return ({"status": "session_dead", "project_id": None,
+                     "path": None,
+                     "detail": "The account changed. Submit this "
+                               "request again."},
+                    dict(rotated) if rotated else None)
+        return ({"status": "done", "project_id": "proj-1",
+                 "path": "/tmp/sogni-fake.mp4", "detail": ""}, None)
+    render.calls = calls
+    return render
+
+
+class SeamHealTest(GateBase):
+    """A session_dead outcome is healed inside _locked_render: one
+    single-flight re-login and one re-run, all under the gate,
+    before the caller sees the outcome."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["SOGNI_LOGIN_USERNAME"] = "lockeddoor"
+        os.environ["SOGNI_LOGIN_PASSWORD"] = "pw"
+
+    def _login_counter(self, result=PAIR_B):
+        logins = []
+
+        def fake_login(login):
+            logins.append(login)
+            return dict(result)
+        return logins, fake_login
+
+    def _stored(self):
+        conn = self._conn()
+        try:
+            return assist.stored_sogni_session(conn)
+        finally:
+            conn.close()
+
+    def test_dead_once_heals_and_reruns(self):
+        # The burst repro: the render dies at the account check but
+        # returns its own rotation (PAIR_A2), which _locked_render
+        # persists. Both the used pair and its rotation are dead.
+        # The seam must pass the ROTATION as the dead pair so resolve
+        # reaches the re-login (the caller-side recovery never did),
+        # then re-run on the fresh login pair.
+        render = _dead_render({_fp(PAIR_A), _fp(PAIR_A2)},
+                              rotated=PAIR_A2)
+        logins, fake_login = self._login_counter()
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            outcome, _fresh = assist._sogni_plan_run(
+                dict(PAIR_A), "a prompt", None)
+        self.assertEqual(outcome["status"], "done")
+        self.assertTrue(outcome.get("seam_healed"))
+        self.assertEqual(render.calls, [PAIR_A, PAIR_B])
+        self.assertEqual(logins, [LOGIN])
+        self.assertEqual(self._stored(), PAIR_B)
+
+    def test_dead_twice_surfaces_failure_after_one_login(self):
+        render = _dead_render({_fp(PAIR_A), _fp(PAIR_B)})
+        logins, fake_login = self._login_counter()
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            outcome, _fresh = assist._sogni_plan_run(
+                dict(PAIR_A), "a prompt", None)
+        self.assertEqual(outcome["status"], "session_dead")
+        self.assertTrue(outcome.get("seam_healed"))
+        self.assertEqual(len(render.calls), 2)
+        self.assertEqual(len(logins), 1)
+
+    def test_concurrent_dead_renders_share_one_login(self):
+        render = _dead_render({_fp(PAIR_A)}, delay=0.05)
+        logins, fake_login = self._login_counter()
+        results, errors = {}, []
+
+        def worker(n):
+            try:
+                results[n] = assist._sogni_plan_run(
+                    dict(PAIR_A), "a prompt", None)[0]
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            threads = [threading.Thread(target=worker, args=(n,))
+                       for n in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(errors, [])
+        for outcome in results.values():
+            self.assertEqual(outcome["status"], "done")
+        self.assertEqual(len(logins), 1)
+        # The first render heals + re-runs (2 renders); the second
+        # starts from the healed stored pair (1 render).
+        self.assertEqual(len(render.calls), 3)
+
+    def test_non_session_failure_is_not_healed(self):
+        calls = []
+
+        async def blocked_render(session, prompt, ref_path, model=None,
+                                 kind="video", duration=None):
+            calls.append(dict(session))
+            return ({"status": "blocked", "project_id": None,
+                     "path": None, "detail": "Sensitive content"}, None)
+
+        logins, fake_login = self._login_counter()
+        with mock.patch.object(assist, "_sogni_plan_render",
+                               blocked_render), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            outcome, _fresh = assist._sogni_plan_run(
+                dict(PAIR_A), "a prompt", None)
+        self.assertEqual(outcome["status"], "blocked")
+        self.assertNotIn("seam_healed", outcome)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(logins, [])
+
+    def test_api_key_session_is_not_healed(self):
+        session = {"token": "dash-key", "refreshToken": "dash-key",
+                   "api_key": True}
+        render = _dead_render({_fp(session)})
+        logins, fake_login = self._login_counter()
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            outcome, _fresh = assist._sogni_plan_run(
+                dict(session), "a prompt", None)
+        self.assertEqual(outcome["status"], "session_dead")
+        self.assertNotIn("seam_healed", outcome)
+        self.assertEqual(len(render.calls), 1)
+        self.assertEqual(logins, [])
+
+    def test_give_job_survives_dead_session_via_seam_heal(self):
+        # The production burst at job level: first render dead (with
+        # its rotation), the heal runs inside the ONE seam call, and
+        # the job completes — give_gen's own resolve+retry never runs
+        # (the outcome arrives marked seam_healed).
+        render = _dead_render({_fp(PAIR_A), _fp(PAIR_A2)},
+                              rotated=PAIR_A2)
+        logins, fake_login = self._login_counter()
+        gen_id = self._make_give_row()
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login", fake_login):
+            self._run_give_job(gen_id)
+        conn = self._conn()
+        try:
+            row = give_gen.get_give_generation(conn, gen_id)
+        finally:
+            conn.close()
+        self.assertEqual(row["status"], "pending")
+        self.assertTrue(row["url"])
+        self.assertEqual(render.calls, [PAIR_A, PAIR_B])
+        self.assertEqual(len(logins), 1)
 
 
 if __name__ == "__main__":
