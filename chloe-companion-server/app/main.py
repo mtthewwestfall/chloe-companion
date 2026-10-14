@@ -72,7 +72,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
@@ -1002,6 +1002,25 @@ def chat(body: ChatIn, request: Request):
                 conn, user, effective_message, cid)
         if assist_hit and assist_hit.get("brief"):
             context["assist_result"] = assist_hit["brief"]
+
+        # Live give creation (2026-10-14): for the four private girls,
+        # an owner ask for something NEW — or her own initiative on an
+        # explicit-heat moment — starts a fresh give render in the
+        # background. Her reply never waits on it; the finished scene
+        # lands in this chat when it's ready. Yields whenever the
+        # assistant lane already claimed the turn. Never raises.
+        try:
+            lg_hit = live_give.maybe_start_live_give(
+                conn, user_id, cid, effective_message,
+                assist_claimed=bool(
+                    context.get("assist_result")
+                    or (assist_hit and (assist_hit.get("sogni_media_kind")
+                                        or assist_hit.get("image_url")))))
+            if lg_hit and lg_hit.get("brief") \
+                    and not context.get("assist_result"):
+                context["assist_result"] = lg_hit["brief"]
+        except Exception:
+            pass
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
         reply_text = brain.compose_reply(effective_message, context, cid)
