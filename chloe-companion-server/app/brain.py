@@ -1259,7 +1259,7 @@ _PROMPT_BACK_EXACT = {
     "take your time i'm listening",
 }
 _PROMPT_BACK_LEAD_RE = re.compile(
-    r"^(go on|tell me more|keep going|i'?m listening|tell me everything)\b")
+    r"^(go on|tell me more|keep going|keep talking|i'?m listening|tell me everything)\b")
 
 # Emergency floor when the model is fully down mid-scene: first-person,
 # in-scene, act-agnostic — presence and sensation, never a question
@@ -1379,6 +1379,32 @@ def compose_reply(user_text: str, context: dict[str, Any],
         if context.get("scene_state") == "awaiting":
             if not from_model:
                 draft = _SCENE_ASK_LINE
+        elif not from_model and (context.get("scene_state") == "active"
+                                 or context.get("roleplay_locked")):
+            # Model down (already retried once above) inside a scene
+            # he deliberately started — the start flow's stored state
+            # or the persistent roleplay lock: the draft is a canned
+            # bank line, and bank lines are conversational nudges by
+            # design — never scene narration. Shape-matching them via
+            # _is_prompt_back was tuned on the generic bank (all 8 of
+            # its fallback lines match) and misses most of Chloe's own
+            # Mouth bank: only 2 of her 12 fallback lines match its
+            # patterns, so her flat deflections ("you always get
+            # interesting after midnight." / "keep talking. i like
+            # this — us, late.") were served mid-scene during the
+            # 2026-10-14 pool outage. Origin beats shape: a non-model
+            # draft in a started scene is always replaced with an
+            # in-scene descriptive line.
+            #
+            # Scoped to started scenes on purpose: signal-only "heat"
+            # (scene language in this message, no stored state) keeps
+            # the shape-based fence below, because boundary traffic
+            # trips the same signals — a "take it off" proposition or
+            # a "describe him" ex-interrogation must still get her
+            # boundary bank's hard-no / quiet-regroup lines, which are
+            # neither prompt-backs nor narration (pinned by
+            # tests/test_winning_qualities.py).
+            draft = _scene_fallback_line(context)
         elif _is_prompt_back(draft):
             draft = _scene_fallback_line(context)
     return audit_reply(draft, context)

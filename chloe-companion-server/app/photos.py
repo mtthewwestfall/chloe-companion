@@ -37,8 +37,14 @@ def drops_for_tier(tier: str) -> list[dict[str, Any]]:
 
 def maybe_drop_photo(tier: str, messages_used_total: int, every_n: int = 7) -> dict[str, Any] | None:
     """Serving hook for the chat flow. Tier-gated; drops at most one photo
-    per `every_n` user messages, cycling through the eligible drops."""
-    eligible = drops_for_tier(tier)
+    per `every_n` user messages, cycling through the eligible drops.
+
+    Placeholder entries (manifest rows flagged "placeholder": true —
+    slots the user has not curated a real photo into yet) are never
+    served. A placeholder has no file behind it; serving it made the
+    client paint its built-in placeholder artwork as if she had sent
+    a picture (2026-10-14)."""
+    eligible = [d for d in drops_for_tier(tier) if not d.get("placeholder")]
     if not eligible:
         return None
     if messages_used_total <= 0 or messages_used_total % every_n != 0:

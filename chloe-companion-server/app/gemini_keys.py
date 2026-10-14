@@ -110,6 +110,11 @@ _LATENCY_PENALTY_S = 10.0
 _MAX_LATENCY_SAMPLES = 20
 
 # --- Fail-fast request path -------------------------------------------------
+# Sources that fail fast when the pool is known down (see post_json's
+# fail_fast): live-voice traffic (Rover's call brain + TTS on the VM)
+# makes many proxy calls per minute mid-call, so a per-request sweep
+# of a dead pool multiplies fast. Matched as a source-name prefix.
+_FAIL_FAST_SOURCE_PREFIXES = ("roof-rover-voice",)
 # How long a single attempt on a believed-healthy key may take before
 # failover. Real generations on a healthy key finish well inside this;
 # a dead/slow key must not eat the whole caller timeout serially.
@@ -941,7 +946,8 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
 
 def post_json(url: str, payload: dict, timeout: int = 30,
               source: str = "unknown", free_only: bool = False,
-              max_attempts: int | None = None) -> dict | None:
+              max_attempts: int | None = None,
+              fail_fast: bool = False) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Fail-fast phases (no sleeping anywhere on the request path):
@@ -961,7 +967,22 @@ def post_json(url: str, payload: dict, timeout: int = 30,
 
     `source` names the calling app (e.g. "whispr-web", "creator-bot");
     each attempt is logged to gemini_key_usage for the admin endpoint.
+
+    `fail_fast` (also auto-enabled for live-voice sources — see
+    _FAIL_FAST_SOURCE_PREFIXES): when the manager knows nothing can
+    serve — no key believed healthy AND no key even eligible (every
+    key is inside a backoff window or flagged) — return None with
+    ZERO attempts instead of running phase 3's all-keys sweep. That
+    sweep fires up to the attempt cap of guaranteed-failure requests
+    per call, and every failed attempt re-stamps the key's backoff,
+    pushing pool recovery further out. Voice traffic makes many
+    calls per minute on a live call, so one Rover utterance used to
+    burn up to 16 doomed attempts (2026-10-14). The background
+    prober still finds recovery; the next call succeeds normally.
     """
+    if not fail_fast and (source or "").startswith(
+            _FAIL_FAST_SOURCE_PREFIXES):
+        fail_fast = True
     caller_timeout = int(timeout or 30)
     attempt_timeout = max(1, min(caller_timeout, int(_fast_timeout_s())))
     attempt_cap = _max_attempts() if max_attempts is None else max(1, int(max_attempts))
@@ -1002,7 +1023,18 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                                    source, tried, state)
         if data is not None:
             return data
-    data = _try_candidates(_only_free(get_candidate_keys()), url, payload,
+    sweep = _only_free(get_candidate_keys())
+    if fail_fast and not sweep:
+        # Nothing believed healthy (phase 1 empty or all its attempts
+        # just failed into backoff) and nothing eligible for phase 2:
+        # the pool is known down. Phase 3 would only re-fire keys
+        # whose backoff says they are out — guaranteed failures that
+        # re-arm those backoffs. Fail with this one decision instead.
+        logger.warning(
+            "gemini_keys: pool down (no believed-healthy or eligible "
+            "keys), failing fast for source=%s", source)
+        return None
+    data = _try_candidates(sweep, url, payload,
                            caller_timeout, source, tried, state)
     if data is not None:
         return data

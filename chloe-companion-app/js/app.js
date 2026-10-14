@@ -450,24 +450,15 @@
     const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' · ' + timeNow() });
     const b = wrap.firstChild;
     const isDemo = url === 'demo:photo';
+    // A photo drop shows the photo she actually sent (the URL the
+    // server served) with the DROP's own caption. The old body ignored
+    // the URL and always painted a built-in night-skyline SVG, with
+    // the caller passing her reply text as the caption — so a drop
+    // printed her reply a second time under stock art, and a
+    // placeholder drop (no photo behind it at all) looked like a
+    // picture she had tried to send (2026-10-14).
     b.innerHTML = `
-      <div class="photo-scene">
-        <div class="photo-lamp"></div>
-        <svg viewBox="0 0 240 90" preserveAspectRatio="xMidYMax slice">
-          <g fill="#05081a">
-            <rect x="0" y="40" width="34" height="50"/><rect x="38" y="22" width="26" height="68"/>
-            <rect x="68" y="46" width="30" height="44"/><rect x="102" y="14" width="24" height="76"/>
-            <rect x="130" y="34" width="32" height="56"/><rect x="166" y="24" width="22" height="66"/>
-            <rect x="192" y="44" width="28" height="46"/>
-          </g>
-          <g fill="#e8a94c" opacity="0.9">
-            <rect x="44" y="32" width="5" height="7"/><rect x="108" y="26" width="5" height="7"/>
-            <rect x="136" y="46" width="5" height="7"/><rect x="172" y="36" width="5" height="7"/>
-          </g>
-          <circle cx="205" cy="20" r="11" fill="#f4d9a0" opacity="0.9"/>
-          <circle cx="200" cy="17" r="9" fill="#131c44" opacity="0.95"/>
-        </svg>
-      </div>
+      <div class="photo-scene" style="height:auto;min-height:200px;"><img src="${url}" style="width:100%;display:block;" alt="Photo ${currentGirl.name} sent you"></div>
       <div class="photo-caption">
         ${isDemo ? '<span class="demo-tag">DEMO PHOTO</span><br>' : ''}
         ${esc(caption || '')}
@@ -732,7 +723,7 @@
       } else {
         addText('her', res.reply_text || '…');
       }
-      if (res.photo_url) addPhotoDrop(res.photo_url, res.reply_text);
+      if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '');
       if (res.image_url) addGeneratedImage(res.image_url);
       if (res.sogni_login_box) addSogniLoginButton();
       if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;

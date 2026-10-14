@@ -1075,19 +1075,24 @@ def chat(body: ChatIn, request: Request):
 
         # Photo drop: tier-gated serving hook. Chloe's curated drops only —
         # other characters get no photos (never Chloe's photos on them).
+        # maybe_drop_photo never returns placeholder entries, so a drop
+        # here always has a real file; the drop carries its OWN caption
+        # (the client used to caption the card with the reply text, which
+        # printed her reply twice — bubble + card — 2026-10-14).
         photo_url = None
+        photo_caption = None
         if cid == "chloe":
             drop = photos.maybe_drop_photo(user["tier"], user["messages_used_total"] + 1)
-            if drop and not drop.get("placeholder"):
+            if drop:
                 photo_url = f"/photo_drops/{drop['file']}"
-            elif drop:
-                photo_url = f"PLACEHOLDER:{drop['id']}"
+                photo_caption = drop.get("caption") or ""
 
         user = store.get_or_create_user(conn, user_id)
         resp = {
             "reply_text": reply_text,
             "voice_note_url": voice_note_url,
             "photo_url": photo_url,
+            "photo_caption": photo_caption,
             "messages_remaining": user["messages_remaining"],
             "character_id": cid,
             "attachments": public_attachments,
