@@ -159,6 +159,7 @@ body {
 }
 .status-dot { width: 6px; height: 6px; display: inline-block; border-radius: 50%; background: currentColor; flex: 0 0 6px; }
 .status-idle { color: #a1a1aa; }
+.status-idle .status-dot { background: #4ade80; box-shadow: 0 0 6px rgba(74, 222, 128, .9); }
 .status-working { color: #60a5fa; }
 .status-finishing-up { color: #fbbf24; }
 .status-finished { color: #4ade80; }
