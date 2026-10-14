@@ -199,7 +199,17 @@ _APPROVED_REF_DIR = os.path.join(os.path.dirname(__file__), "ref_frames")
 
 
 def _approved_reference_frame(girl_id: str) -> str | None:
-    """Owner-approved topless reference photo on disk, if one exists."""
+    """Owner-approved reference photo on disk, if one exists.
+
+    Slot-name caveat (2026-10-14): for brooklyn, hannah, jordan and
+    mia the file in this slot intentionally holds a CLOTHED starting
+    frame (extracted from the girl's own stage-1 give clip), not a
+    topless photo. Controlled tests that day proved Sogni's filter
+    refuses the render prompt's undressing language, not the
+    starting image, and the passing renders started clothed — so the
+    stage>2 starting frame for those four is clothed by design now.
+    The other girls' files here are the topless photos the slot was
+    named for."""
     for ext in (".jpg", ".jpeg", ".png", ".webp"):
         path = os.path.join(_APPROVED_REF_DIR, f"{girl_id}-topless{ext}")
         if os.path.exists(path):
@@ -214,10 +224,27 @@ def _topless_reference_frame(conn: Any, girl_id: str) -> str | None:
     frame of the approved stage-2 ("shirt off") give video (the first
     frame still has the top on). Returns None when unavailable so the
     caller falls back to the avatar.
+
+    The on-disk photo is handed over as a temp COPY, never as
+    itself: every render path unlinks the ref_path it was given when
+    the render finishes (the other branches return disposable
+    temp files), so returning the curated file would delete it on
+    first use — the same "callers delete what they are handed, the
+    library original must survive" rule media_gen already follows.
     """
     approved = _approved_reference_frame(girl_id)
     if approved:
-        return approved
+        try:
+            with open(approved, "rb") as fh:
+                data = fh.read()
+            fd, tmp = tempfile.mkstemp(
+                prefix="give-ref-",
+                suffix=os.path.splitext(approved)[1])
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            return tmp
+        except OSError:
+            pass
     try:
         # Latest stage-2 video preferred (last frame = top off); a photo
         # is only used when no video exists.

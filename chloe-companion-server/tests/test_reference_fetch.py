@@ -165,9 +165,13 @@ class ToplessReferenceChainTest(unittest.TestCase):
         self.src = os.path.join(self.gen_dir, STAGE2_NAME)
         with open(self.src, "wb") as f:
             f.write(VIDEO_BYTES)
+        # A synthetic girl with no curated ref_frames file, so the
+        # chain under test is the stage-2 branch. (Brooklyn herself
+        # takes branch 1 since 2026-10-14, when she got a curated
+        # clothed starting frame in the ref_frames slot.)
         self.conn.execute(
             "INSERT INTO girl_media (girl_id, kind, url, preset, stage) "
-            "VALUES ('brooklyn', 'give', ?, 'give', 2)", (STAGE2_URL,))
+            "VALUES ('chain-girl', 'give', ?, 'give', 2)", (STAGE2_URL,))
         self.conn.commit()
         self._patch = mock.patch.object(config, "GENERATED_DIR",
                                         self.gen_dir)
@@ -188,7 +192,7 @@ class ToplessReferenceChainTest(unittest.TestCase):
                                   return_value="/usr/bin/ffmpeg"), \
                 mock.patch.object(give_gen.subprocess, "run", fake_run):
             frame = give_gen._topless_reference_frame(self.conn,
-                                                      "brooklyn")
+                                                      "chain-girl")
         self.assertIsNotNone(frame)
         with open(frame, "rb") as f:
             self.assertEqual(f.read(), b"extracted-frame-bytes")
