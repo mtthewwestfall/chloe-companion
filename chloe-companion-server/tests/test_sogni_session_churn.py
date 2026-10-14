@@ -45,6 +45,29 @@ assist._heal_session_dead_render (inside assist._locked_render):
 - two concurrent dead renders -> exactly one sign-in total,
 - non-session failures and API-key sessions are never healed.
 
+Fourth fix (2026-10-14, later still): login rate-limit discipline.
+The seam heal engaged in production, but a restarted queue drained
+~60 jobs against a dead session in ~30 seconds: every job's
+recovery attempted its own sign-in, Sogni's login endpoint answered
+HTTP 429 to all of them, recovery yielded no pair, the jobs failed,
+and the failure path cleared the stored pair + tombstoned the env
+seed, leaving "Sogni login missing" for the tail. Coverage for
+assist's persisted login cooldown + transient/definitive failure
+classification, give_gen's park-don't-fail + processor stand-down,
+and the deploy-overlap boot grace:
+- a failed sign-in sets a 600s cooldown persisted in assist_secrets;
+  attempts inside it are refused locally (no network call),
+- a TRANSIENT failure (429 / 5xx / transport) inside resolve never
+  clears the stored pair and never tombstones the seed; a
+  DEFINITIVE one (401) keeps the old clear + tombstone behavior,
+- a successful sign-in clears the cooldown,
+- a give job whose session is unavailable ends "pending" (parked),
+  the processor stands down without attempting the next job, and
+  the parked job renders on a later drain after the cooldown
+  expires and the login works again,
+- the boot grace (armed by main.py's boot path) makes the first
+  processor drain wait out the rest of the window.
+
 Run:  python -m unittest tests.test_sogni_session_churn -v
 """
 from __future__ import annotations
@@ -679,6 +702,328 @@ class SeamHealTest(GateBase):
         self.assertTrue(row["url"])
         self.assertEqual(render.calls, [PAIR_A, PAIR_B])
         self.assertEqual(len(logins), 1)
+
+
+def _plan_error(status=None, stage="nonce", cause=None):
+    """A _SogniPlanError like the login helper raises: the HTTP
+    status rides on the exception; a transport failure is chained
+    as its cause."""
+    err = assist._SogniPlanError("login_failed", "boom", stage=stage,
+                                 status=status)
+    if cause is not None:
+        err.__cause__ = cause
+    return err
+
+
+class LoginCooldownTest(SessionChurnBase):
+    """Login rate-limit discipline: a failed sign-in (through the
+    single-flight path) sets a persisted 600s cooldown; attempts
+    inside it never reach the network."""
+
+    def test_transient_429_keeps_pair_and_sets_cooldown(self):
+        os.environ["SOGNI_PLAN_SESSION"] = json.dumps(PAIR_A)
+        self.assertEqual(assist.stored_sogni_session(self.conn), PAIR_A)
+        calls = []
+
+        def rate_limited(login):
+            calls.append(login)
+            raise _plan_error(status=429)
+
+        with mock.patch.object(assist, "_sogni_plan_login",
+                               rate_limited):
+            got = assist.resolve_dead_sogni_session(
+                self.conn, dict(PAIR_A), login=LOGIN)
+        self.assertIsNone(got)
+        self.assertEqual(len(calls), 1)
+        # Transient: pair NOT cleared, env seed NOT tombstoned.
+        self.assertEqual(assist.stored_sogni_session(self.conn), PAIR_A)
+        self.assertIsNone(_tombstone(self.conn))
+        state = assist.sogni_login_cooldown_state(self.conn)
+        self.assertIsNotNone(state)
+        self.assertTrue(state["transient"])
+        self.assertGreater(state["remaining"], 500)
+        self.assertEqual(assist.sogni_login_cooldown_remaining(self.conn),
+                         state["remaining"])
+
+    def test_second_attempt_within_cooldown_makes_no_network_call(self):
+        assist.store_sogni_session(self.conn, PAIR_A)
+        calls = []
+
+        def rate_limited(login):
+            calls.append(login)
+            raise _plan_error(status=429)
+
+        with mock.patch.object(assist, "_sogni_plan_login",
+                               rate_limited):
+            assist.resolve_dead_sogni_session(
+                self.conn, dict(PAIR_A), login=LOGIN)
+            self.assertEqual(len(calls), 1)
+            # A second recovery inside the cooldown is refused
+            # LOCALLY: the login callable never runs again, the
+            # reason reads as an active cooldown, pair survives.
+            got = assist.resolve_dead_sogni_session(
+                self.conn, dict(PAIR_A), login=LOGIN)
+        self.assertIsNone(got)
+        self.assertEqual(len(calls), 1)
+        self.assertGreater(
+            assist.sogni_login_cooldown_remaining(self.conn), 0)
+        self.assertEqual(assist.stored_sogni_session(self.conn), PAIR_A)
+
+    def test_definitive_401_clears_and_tombstones(self):
+        os.environ["SOGNI_PLAN_SESSION"] = json.dumps(PAIR_A)
+
+        def refused(login):
+            raise _plan_error(status=401)
+
+        with mock.patch.object(assist, "_sogni_plan_login", refused):
+            got = assist.resolve_dead_sogni_session(
+                self.conn, dict(PAIR_A), login=LOGIN)
+        self.assertIsNone(got)
+        # Definitive: today's behavior — pair cleared, seed tombstoned.
+        self.assertIsNone(assist.stored_sogni_session(self.conn))
+        self.assertEqual(_tombstone(self.conn),
+                         assist._session_fingerprint(PAIR_A))
+        state = assist.sogni_login_cooldown_state(self.conn)
+        self.assertIsNotNone(state)
+        self.assertFalse(state["transient"])
+
+    def test_5xx_and_transport_failures_are_transient(self):
+        for exc in (_plan_error(status=503),
+                    _plan_error(status=None,
+                                cause=ConnectionError("reset"))):
+            assist.store_sogni_session(self.conn, PAIR_A)
+            assist._clear_sogni_login_cooldown(self.conn)
+
+            def boom(login, exc=exc):
+                raise exc
+
+            with mock.patch.object(assist, "_sogni_plan_login", boom):
+                got = assist.resolve_dead_sogni_session(
+                    self.conn, dict(PAIR_A), login=LOGIN)
+            self.assertIsNone(got)
+            self.assertEqual(assist.stored_sogni_session(self.conn),
+                             PAIR_A)
+            state = assist.sogni_login_cooldown_state(self.conn)
+            self.assertIsNotNone(state)
+            self.assertTrue(state["transient"])
+
+    def test_successful_login_clears_cooldown(self):
+        assist.store_sogni_session(self.conn, PAIR_A)
+        assist._set_sogni_login_cooldown(self.conn, transient=True)
+        # The endpoint has recovered: the row is expired.
+        self.conn.execute(
+            "UPDATE assist_secrets SET value = ? WHERE name = ?",
+            (json.dumps({"until": time.time() - 1, "transient": True}),
+             assist._SOGNI_LOGIN_COOLDOWN))
+        self.conn.commit()
+        self.assertIsNone(assist.sogni_login_cooldown_state(self.conn))
+        with mock.patch.object(assist, "_sogni_plan_login",
+                               return_value=dict(PAIR_C)):
+            got = assist.resolve_dead_sogni_session(
+                self.conn, dict(PAIR_A), login=LOGIN)
+        self.assertEqual(got, PAIR_C)
+        row = self.conn.execute(
+            "SELECT value FROM assist_secrets WHERE name = ?",
+            (assist._SOGNI_LOGIN_COOLDOWN,)).fetchone()
+        self.assertIsNone(row)  # deleted outright, not just expired
+
+    def test_cooldown_persists_across_connections(self):
+        # Persisted in assist_secrets, not in memory: a cooldown
+        # written on one connection is read back on a brand-new one
+        # (the next process after a restart, mid-storm).
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            seed = sqlite3.connect(path)
+            seed.executescript(db.SCHEMA)
+            seed.close()
+            conn1 = sqlite3.connect(path, check_same_thread=False)
+            conn1.row_factory = sqlite3.Row
+            try:
+                assist._set_sogni_login_cooldown(conn1, transient=True)
+            finally:
+                conn1.close()
+            conn2 = sqlite3.connect(path, check_same_thread=False)
+            conn2.row_factory = sqlite3.Row
+            try:
+                state = assist.sogni_login_cooldown_state(conn2)
+            finally:
+                conn2.close()
+            self.assertIsNotNone(state)
+            self.assertTrue(state["transient"])
+            self.assertGreater(state["remaining"], 500)
+        finally:
+            os.unlink(path)
+
+
+class GiveParkTest(GateBase):
+    """Park, don't fail: a give job whose session is unavailable
+    ends "pending" (never "failed"), the processor stands down for
+    the drain without attempting the next job, and the parked job
+    renders on a later drain once the session recovers."""
+
+    def setUp(self):
+        super().setUp()
+        self._ref_fd, self._ref = tempfile.mkstemp(suffix=".jpg")
+        os.close(self._ref_fd)
+
+    def tearDown(self):
+        # The hand-over deque is module-global: never leak ids into
+        # another test's drain.
+        with give_gen._PROCESSOR_GUARD:
+            give_gen._PENDING_GIVE_IDS.clear()
+        try:
+            os.unlink(self._ref)
+        except OSError:
+            pass
+        super().tearDown()
+
+    def _process(self, gen_ids, owner="owner-1"):
+        with mock.patch.object(characters, "get_character",
+                               return_value={"name": "Mara",
+                                             "avatar_url": "x"}), \
+             mock.patch.object(characters, "owner_of",
+                               return_value=owner), \
+             mock.patch.object(assist, "_fetch_first_frame",
+                               return_value=self._ref):
+            give_gen._process_queued_give_generations(list(gen_ids))
+
+    def _row(self, gen_id):
+        conn = self._conn()
+        try:
+            return give_gen.get_give_generation(conn, gen_id)
+        finally:
+            conn.close()
+
+    def _drop_stored_session(self):
+        conn = self._conn()
+        try:
+            conn.execute("DELETE FROM assist_secrets WHERE name = ?",
+                         (assist._SOGNI_PLAN_SESSION,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_login_missing_parks_and_processor_stands_down(self):
+        self._drop_stored_session()
+        # No env login configured (setUp cleared it) and owner_of ->
+        # None, so no hardwired sign-in is even attempted.
+        first = self._make_give_row(stage=1)
+        second = self._make_give_row(stage=2)
+        self._process([first, second], owner=None)
+        row1 = self._row(first)
+        self.assertEqual(row1["status"], "pending")
+        self.assertFalse(row1["url"])
+        self.assertEqual(row1["error"], "waiting: session unavailable")
+        # The second job was NOT attempted in this drain.
+        row2 = self._row(second)
+        self.assertEqual(row2["status"], "pending")
+        self.assertFalse(row2["url"])
+        self.assertFalse(row2["error"])
+        self.assertFalse(give_gen._GIVE_PROCESSOR_ACTIVE)
+
+    def test_dead_session_429_parks_after_one_login_then_renders(self):
+        # The production storm, tamed: stored pair dead, the login
+        # endpoint rate-limits. The seam heal makes the ONLY sign-in
+        # of the job; the job-level resolve is refused locally by
+        # the fresh cooldown; the job parks instead of failing.
+        os.environ["SOGNI_LOGIN_USERNAME"] = "lockeddoor"
+        os.environ["SOGNI_LOGIN_PASSWORD"] = "pw"
+        render = _dead_render({_fp(PAIR_A)})
+        logins = []
+
+        def rate_limited(login):
+            logins.append(login)
+            raise _plan_error(status=429)
+
+        gen_id = self._make_give_row()
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login",
+                               rate_limited):
+            self._process([gen_id])
+        self.assertEqual(len(logins), 1)
+        self.assertEqual(render.calls, [PAIR_A])
+        row = self._row(gen_id)
+        self.assertEqual(row["status"], "pending")
+        self.assertFalse(row["url"])
+        self.assertEqual(row["error"], "waiting: session unavailable")
+        conn = self._conn()
+        try:
+            # The pair survived the transient failure; cooldown runs.
+            self.assertEqual(assist.stored_sogni_session(conn), PAIR_A)
+            self.assertGreater(
+                assist.sogni_login_cooldown_remaining(conn), 0)
+            # Cooldown expires (Sogni's rate limit resets).
+            conn.execute(
+                "UPDATE assist_secrets SET value = ? WHERE name = ?",
+                (json.dumps({"until": time.time() - 1,
+                             "transient": True}),
+                 assist._SOGNI_LOGIN_COOLDOWN))
+            conn.commit()
+        finally:
+            conn.close()
+
+        def good_login(login):
+            logins.append(login)
+            return dict(PAIR_B)
+
+        # A later drain sweeps the parked row: the seam heal signs
+        # in (once), re-runs on the fresh pair, and the job lands
+        # "pending" WITH a url via the normal success path.
+        with mock.patch.object(assist, "_sogni_plan_render", render), \
+             mock.patch.object(assist, "_sogni_plan_login", good_login):
+            self._process([])
+        row = self._row(gen_id)
+        self.assertEqual(row["status"], "pending")
+        self.assertTrue(row["url"])
+        self.assertEqual(render.calls, [PAIR_A, PAIR_A, PAIR_B])
+        self.assertEqual(len(logins), 2)
+        conn = self._conn()
+        try:
+            self.assertEqual(assist.stored_sogni_session(conn), PAIR_B)
+            self.assertIsNone(assist.sogni_login_cooldown_state(conn))
+        finally:
+            conn.close()
+
+
+class BootGraceTest(unittest.TestCase):
+    """Deploy-overlap boot grace: armed (by main.py's boot path),
+    the first processor drain of the process waits out the rest of
+    the grace window before its first job; unarmed, it never waits."""
+
+    def tearDown(self):
+        give_gen._BOOT_GRACE_ARMED = False
+        with give_gen._PROCESSOR_GUARD:
+            give_gen._PENDING_GIVE_IDS.clear()
+
+    def _drain_one(self, gen_id):
+        ran = []
+        with mock.patch.object(
+                give_gen, "_run_give_generation_job",
+                lambda gid: ran.append(gid)), \
+             mock.patch.object(give_gen, "_claim_next_queued_give_id",
+                               return_value=None):
+            start = time.time()
+            give_gen._process_queued_give_generations([gen_id])
+            return ran, time.time() - start
+
+    def test_armed_grace_waits_before_first_job(self):
+        with mock.patch.object(give_gen, "_PROCESS_STARTED_AT",
+                               time.time()), \
+             mock.patch.object(give_gen, "_BOOT_GRACE_SECONDS", 0.6):
+            give_gen.arm_boot_grace()
+            ran, elapsed = self._drain_one(4242)
+        self.assertEqual(ran, [4242])
+        self.assertGreaterEqual(elapsed, 0.5)
+
+    def test_unarmed_drain_does_not_wait(self):
+        give_gen._BOOT_GRACE_ARMED = False
+        with mock.patch.object(give_gen, "_PROCESS_STARTED_AT",
+                               time.time()), \
+             mock.patch.object(give_gen, "_BOOT_GRACE_SECONDS", 5.0):
+            ran, elapsed = self._drain_one(4243)
+        self.assertEqual(ran, [4243])
+        self.assertLess(elapsed, 2.0)
 
 
 if __name__ == "__main__":

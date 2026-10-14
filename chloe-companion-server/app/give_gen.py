@@ -13,6 +13,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any
@@ -302,22 +303,43 @@ def _hardwired_sogni_session(conn, girl_id: str) -> dict | None:
     return session
 
 
-def _run_give_generation_job(gen_id: int) -> None:
-    """Worker thread: render 15s Sogni video using the saved Sogni login session."""
+def _park_give_generation(conn, gen_id: int) -> str:
+    """Leave a job pending for a later drain instead of failing it:
+    the Sogni session is temporarily unavailable (dead session
+    unhealed, login missing, login cooldown) — a later trigger, the
+    boot loop, or the processor's next sweep re-processes the row
+    once the session recovers. The row keeps status "pending" with
+    no url, so the trigger's dedup still counts it as existing for
+    its (girl, stage, day) and no duplicate is ever queued. Returns
+    the "parked" signal the single processor stands down on."""
+    update_give_generation_status(
+        conn, gen_id, "pending", error="waiting: session unavailable")
+    print(f"[give_gen] gen #{gen_id} parked: session unavailable",
+          flush=True)
+    return "parked"
+
+
+def _run_give_generation_job(gen_id: int) -> str | None:
+    """Worker thread: render 15s Sogni video using the saved Sogni login session.
+
+    Returns "parked" when the session path ended unavailable
+    (session_dead unhealed, login missing, login cooldown): the row
+    was left pending, not failed, and the caller — the single
+    processor — stands down for this drain. Returns None otherwise
+    (rendered, or genuinely failed: blocked / plan_rejected / other
+    real render errors still fail exactly as before)."""
     conn = db.connect()
     ref_path = None
     try:
         gen = get_give_generation(conn, gen_id)
         if not gen or gen["status"] not in ("pending", "generating"):
-            return
+            return None
 
         session = assist.stored_sogni_session(conn)
         if not session:
             session = _hardwired_sogni_session(conn, gen["girl_id"])
         if not session:
-            print(f"[give_gen] gen #{gen_id} waiting: Sogni login missing", flush=True)
-            update_give_generation_status(conn, gen_id, "failed", error="Sogni login missing")
-            return
+            return _park_give_generation(conn, gen_id)
 
         update_give_generation_status(conn, gen_id, "generating")
 
@@ -352,7 +374,9 @@ def _run_give_generation_job(gen_id: int) -> None:
             # retry once with the newest stored pair; only when the
             # stored pair is the one that just died does a single-flight
             # hardwired sign-in happen, and the pair is cleared (env
-            # seed tombstoned) only after that sign-in fails. Skipped
+            # seed tombstoned) only after a DEFINITIVE sign-in failure
+            # (a transient 429/5xx/transport failure or an active login
+            # cooldown leaves the pair untouched). Skipped
             # when the seam already healed and re-ran this render
             # (outcome["seam_healed"]): a second recovery here would
             # stack another sign-in on the same render.
@@ -365,6 +389,15 @@ def _run_give_generation_job(gen_id: int) -> None:
                 )
                 if fresh_session:
                     assist.store_sogni_session(conn, fresh_session)
+
+        if outcome.get("status") == "session_dead":
+            # Still dead after the seam heal AND this job's recovery
+            # (or the login cooldown refused the recovery sign-in):
+            # the session is unavailable, not the job's fault. Park
+            # it pending for the next drain instead of failing it —
+            # failing here is what burned a whole queue in seconds
+            # whenever the session died (2026-10-14).
+            return _park_give_generation(conn, gen_id)
 
         if outcome.get("status") != "done" or not outcome.get("path"):
             err_msg = str(outcome.get("detail") or outcome.get("status") or "render failed")[:200]
@@ -478,6 +511,45 @@ _PROCESSOR_GUARD = threading.Lock()
 _PENDING_GIVE_IDS: collections.deque[int] = collections.deque()
 _GIVE_PROCESSOR_ACTIVE = False
 
+# Deploy-overlap boot grace: right after a deploy, the old and new
+# containers briefly coexist and both fire their boot drains; two
+# live processors on one Sogni login invalidate each other's
+# session (and now trip the login rate limit healing it). The FIRST
+# drain of a process therefore waits out the remainder of a grace
+# window measured from process start before its first job — by the
+# time it renders, the old container is gone. Armed by the app boot
+# path (arm_boot_grace, next to the auto daily-gives loop in
+# main.py); unarmed in tests and import-only contexts, where there
+# is no second container to fight. GIVE_GEN_BOOT_GRACE_SECONDS
+# overrides the window (0 disables it outright).
+_PROCESS_STARTED_AT = time.time()
+_BOOT_GRACE_SECONDS = 90.0
+_BOOT_GRACE_ARMED = False
+
+
+def arm_boot_grace() -> None:
+    """Arm the deploy-overlap boot grace for this process."""
+    global _BOOT_GRACE_ARMED
+    _BOOT_GRACE_ARMED = True
+
+
+def _boot_grace_wait() -> None:
+    """Sleep out the rest of the boot grace window (processor
+    threads only — a plain sleep is fine, the processor is a
+    background thread). No-op when unarmed or the window passed."""
+    if not _BOOT_GRACE_ARMED:
+        return
+    try:
+        grace = float(os.environ.get("GIVE_GEN_BOOT_GRACE_SECONDS")
+                      or _BOOT_GRACE_SECONDS)
+    except (TypeError, ValueError):
+        grace = _BOOT_GRACE_SECONDS
+    remaining = grace - (time.time() - _PROCESS_STARTED_AT)
+    if remaining > 0:
+        print(f"[give_gen] boot grace: first drain waits "
+              f"{remaining:.0f}s (deploy-overlap window)", flush=True)
+        time.sleep(remaining)
+
 
 def _claim_next_queued_give_id(exclude: set[int]) -> int | None:
     """Oldest unrendered queued generation (status 'pending' with no
@@ -517,6 +589,7 @@ def _process_queued_give_generations(gen_ids: list[int]) -> None:
         _GIVE_PROCESSOR_ACTIVE = True
     processed: set[int] = set()
     try:
+        _boot_grace_wait()
         while True:
             with _PROCESSOR_GUARD:
                 gen_id = _PENDING_GIVE_IDS.popleft() \
@@ -528,7 +601,16 @@ def _process_queued_give_generations(gen_ids: list[int]) -> None:
             if gen_id in processed:
                 continue
             processed.add(gen_id)
-            _run_give_generation_job(gen_id)
+            if _run_give_generation_job(gen_id) == "parked":
+                # Session unavailable: stand down for this drain.
+                # The parked row and everything behind it stay
+                # pending for the next trigger / boot / sweep —
+                # draining on would just park (or worse, fail)
+                # every remaining job against the same dead login.
+                print("[give_gen] processor standing down: Sogni "
+                      "session unavailable; queue stays pending",
+                      flush=True)
+                return
     finally:
         with _PROCESSOR_GUARD:
             _GIVE_PROCESSOR_ACTIVE = False

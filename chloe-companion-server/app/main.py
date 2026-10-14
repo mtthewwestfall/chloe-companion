@@ -459,6 +459,10 @@ def _startup():
             time.sleep(12 * 3600)
 
     import threading
+    # Deploy-overlap boot grace: the first give drain of this
+    # process waits out the window in which the old container may
+    # still be draining against the same Sogni login.
+    give_gen.arm_boot_grace()
     threading.Thread(target=_auto_daily_gives_loop, daemon=True, name="auto-daily-gives").start()
 
 

@@ -4940,6 +4940,111 @@ def clear_sogni_session(conn: sqlite3.Connection) -> bool:
     return cur.rowcount > 0
 
 
+# ---------------------------------------------------------------------------
+# Login cooldown: after ANY failed sign-in through the single-flight
+# path, no feature may attempt another sign-in for ten minutes.
+# Production failure (2026-10-14, post-restart): the give queue
+# drained ~60 jobs against a dead session; every job's recovery
+# attempted its own sign-in, Sogni's login endpoint rate-limited
+# them all (HTTP 429), and the failure path then cleared the stored
+# pair + tombstoned the env seed, leaving "Sogni login missing" for
+# the tail. The cooldown is persisted in assist_secrets (not
+# in-memory) because the storm spans deploys — a restart mid-storm
+# must not reset the discipline.
+_SOGNI_LOGIN_COOLDOWN = "sogni_login_cooldown"
+_SOGNI_LOGIN_COOLDOWN_SECONDS = 600
+
+
+def _login_failure_is_transient(exc: BaseException) -> bool:
+    """Classify a sign-in failure: TRANSIENT (Sogni rate-limited us
+    — HTTP 429 — a server error — 5xx — or the transport itself
+    failed; no verdict on the credentials) vs DEFINITIVE (Sogni
+    answered and refused the login: 401/403 invalid credentials, or
+    any other answered non-5xx refusal).
+
+    Walks the exception/cause chain: the SDK's failure arrives
+    wrapped in _SogniPlanError carrying the HTTP status, while a
+    transport failure carries no status but appears in the chain as
+    ConnectionError / TimeoutError / OSError. Anything unrecognized
+    defaults to definitive, preserving the pre-cooldown behavior
+    (a failed re-login on a confirmed-dead pair clears it)."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = getattr(cur, "status", None)
+        if status is not None:
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                status = None
+        if status is not None:
+            return status == 429 or status >= 500
+        if isinstance(cur, (ConnectionError, TimeoutError, OSError)):
+            return True
+        cur = getattr(cur, "__cause__", None) or \
+            getattr(cur, "__context__", None)
+    return False
+
+
+def sogni_login_cooldown_state(conn: sqlite3.Connection) -> dict | None:
+    """The active login cooldown, or None: {"remaining": seconds
+    left (int), "transient": whether the failure that set it was
+    transient}. An expired or unreadable row reads as no cooldown."""
+    ensure_tables(conn)
+    row = conn.execute(
+        "SELECT value FROM assist_secrets WHERE name = ?",
+        (_SOGNI_LOGIN_COOLDOWN,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row[0] or "")
+        until = float(data["until"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    remaining = until - time.time()
+    if remaining <= 0:
+        return None
+    return {"remaining": int(remaining) + 1,
+            "transient": bool(data.get("transient"))}
+
+
+def sogni_login_cooldown_remaining(conn: sqlite3.Connection) -> int:
+    """Seconds until sign-in attempts open again; 0 when no login
+    cooldown is active. Callers distinguishing "session unavailable
+    because login_cooldown" from other failures use this (or
+    sogni_login_cooldown_state, which also carries the class of the
+    failure that set the cooldown)."""
+    state = sogni_login_cooldown_state(conn)
+    return state["remaining"] if state else 0
+
+
+def _set_sogni_login_cooldown(conn: sqlite3.Connection,
+                              transient: bool) -> None:
+    ensure_tables(conn)
+    value = json.dumps({
+        "until": time.time() + _SOGNI_LOGIN_COOLDOWN_SECONDS,
+        "transient": bool(transient),
+    })
+    conn.execute(
+        "INSERT INTO assist_secrets (name, value, updated_at) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT (name) DO UPDATE SET value = excluded.value, "
+        "updated_at = excluded.updated_at",
+        (_SOGNI_LOGIN_COOLDOWN, value,
+         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+    conn.commit()
+
+
+def _clear_sogni_login_cooldown(conn: sqlite3.Connection) -> None:
+    ensure_tables(conn)
+    conn.execute(
+        "DELETE FROM assist_secrets WHERE name = ?",
+        (_SOGNI_LOGIN_COOLDOWN,))
+    conn.commit()
+
+
 # Single-flight sign-in gate: every feature that signs in on its own
 # (give_gen's hardwired path, session_dead recovery) goes through here
 # so two sign-ins can never be in flight at once — a fresh sign-in
@@ -4969,6 +5074,14 @@ def sogni_login_single_flight(conn: sqlite3.Connection,
     instead of signing in again — concurrent sign-in attempts collapse
     to one login. On success the fresh pair is stored. Returns the
     pair, or None when the sign-in failed.
+
+    Login cooldown: while a cooldown is active (set by the last
+    failed sign-in, persisted across restarts — see
+    sogni_login_cooldown_state), attempts are refused LOCALLY with
+    no network call; callers tell the reason apart via
+    sogni_login_cooldown_remaining / _state. A failed attempt sets
+    the cooldown (with its transient/definitive class); a successful
+    sign-in clears it.
     """
     with _SOGNI_LOGIN_LOCK:
         # Inside the global gate: the sign-in creates a Sogni client,
@@ -4981,15 +5094,24 @@ def sogni_login_single_flight(conn: sqlite3.Connection,
                         _session_fingerprint(current) != \
                         _session_fingerprint(dead_session):
                     return current
+            cooldown = sogni_login_cooldown_state(conn)
+            if cooldown:
+                print("[assist] sogni sign-in skipped "
+                      f"(login_cooldown, {cooldown['remaining']}s "
+                      "left)", flush=True)
+                return None
             try:
                 fresh = _sogni_plan_login(login)
             except Exception as e:  # noqa: BLE001 — report the kind only
                 print("[assist] sogni sign-in failed ("
                       + _sogni_failure_telemetry(e, redact=login) + ")",
                       flush=True)
+                _set_sogni_login_cooldown(
+                    conn, _login_failure_is_transient(e))
                 return None
             if fresh:
                 store_sogni_session(conn, fresh)
+                _clear_sogni_login_cooldown(conn)
             return fresh
 
 
@@ -5007,12 +5129,19 @@ def resolve_dead_sogni_session(conn: sqlite3.Connection,
     2. When the stored pair IS the dead one, try one single-flight
        re-login (the given login, else the server-side env login) and
        return the fresh pair on success.
-    3. Only a confirmed-dead pair plus a failed re-login clears the
-       stored pair — which is also the only moment the env seed gets
-       tombstoned (inside clear_sogni_session). One feature's dead
-       render can no longer wipe the session for everyone.
+    3. Only a confirmed-dead pair plus a DEFINITIVELY failed
+       re-login clears the stored pair — which is also the only
+       moment the env seed gets tombstoned (inside
+       clear_sogni_session). One feature's dead render can no
+       longer wipe the session for everyone. A TRANSIENT re-login
+       failure (HTTP 429, 5xx, transport — see
+       _login_failure_is_transient), or a login cooldown refusing
+       the attempt, leaves the pair AND the seed untouched: the
+       rate limit is not a verdict on the credentials, and the
+       cooldown disciplines the next attempt.
 
-    Returns the pair to retry with, or None when the session is gone.
+    Returns the pair to retry with, or None when the session is gone
+    (or temporarily unrecoverable — cooldown state distinguishes).
     """
     current = stored_sogni_session(conn)
     if current and not current.get("api_key") and dead_session and \
@@ -5026,6 +5155,9 @@ def resolve_dead_sogni_session(conn: sqlite3.Connection,
                                           dead_session=dead_session)
         if fresh:
             return fresh
+        state = sogni_login_cooldown_state(conn)
+        if state and state["transient"]:
+            return None
     clear_sogni_session(conn)
     return None
 
@@ -5272,6 +5404,9 @@ def perform_sogni_login(conn: sqlite3.Connection, user_id: str,
         return None
     _sogni_login_fail_times.pop(user_id, None)
     store_sogni_session(conn, session)
+    # A successful sign-in clears any login cooldown a feature's
+    # failed attempt left behind: the endpoint demonstrably answers.
+    _clear_sogni_login_cooldown(conn)
     # A successful sign-in also cleans up any earlier paste of his
     # that a narrower parser missed, in every assistant thread.
     scrub_sogni_credentials_from_history(conn, user_id)
