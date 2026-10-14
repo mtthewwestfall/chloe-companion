@@ -855,6 +855,8 @@
       box.innerHTML = mine.map((r) => {
         const label = r.status === 'fulfilled' ? '✅ ready'
           : r.status === 'generating' ? '⏳ making it…'
+          : r.status === 'fallback' ? '💌 she sent you one of hers instead'
+          : r.status === 'failed' ? `✖ couldn't make that one`
           : '🕐 queued';
         const media = r.status === 'fulfilled' && r.video_url
           ? `<div style="margin-top:6px;"><video src="${r.video_url}" controls playsinline style="width:100%;border-radius:10px;"></video></div>`

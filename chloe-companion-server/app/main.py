@@ -1580,8 +1580,13 @@ async def girl_videos(girl_id: str, request: Request):
 
 # ---------------------------------------------------------------------------
 # Custom video requests (2026-10-07): users describe a custom video they
-# want; the server attempts Sogni generation in the background. Blocked or
-# failed generations stay `pending` for manual fulfillment by the owner.
+# want; the server attempts Sogni generation in the background. Since
+# 2026-10-14 a definitively refused/failed render closes the request
+# honestly (status `fallback` with a preset from her own library
+# delivered instead, or `failed`), the reason recorded on the row;
+# session/throttle transients park it back in `pending` with a waiting
+# note. POST /api/v1/admin/custom-videos/sweep-backlog runs the one-shot
+# backlog sweep over every pending request.
 # POST /api/v1/custom-videos [auth] {girl_id, description} -> {id, status}
 # GET  /api/v1/custom-videos [auth] -> {requests:[...]}
 # GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
@@ -1631,7 +1636,8 @@ def admin_custom_videos(request: Request, status: str = ""):
     conn = _conn()
     try:
         valid = status.strip().lower() or None
-        if valid and valid not in ("pending", "generating", "fulfilled", "manual"):
+        if valid and valid not in ("pending", "generating", "fulfilled",
+                                   "manual", "fallback", "failed"):
             raise HTTPException(status_code=400, detail="invalid status")
         return {"requests": store.get_custom_requests(conn, status=valid)}
     finally:
@@ -1687,6 +1693,30 @@ def admin_process_pending_custom_videos(request: Request):
         if str(e) == "sogni_login_required":
             raise HTTPException(status_code=503, detail="sogni_login_required")
         raise
+    return {"ok": True, "queued": count}
+
+
+class CustomVideoSweepIn(BaseModel):
+    # Requests already definitively refused (production-log evidence):
+    # the sweep closes them with the recorded reason + preset fallback
+    # WITHOUT rendering them again.
+    known_refused_ids: list[int] = []
+    known_refused_error: str = ""
+
+
+@app.post("/api/v1/admin/custom-videos/sweep-backlog")
+def admin_sweep_custom_video_backlog(request: Request,
+                                     body: CustomVideoSweepIn | None = None):
+    """One-shot backlog sweep (2026-10-14): process every pending
+    custom video request under the fallback-fix semantics — one render
+    attempt each; refusals close honestly with her preset fallback;
+    throttle/session parks stay pending and count as parked in the
+    sweep's logged report. Runs on a thread, like process-pending."""
+    _require_admin(request)
+    known_ids = list(body.known_refused_ids) if body else []
+    known_error = body.known_refused_error if body else ""
+    count = custom_video.spawn_custom_video_backlog_sweep(
+        known_ids, known_error)
     return {"ok": True, "queued": count}
 
 

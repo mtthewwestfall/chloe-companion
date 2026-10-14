@@ -302,17 +302,21 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
 
 
 def _deliver_preset(conn: Any, user_id: str, girl_id: str,
-                    preset: dict[str, Any], *, during_render: bool) -> None:
+                    preset: dict[str, Any], *, during_render: bool,
+                    line: str | None = None) -> None:
     """Land a library preset in the chat + the preset endpoint's
-    progress bookkeeping (DB rows only)."""
+    progress bookkeeping (DB rows only). `line` overrides the spoken
+    line (the custom-video fallback speaks its own swap line); the
+    default lines are unchanged."""
     kind = preset["media_type"]
     ext = "mp4" if kind == "video" else \
         (preset["url"].split("?", 1)[0].rsplit(".", 1)[-1] or "jpg")
     attachments = [{"kind": kind, "url": preset["url"],
                     "name": f"{girl_id}-give.{ext}", "size": 0}]
-    line = ("here, babe — hold onto this one while I make your new one."
-            if during_render else
-            "here, babe — one of mine, just for you.")
+    if line is None:
+        line = ("here, babe — hold onto this one while I make your new one."
+                if during_render else
+                "here, babe — one of mine, just for you.")
     store.log_turn(conn, user_id, girl_id, line, girl_id, attachments)
     if preset.get("id"):
         try:

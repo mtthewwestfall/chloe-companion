@@ -344,15 +344,21 @@ CREATE TABLE IF NOT EXISTS gemini_keys (
 CREATE INDEX IF NOT EXISTS idx_gemini_keys_active ON gemini_keys(is_active, is_paid);
 
 -- Custom video requests (2026-10-07): users describe a custom video they
--- want; the server attempts Sogni generation in the background. Blocked or
--- failed generations stay `pending` for manual fulfillment by the owner.
+-- want; the server attempts Sogni generation in the background. Since
+-- 2026-10-14 a definitively refused/failed render closes the request
+-- honestly (`fallback` when a preset from her own library was delivered
+-- instead, `failed` when none was available) with the reason recorded in
+-- `error`; session/throttle transients park it back in `pending` with a
+-- "waiting: ..." note in `error`, give_gen-style.
 CREATE TABLE IF NOT EXISTS custom_video_requests (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id     TEXT NOT NULL,
     girl_id     TEXT NOT NULL,
     description TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | generating | fulfilled | manual
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | generating | fulfilled | manual | fallback | failed
     video_url   TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    fallback_url TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_custom_video_requests_user ON custom_video_requests(user_id);
@@ -633,6 +639,22 @@ def _migrate_give_gen_source(conn: sqlite3.Connection) -> None:
         pass  # already exists
 
 
+def _migrate_custom_video_columns(conn: sqlite3.Connection) -> None:
+    """Custom-video fallback fix (2026-10-14): a refused render records
+    its reason (`error`) and the preset delivered instead
+    (`fallback_url`) on the request row instead of leaving it an
+    eternal, unexplained `pending`."""
+    for col, ddl in [
+        ("error", "TEXT NOT NULL DEFAULT ''"),
+        ("fallback_url", "TEXT NOT NULL DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(
+                f"ALTER TABLE custom_video_requests ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError:
+            pass  # already exists (or the table isn't there yet)
+
+
 def _migrate_referral_columns(conn: sqlite3.Connection) -> None:
     """Referral program (2026-10-06): add referral columns to users."""
     for col, ddl in [
@@ -665,6 +687,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_conversation_attachments(conn)
         _migrate_girl_media_stage(conn)
         _migrate_give_gen_source(conn)
+        _migrate_custom_video_columns(conn)
         conn.executescript(SCHEMA)
         _migrate_girl_footage_no_fk(conn)
         conn.commit()

@@ -1232,20 +1232,33 @@ def get_custom_requests(conn: sqlite3.Connection, user_id: str | None = None,
 
 def update_custom_request(conn: sqlite3.Connection, request_id: int,
                           status: str,
-                          video_url: str | None = None) -> dict[str, Any] | None:
-    """Update a custom video request's status (and optional video URL)."""
-    if status not in ("pending", "generating", "fulfilled", "manual"):
+                          video_url: str | None = None,
+                          error: str | None = None,
+                          fallback_url: str | None = None) -> dict[str, Any] | None:
+    """Update a custom video request's status (and optionally its video
+    URL, its recorded failure/park reason, and the preset URL delivered
+    as fallback). Terminal states since 2026-10-14: `fallback` (render
+    definitively refused/failed, a preset from her own library was
+    delivered instead) and `failed` (same, but no preset available)."""
+    if status not in ("pending", "generating", "fulfilled", "manual",
+                      "fallback", "failed"):
         raise ValueError(f"invalid status: {status}")
+    sets = ["status = ?"]
+    params: list[Any] = [status]
     if video_url is not None:
-        conn.execute(
-            "UPDATE custom_video_requests SET status = ?, video_url = ? WHERE id = ?",
-            (status, video_url, request_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE custom_video_requests SET status = ? WHERE id = ?",
-            (status, request_id),
-        )
+        sets.append("video_url = ?")
+        params.append(video_url)
+    if error is not None:
+        sets.append("error = ?")
+        params.append(error)
+    if fallback_url is not None:
+        sets.append("fallback_url = ?")
+        params.append(fallback_url)
+    params.append(request_id)
+    conn.execute(
+        f"UPDATE custom_video_requests SET {', '.join(sets)} WHERE id = ?",
+        params,
+    )
     conn.commit()
     row = conn.execute(
         "SELECT * FROM custom_video_requests WHERE id = ?", (request_id,)
