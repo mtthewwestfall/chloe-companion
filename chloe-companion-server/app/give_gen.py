@@ -8,6 +8,7 @@ The admin can `approve` (adds the video to girl_media) or `delete` (marks as del
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import subprocess
 import tempfile
@@ -386,9 +387,14 @@ def _run_give_generation_job(gen_id: int) -> None:
 
 
 def spawn_give_generation_job(gen_id: int) -> None:
+    # Route through the single processor (below): a dedicated render
+    # thread per gen was one of the two concurrent Sogni clients that
+    # destroyed each other's session in production. The spawned
+    # thread only hands the id to the processor loop, which either
+    # becomes the processor or queues behind the running one.
     t = threading.Thread(
-        target=_run_give_generation_job,
-        args=(gen_id,),
+        target=_process_queued_give_generations,
+        args=([gen_id],),
         daemon=True,
         name=f"give-gen-{gen_id}",
     )
@@ -449,6 +455,76 @@ def trigger_daily_give_generations(day: str | None = None,
     return queued_ids
 
 
+# ---------------------------------------------------------------------------
+# Single give processor: exactly one worker thread drains the queue.
+#
+# Production failure (2026-10-13): the boot auto-loop's batch and a
+# manual generate-daily batch ran as two processor threads at once.
+# Each render creates its own Sogni client, the second client's
+# session superseded the first's, and both batches died at the SDK's
+# account check — the single-flight sign-in lock could not help,
+# because no sign-in was involved. So every trigger now hands its ids
+# to ONE shared pending queue: the first caller to find the processor
+# idle becomes it; callers that find it running just enqueue and
+# return. The processor drains the queue, then sweeps the DB for
+# unrendered queued rows (rows a trigger queued mid-drain, or rows a
+# dead processor left behind), and stands down only when both are
+# empty.
+_PROCESSOR_GUARD = threading.Lock()
+_PENDING_GIVE_IDS: collections.deque[int] = collections.deque()
+_GIVE_PROCESSOR_ACTIVE = False
+
+
+def _claim_next_queued_give_id(exclude: set[int]) -> int | None:
+    """Oldest unrendered queued generation (status 'pending' with no
+    result url yet), skipping ids this processor run already handled,
+    or None when nothing is left to drain."""
+    conn = db.connect()
+    try:
+        if exclude:
+            marks = ",".join("?" for _ in exclude)
+            row = conn.execute(
+                "SELECT id FROM give_generations WHERE status = 'pending' "
+                "AND (url IS NULL OR url = '') AND id NOT IN (" + marks + ") "
+                "ORDER BY id ASC LIMIT 1", tuple(exclude)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id FROM give_generations WHERE status = 'pending' "
+                "AND (url IS NULL OR url = '') "
+                "ORDER BY id ASC LIMIT 1").fetchone()
+        return int(row[0]) if row else None
+    finally:
+        conn.close()
+
+
 def _process_queued_give_generations(gen_ids: list[int]) -> None:
-    for gen_id in gen_ids:
-        _run_give_generation_job(gen_id)
+    """Enqueue ids and, when idle, become the single give processor.
+
+    Batch triggers spawn a thread targeting this, so the first
+    trigger's thread IS the processor and every later trigger's
+    thread just enqueues and exits — there is never a second
+    processor. Each queued row is processed exactly once per run.
+    """
+    global _GIVE_PROCESSOR_ACTIVE
+    with _PROCESSOR_GUARD:
+        _PENDING_GIVE_IDS.extend(gen_ids)
+        if _GIVE_PROCESSOR_ACTIVE:
+            return
+        _GIVE_PROCESSOR_ACTIVE = True
+    processed: set[int] = set()
+    try:
+        while True:
+            with _PROCESSOR_GUARD:
+                gen_id = _PENDING_GIVE_IDS.popleft() \
+                    if _PENDING_GIVE_IDS else None
+            if gen_id is None:
+                gen_id = _claim_next_queued_give_id(processed)
+            if gen_id is None:
+                return
+            if gen_id in processed:
+                continue
+            processed.add(gen_id)
+            _run_give_generation_job(gen_id)
+    finally:
+        with _PROCESSOR_GUARD:
+            _GIVE_PROCESSOR_ACTIVE = False

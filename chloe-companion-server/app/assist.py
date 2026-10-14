@@ -4045,7 +4045,21 @@ def _handle_image_request(conn: sqlite3.Connection, user_id: str,
 # ---------------------------------------------------------------------------
 _SOGNI_PLAN_SESSION = "sogni_plan_session"
 _SOGNI_ENV_DEAD = "sogni_env_session_dead"
-_SOGNI_RENDER_LOCK = threading.Lock()
+# THE one Sogni gate: at most one plan client is alive/used at any
+# moment in this process. Two live clients on the same session pair
+# invalidate each other — the second client's session supersedes the
+# first's, and every in-flight render dies at the SDK's account check
+# ("The account changed. Submit this request again.") — so plan
+# client creation, the account checks inside set_tokens, every
+# render, and every sign-in all pass through this one re-entrant
+# lock. Re-entrant because gated seams compose on a single thread
+# (a render's session_dead recovery re-login runs inside the
+# caller's flow). Blocking acquire: these are background paths, and
+# a feature that cannot get the gate simply waits its turn.
+_SOGNI_GATE = threading.RLock()
+# The render seam's historical name — the SAME lock object, so
+# _locked_render and every other gated path serialize together.
+_SOGNI_RENDER_LOCK = _SOGNI_GATE
 _SOGNI_PLAN_APP_ID = "companion-hannah-plan"
 _SOGNI_PLAN_PLACEHOLDER = "[sogni login]"
 _SOGNI_PLAN_WIDTH = 768
@@ -4957,22 +4971,26 @@ def sogni_login_single_flight(conn: sqlite3.Connection,
     pair, or None when the sign-in failed.
     """
     with _SOGNI_LOGIN_LOCK:
-        if dead_session:
-            current = stored_sogni_session(conn)
-            if current and not current.get("api_key") and \
-                    _session_fingerprint(current) != \
-                    _session_fingerprint(dead_session):
-                return current
-        try:
-            fresh = _sogni_plan_login(login)
-        except Exception as e:  # noqa: BLE001 — report the kind only
-            print("[assist] sogni sign-in failed ("
-                  + _sogni_failure_telemetry(e, redact=login) + ")",
-                  flush=True)
-            return None
-        if fresh:
-            store_sogni_session(conn, fresh)
-        return fresh
+        # Inside the global gate: the sign-in creates a Sogni client,
+        # and a live render client anywhere else in the process
+        # would invalidate (or be invalidated by) this sign-in.
+        with _SOGNI_GATE:
+            if dead_session:
+                current = stored_sogni_session(conn)
+                if current and not current.get("api_key") and \
+                        _session_fingerprint(current) != \
+                        _session_fingerprint(dead_session):
+                    return current
+            try:
+                fresh = _sogni_plan_login(login)
+            except Exception as e:  # noqa: BLE001 — report the kind only
+                print("[assist] sogni sign-in failed ("
+                      + _sogni_failure_telemetry(e, redact=login) + ")",
+                      flush=True)
+                return None
+            if fresh:
+                store_sogni_session(conn, fresh)
+            return fresh
 
 
 def resolve_dead_sogni_session(conn: sqlite3.Connection,
@@ -5240,8 +5258,11 @@ def perform_sogni_login(conn: sqlite3.Connection, user_id: str,
         # The single-flight gate: a user sign-in must never race a
         # feature's own sign-in (one in flight per process, or the
         # newer login invalidates the pair the other just stored).
+        # Inside the global Sogni gate, like every sign-in: the
+        # sign-in's client must never be live alongside a render's.
         with _SOGNI_LOGIN_LOCK:
-            session = _sogni_plan_login(login)
+            with _SOGNI_GATE:
+                session = _sogni_plan_login(login)
     except _SogniPlanError as e:
         _sogni_login_fail_times.setdefault(user_id, []).append(
             time.time())
@@ -5626,7 +5647,11 @@ def _sogni_plan_create_project_sync(session: dict, prompt: str,
                 pass
 
     try:
-        pid = asyncio.run(_create())
+        # Through the global gate: this creates a plan client, and a
+        # second live client anywhere in the process would kill both
+        # sessions at the SDK's account check.
+        with _SOGNI_GATE:
+            pid = asyncio.run(_create())
         return (pid, None) if pid else (None, "empty project id from Sogni")
     except Exception as e:  # noqa: BLE001
         return None, str(e)[:200]
