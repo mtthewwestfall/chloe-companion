@@ -5,6 +5,13 @@ Covers: table creation, masked admin listing, candidate ordering
 payment → needs_attention, set_active re-enable clearing flags,
 post_json failover (mocked HTTP), the fail-fast believed-healthy path,
 attempt caps, optional hedging, and the background prober.
+
+Efficiency pass (2026-10-15): error-class separation (transient
+failures pause briefly with no health damage; request-class failures
+blame no key and stop the walk), daily-usage pacing in candidate
+ordering, the unconditional fail-fast (no all-keys last-resort
+sweep), the leaner prober (per-cycle cap, near-expiry probing only),
+and error_class recorded on usage rows.
 """
 import json
 import os
@@ -48,11 +55,12 @@ class GeminiKeysTestBase(unittest.TestCase):
         gemini_keys._last_reserve_tap = None
         gemini_keys._probes_total = 0
         gemini_keys._probes_ok = 0
+        gemini_keys._transient_streaks.clear()
         self._env = {}
         for name in ("GEMINI_MAX_ATTEMPTS", "GEMINI_FAST_TIMEOUT_S",
                      "GEMINI_ATTEMPT_BUDGET_S", "GEMINI_HEDGE_AFTER_S",
                      "GEMINI_PER_KEY_RPM", "GEMINI_RESERVE_COUNT",
-                     "GEMINI_PROBER"):
+                     "GEMINI_PROBE_INTERVAL_S", "GEMINI_PROBER"):
             self._env[name] = os.environ.pop(name, None)
 
     def tearDown(self):
@@ -405,7 +413,11 @@ class TestProber(GeminiKeysTestBase):
         sent = gemini_keys._probe_cycle()
         self.assertEqual(sent, 1)
         row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
-        self.assertEqual(row["consecutive_failures"], 1)
+        # Error-class separation: a 500 is transient — the key is
+        # briefly paused (out of the fast path) but takes NO health
+        # damage: no consecutive-failure streak, never degraded.
+        self.assertEqual(row["consecutive_failures"], 0)
+        self.assertIsNotNone(row["quota_exhausted_until"])
         fast = [c[0] for c in gemini_keys._fast_candidates()]
         self.assertNotIn(k["id"], fast)
 
@@ -439,6 +451,215 @@ class TestMasking(GeminiKeysTestBase):
         masked = gemini_keys.mask_key("ABCDEFGHIJKLMNOP")
         self.assertNotIn("ABCDEFGHIJKL", masked)
         self.assertIn("MNOP", masked)  # last 4 visible
+
+
+class TestErrorClasses(GeminiKeysTestBase):
+    def test_classify_mapping(self):
+        c = gemini_keys._classify_http_error
+        self.assertEqual(c(429), "quota")
+        self.assertEqual(c(401), "payment")
+        self.assertEqual(c(402), "payment")
+        self.assertEqual(c(403), "payment")
+        self.assertEqual(c(500), "transient")
+        self.assertEqual(c(502), "transient")
+        self.assertEqual(c(503), "transient")
+        self.assertEqual(c(400), "request")
+        self.assertEqual(c(404), "request")
+
+    def test_transient_streak_never_degrades(self):
+        k = self._add("flaky-key", "f", False)
+        for _ in range(6):
+            gemini_keys.report_failure(k["id"], "transient")
+        row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
+        self.assertEqual(row["consecutive_failures"], 0)
+        self.assertEqual(row["needs_attention"], 0)
+        self.assertNotEqual(row["status"], "degraded")
+        self.assertNotEqual(row["status"], "needs_attention")
+        # Brief pause only: the window is a minute or less, not the
+        # minutes-to-hours quota ladder.
+        self.assertIsNotNone(row["quota_exhausted_until"])
+        # Once the pause passes the key is fully eligible again, and a
+        # success restores it completely.
+        self._sql("UPDATE gemini_keys SET quota_exhausted_until="
+                  "'2000-01-01 00:00:00' WHERE id=?", (k["id"],))
+        ids = [c[0] for c in gemini_keys.get_candidate_keys()]
+        self.assertIn(k["id"], ids)
+        gemini_keys.report_success(k["id"])
+        row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
+        self.assertEqual(row["status"], "healthy")
+
+    def test_transient_pause_ladder_caps_at_a_minute(self):
+        k = self._add("ladder-key", "l", False)
+        pauses = [gemini_keys._next_transient_pause_locked(k["id"])
+                  for _ in range(5)]
+        self.assertEqual(pauses, [15.0, 30.0, 60.0, 60.0, 60.0])
+
+    def test_auth_failure_flags_attention_via_classify(self):
+        k = self._add("auth-key", "a", False)
+        gemini_keys.report_failure(
+            k["id"], gemini_keys._classify_http_error(403))
+        row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
+        self.assertEqual(row["needs_attention"], 1)
+        self.assertEqual(row["status"], "needs_attention")
+
+    def test_request_failure_blames_no_key(self):
+        k = self._add("req-key", "r", False)
+        gemini_keys.report_failure(k["id"], "request")
+        row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
+        self.assertEqual(row["consecutive_failures"], 0)
+        self.assertEqual(row["total_failures"], 0)
+        self.assertIsNone(row["quota_exhausted_until"])
+        self.assertEqual(row["total_requests"], 1)  # counted, not blamed
+
+    def test_bad_request_stops_the_walk(self):
+        # A 400 means the call itself was bad: post_json must try ONE
+        # key, not sweep the pool at a request no key can serve.
+        for i in range(4):
+            self._add(f"br{i}", f"b{i}", False)
+        calls = []
+
+        def fake(url, payload, key_value, timeout):
+            calls.append(key_value)
+            raise _http_error(400)
+
+        with mock.patch.object(gemini_keys, "_http_post",
+                               side_effect=fake):
+            result = gemini_keys.post_json("https://example.com/gen",
+                                           {"x": 1})
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 1)
+
+    def test_usage_rows_carry_error_class(self):
+        self._add("quota-key", "q", False)
+        self._add("flaky-key", "f", False)
+        self._add("good-key", "g", False)
+        self._add("spare-key", "s", False)  # highest id = reserve
+
+        def behavior(url, payload, key_value, timeout):
+            if key_value == "quota-key":
+                raise _http_error(429)
+            if key_value == "flaky-key":
+                raise _http_error(503)
+            return {"ok": True}
+
+        with mock.patch.object(gemini_keys, "_http_post",
+                               side_effect=behavior):
+            result = gemini_keys.post_json("https://example.com/gen",
+                                           {"x": 1}, source="class-src")
+        self.assertIsNotNone(result)
+        rows = [u for u in gemini_keys.get_usage(10)
+                if u["source"] == "class-src"]
+        failures = sorted(u["error_class"] for u in rows if not u["success"])
+        self.assertEqual(failures, ["quota", "transient"])
+        successes = [u for u in rows if u["success"]]
+        self.assertEqual(len(successes), 1)
+        self.assertIsNone(successes[0]["error_class"])
+
+
+class TestPacing(GeminiKeysTestBase):
+    def test_daily_count_spreads_candidates(self):
+        keys = [self._add(f"pk{i}", f"p{i}", False) for i in range(4)]
+        busy = keys[0]
+        for _ in range(3):
+            gemini_keys.report_success(busy["id"])
+        # Neutralize the LRU tiebreak so only today's count decides.
+        self._sql("UPDATE gemini_keys SET last_used_at=NULL")
+        ids = [c[0] for c in gemini_keys.get_candidate_keys()]
+        actives = ids[:3]  # 4 keys -> highest id is the reserve
+        self.assertNotEqual(actives[0], busy["id"])
+        self.assertEqual(actives[-1], busy["id"])
+
+    def test_day_count_resets_on_new_day(self):
+        k = self._add("day-key", "d", False)
+        gemini_keys.report_success(k["id"])
+        self._sql("UPDATE gemini_keys SET day_stamp='2000-01-01'"
+                  " WHERE id=?", (k["id"],))
+        conn = gemini_keys.db.connect()
+        try:
+            gemini_keys._ensure_table(conn)
+            row = conn.execute(
+                "SELECT * FROM gemini_keys WHERE id=?",
+                (k["id"],)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(gemini_keys._day_count(row), 0)
+        gemini_keys.report_success(k["id"])  # a fresh day starts at 1
+        conn = gemini_keys.db.connect()
+        try:
+            row = conn.execute(
+                "SELECT day_requests FROM gemini_keys WHERE id=?",
+                (k["id"],)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["day_requests"], 1)
+
+
+class TestFailFastEverywhere(GeminiKeysTestBase):
+    def test_no_sweep_when_nothing_eligible(self):
+        # Every key inside a quota backoff: post_json must make ONE
+        # decision and return with zero attempts — for a plain source
+        # too, not just fail-fast/voice ones (the all-keys last-resort
+        # sweep is gone).
+        for i in range(3):
+            k = self._add(f"cool{i}", f"c{i}", False)
+            gemini_keys.report_failure(k["id"], "quota")
+        calls = []
+
+        def fake(url, payload, key_value, timeout):
+            calls.append(key_value)
+            return {"ok": True}
+
+        with mock.patch.object(gemini_keys, "_http_post",
+                               side_effect=fake):
+            result = gemini_keys.post_json("https://example.com/gen",
+                                           {"x": 1}, source="plain-app")
+        self.assertIsNone(result)
+        self.assertEqual(calls, [])
+
+
+class TestLeanProber(GeminiKeysTestBase):
+    def _patch_http(self, behavior):
+        calls = []
+
+        def fake(url, payload, key_value, timeout):
+            calls.append(key_value)
+            return behavior(key_value)
+
+        patcher = mock.patch.object(gemini_keys, "_http_post",
+                                    side_effect=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_prober_cycle_cap(self):
+        for i in range(8):
+            self._add(f"cap{i}", f"c{i}", False)
+        calls = self._patch_http(lambda kv: {"ok": True})
+        sent = gemini_keys._probe_cycle()
+        self.assertEqual(sent, gemini_keys._PROBE_MAX_PER_CYCLE)
+        self.assertEqual(len(calls), gemini_keys._PROBE_MAX_PER_CYCLE)
+
+    def test_prober_skips_deep_cooldown(self):
+        k = self._add("deep-key", "d", False)
+        gemini_keys.report_failure(k["id"], "quota")  # 5-min window
+        calls = self._patch_http(lambda kv: {"ok": True})
+        sent = gemini_keys._probe_cycle()
+        self.assertEqual(sent, 0)
+        self.assertEqual(calls, [])
+
+    def test_prober_confirm_window_is_lean(self):
+        k = self._add("idle-key", "i", False)
+        gemini_keys.report_success(k["id"])
+        # Belief is 300s old: fresher than the 420s confirm window, so
+        # no re-confirm probe (the old code re-probed at 120s).
+        gemini_keys._belief[k["id"]]["at"] = time.time() - 300
+        calls = self._patch_http(lambda kv: {"ok": True})
+        gemini_keys._probe_cycle()
+        self.assertEqual(calls, [])
+        # At 500s (> confirm window, < belief TTL) it re-confirms.
+        gemini_keys._belief[k["id"]]["at"] = time.time() - 500
+        gemini_keys._probe_cycle()
+        self.assertEqual(calls, ["idle-key"])
 
 
 if __name__ == "__main__":

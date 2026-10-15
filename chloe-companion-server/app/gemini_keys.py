@@ -16,12 +16,30 @@ Health model per key:
 - 429 / quota errors: exponential backoff via quota_exhausted_until
   (5 min, 15 min, 1 h, 4 h). The key is skipped until the window passes,
   then retried automatically.
-- 402 / payment errors: needs_attention = 1 (surfaced in admin); the key
-  is skipped until an admin re-enables or fixes it.
-- Other errors (5xx, network, timeout): counted, 2-minute backoff applied
-  so the next request immediately tries a different key instead of
-  retrying the same failing key. The key becomes eligible again quickly
-  if the issue was transient.
+- 401 / 402 / 403 (auth/payment class): needs_attention = 1 (surfaced
+  in admin); the key is skipped until an admin re-enables or fixes it.
+- Error-class separation (efficiency pass, 2026-10-15): failures are
+  classified before they touch key health, because a flaky upstream
+  minute is not a quota wall.
+  - TRANSIENT (5xx, timeouts, connection drops): a brief pause only
+    (15 s, 30 s, then 60 s cap, via quota_exhausted_until so selection
+    skips the key), and NO health consequences: consecutive_failures is
+    untouched, the key never degrades or needs attention over a
+    transient streak, and the next success restores it fully.
+  - REQUEST (other 4xx — the call itself was bad, e.g. 400/404): no key
+    consequence at all (not even a failure count), and post_json stops
+    trying further keys for that call — a different key cannot fix a
+    bad request.
+  Every usage row records its error class (quota / payment /
+  transient / request) so failure rates can be reported by class.
+
+Pacing (efficiency pass, 2026-10-15): each key tracks its own daily
+request count (day_requests / day_stamp, UTC). Candidate ordering —
+both the classic sweep and the believed-healthy fast path — prefers,
+among equally healthy keys, the one with the fewest requests today,
+then least-recently-used. Daily per-project quotas are therefore
+sipped evenly through the day instead of the pool draining in a clump
+by midday and recovering in a clump at midnight.
 
 Thread-safe: a module-level lock guards key selection and counter
 updates. Network I/O happens outside the lock. Each call opens and closes
@@ -33,15 +51,17 @@ every other secret here is an env var). The admin list endpoint only ever
 returns masked values ("...abcd"). Never log full key values.
 
 Hardening (bulletproofing) notes:
-- Circuit breaker: 3 consecutive failures of any kind pulls a key from
-  rotation for at least 5 minutes (transient-error backoff ladder is
-  (2, 2, 5, 15, 60) minutes; quota errors keep their own ladder).
+- Quota errors circuit-break on their own ladder (5, 15, 60, 240
+  minutes). Transient errors never circuit-break: their pause ladder
+  is seconds-scale (15, 30, 60 s) and carries no health consequences
+  (see error-class separation above).
 - Per-key rate limiting: dispatches per key are tracked in-memory (per
   process) over a rolling 60s window. Keys at/over GEMINI_PER_KEY_RPM
   (default 12) are skipped so rotation moves on before a 429 hits.
 - Healthiest-first ordering: among eligible keys, free keys come first,
   then lowest health score (consecutive failures x10 + failures in the
-  last 5 min x5 + latency penalty), then least-recently-used.
+  last 5 min x5 + latency penalty), then fewest requests today, then
+  least-recently-used.
 - Degraded mode: when the reserve pool is tapped, is_degraded() is true
   for 10 minutes; the per-key RPM limit is automatically halved and
   /api/v1/admin/gemini-health exposes the signal so callers can slow
@@ -51,19 +71,30 @@ Efficiency model (fail-fast + background prober):
 - A background prober thread keeps an in-memory "believed healthy" view
   of the pool fresh OFF the request path: it re-checks keys whose state
   is unknown or stale with a 1-token generation (never needs_attention
-  or disabled keys, never inside a backoff window, never when real
-  traffic already produced fresher evidence). A key that recovers is
-  believed healthy again within ~a probe cycle (~20s) of its backoff
-  expiring, instead of whenever the next unlucky request discovers it.
+  or disabled keys, never deep inside a backoff window — only at/near
+  expiry — and never when real traffic already produced fresher
+  evidence). A key that recovers is believed healthy again within ~a
+  probe cycle of its backoff expiring, instead of whenever the next
+  unlucky request discovers it. The prober is deliberately lean
+  (efficiency pass): 30s cadence, at most 4 probes per cycle, a
+  believed-healthy key is only re-confirmed after ~7 idle minutes
+  (belief itself lasts 10), and a key is never probed more often than
+  every 2 minutes — prober rows are a small minority of the usage log.
 - post_json() tries believed-healthy keys first (active pool, free-first,
-  latency-ranked) with a short per-attempt timeout
-  (GEMINI_FAST_TIMEOUT_S, default 8s) and fails over immediately — no
-  sleeping on the request path; all backoff intelligence lives in the
-  health state written by real attempts and the prober. If nothing is
-  believed healthy (cold start, all keys sick), it falls back to the
-  classic eligible-key sweep, then the all-active last-resort sweep —
-  same semantics as before, bounded by GEMINI_MAX_ATTEMPTS (default 8)
-  and GEMINI_ATTEMPT_BUDGET_S (default 50s) per call.
+  ranked by today's usage then latency) with a short per-attempt
+  timeout (GEMINI_FAST_TIMEOUT_S, default 8s) and fails over
+  immediately — no sleeping on the request path; all backoff
+  intelligence lives in the health state written by real attempts and
+  the prober. If nothing is believed healthy (cold start, all keys
+  sick), it falls back to the classic eligible-key sweep. When nothing
+  is believed healthy AND nothing is eligible, post_json makes ONE
+  no-healthy-key decision and returns None — for every source, not
+  just fail-fast ones. There is no all-keys last-resort sweep anymore:
+  firing guaranteed-failure attempts at keys inside their backoff
+  windows only re-arms those backoffs and pushes recovery out (the
+  2026-10-14 pool-sweep lesson). Attempts stay bounded by
+  GEMINI_MAX_ATTEMPTS (default 8) and GEMINI_ATTEMPT_BUDGET_S
+  (default 50s) per call.
 - Optional hedging (GEMINI_HEDGE_AFTER_S > 0): if the first fast attempt
   runs longer than that many seconds, a second believed-healthy key is
   raced in parallel; at most 2 requests are ever in flight. Off by
@@ -95,10 +126,14 @@ logger = logging.getLogger(__name__)
 # Backoff ladder for quota/429 failures, indexed by consecutive_failures.
 _BACKOFF_MINUTES = (5, 15, 60, 240)
 
-# Circuit-breaker ladder for transient ("other") errors, indexed by
-# consecutive_failures. After 3 consecutive failures of any kind a key is
-# pulled from rotation for at least 5 minutes.
-_OTHER_BACKOFF_MINUTES = (2, 2, 5, 15, 60)
+# Pause ladder (SECONDS) for transient errors — 5xx, timeouts, network
+# drops — indexed by the key's current transient streak. A transient
+# failure is a brief pause only: it never increments
+# consecutive_failures and never degrades the key (error-class
+# separation, 2026-10-15).
+_TRANSIENT_PAUSE_S = (15.0, 30.0, 60.0)
+# A transient streak older than this starts over at the ladder's foot.
+_TRANSIENT_STREAK_RESET_S = 600.0
 
 # Per-key rate-limiting windows (in-memory, per process).
 _DISPATCH_WINDOW_S = 60.0
@@ -127,15 +162,23 @@ _ATTEMPT_BUDGET_DEFAULT_S = 50.0
 _UNKNOWN_LATENCY_S = 2.0
 # A confirmed success keeps a key "believed healthy" for this long
 # (real traffic and the prober refresh it well before it lapses).
-_BELIEF_TTL_S = 180.0
+_BELIEF_TTL_S = 600.0
 
 # --- Background prober ------------------------------------------------------
+# Lean settings (efficiency pass, 2026-10-15): the prober used to
+# generate the overwhelming majority of usage-log rows (455 of the last
+# 500 at the 2026-10-15 baseline) by re-confirming idle healthy keys
+# every ~2 minutes. It now wakes every 30s, sends at most
+# _PROBE_MAX_PER_CYCLE probes (recovery checks first), re-confirms an
+# idle healthy key only after _PROBE_CONFIRM_S, and never probes the
+# same key more often than _PROBE_MIN_INTERVAL_S.
 _PROBE_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
               "gemini-3.1-flash-lite:generateContent")
-_PROBE_INTERVAL_DEFAULT_S = 20.0   # prober wake-up cadence
-_PROBE_CONFIRM_S = 120.0           # re-confirm an idle healthy key (< TTL)
-_PROBE_MIN_INTERVAL_S = 45.0       # never probe the same key more often
-_PROBE_QUIET_S = 45.0              # real traffic fresher than this = no probe
+_PROBE_INTERVAL_DEFAULT_S = 30.0   # prober wake-up cadence
+_PROBE_CONFIRM_S = 420.0           # re-confirm an idle healthy key (< TTL)
+_PROBE_MIN_INTERVAL_S = 120.0      # never probe the same key more often
+_PROBE_QUIET_S = 120.0             # real traffic fresher than this = no probe
+_PROBE_MAX_PER_CYCLE = 4           # hard cap on probes sent per cycle
 _PROBE_TIMEOUT_S = 12.0
 
 # In-memory per-process state, guarded by _lock. The DB columns remain
@@ -159,6 +202,12 @@ _last_probe_mono: dict[int, float] = {}  # key_id -> monotonic time of last prob
 _prober_last_cycle_at: float | None = None
 _probes_total = 0
 _probes_ok = 0
+
+# Transient-failure streaks, guarded by _lock: key_id -> (streak count,
+# monotonic time of last transient failure). In-memory only — a
+# process restart simply restarts every streak at the ladder's foot,
+# which is the forgiving direction.
+_transient_streaks: dict[int, tuple[int, float]] = {}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -293,6 +342,36 @@ def _health_score(key_id: int, consecutive_failures: int) -> float:
     return score
 
 
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _day_count(row) -> int:
+    """Requests a key has served today (UTC), for pacing. Rows written
+    before the day-counter migration (or stamped on another day) count
+    as zero — every key starts each UTC day even."""
+    try:
+        stamp = row["day_stamp"]
+        count = row["day_requests"]
+    except (KeyError, IndexError):
+        return 0
+    if not stamp or not count:
+        return 0
+    return int(count) if stamp == _today_utc() else 0
+
+
+def _next_transient_pause_locked(key_id: int) -> float:
+    """Record a transient failure for key_id and return its pause in
+    seconds (15 -> 30 -> 60 cap). Caller must hold _lock."""
+    now = time.monotonic()
+    streak, last = _transient_streaks.get(key_id, (0, 0.0))
+    if now - last > _TRANSIENT_STREAK_RESET_S:
+        streak = 0
+    streak += 1
+    _transient_streaks[key_id] = (streak, now)
+    return _TRANSIENT_PAUSE_S[min(streak - 1, len(_TRANSIENT_PAUSE_S) - 1)]
+
+
 def _seed_belief_locked(conn) -> None:
     """Seed the believed-healthy view from persisted health at first use,
     so a restart starts from the last known pool state instead of
@@ -410,7 +489,8 @@ CREATE TABLE IF NOT EXISTS gemini_key_usage (
     key_id     INTEGER,
     source     TEXT NOT NULL DEFAULT 'unknown',
     success    INTEGER NOT NULL DEFAULT 0,
-    latency_ms INTEGER
+    latency_ms INTEGER,
+    error_class TEXT
 )
 """
 
@@ -429,23 +509,49 @@ def _ensure_table(conn) -> None:
     if "last_used_at" not in cols:
         conn.execute("ALTER TABLE gemini_keys ADD COLUMN last_used_at TEXT")
         conn.commit()
+    if "day_requests" not in cols:
+        # Per-key daily request counter (pacing): how many requests
+        # this key served on day_stamp (UTC date). Incremented by the
+        # report_* paths via SQL CASE so it resets itself daily.
+        conn.execute(
+            "ALTER TABLE gemini_keys ADD COLUMN day_requests"
+            " INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE gemini_keys ADD COLUMN day_stamp TEXT")
+        conn.commit()
     ucols = [r["name"] for r in conn.execute("PRAGMA table_info(gemini_key_usage)").fetchall()]
     if ucols and "latency_ms" not in ucols:
         conn.execute("ALTER TABLE gemini_key_usage ADD COLUMN latency_ms INTEGER")
         conn.commit()
+    if ucols and "error_class" not in ucols:
+        # Failure classification per usage row (quota / payment /
+        # transient / request; NULL on success and on pre-migration
+        # rows) so failure rates can be reported by class.
+        conn.execute("ALTER TABLE gemini_key_usage ADD COLUMN error_class TEXT")
+        conn.commit()
+
+
+# SQL fragment (used inside the report_* UPDATEs) that bumps a key's
+# daily request counter, resetting it when the stored stamp is not
+# today (UTC). Keeps pacing state in the same write as the outcome.
+_DAY_BUMP_SQL = ("day_requests = CASE WHEN day_stamp = date('now')"
+                 " THEN day_requests + 1 ELSE 1 END,"
+                 " day_stamp = date('now'),")
 
 
 def _log_usage(conn, key_id: int | None, source: str, success: bool,
-               latency_ms: int | None = None) -> None:
+               latency_ms: int | None = None,
+               error_class: str | None = None) -> None:
     """Lightweight per-request log: which app used which key, whether
-    it worked, and how long the attempt took. Powers the admin usage
-    endpoint and before/after efficiency measurement."""
+    it worked, how long the attempt took, and — on failure — which
+    error class it belonged to. Powers the admin usage endpoint and
+    before/after efficiency measurement."""
     try:
         conn.execute(
-            "INSERT INTO gemini_key_usage (key_id, source, success, latency_ms)"
-            " VALUES (?, ?, ?, ?)",
+            "INSERT INTO gemini_key_usage"
+            " (key_id, source, success, latency_ms, error_class)"
+            " VALUES (?, ?, ?, ?, ?)",
             (key_id, (source or "unknown")[:64], 1 if success else 0,
-             latency_ms),
+             latency_ms, error_class),
         )
         # Keep the table small: retain the most recent 5000 rows.
         conn.execute(
@@ -530,7 +636,8 @@ def _eligible_rows(conn, only_ids: set[int] | None = None):
     _seed_legacy_key(conn)
     if only_ids is not None and not only_ids:
         return []
-    query = """SELECT id, key_value, is_paid, consecutive_failures, last_used_at
+    query = """SELECT id, key_value, is_paid, consecutive_failures, last_used_at,
+                    day_requests, day_stamp
            FROM gemini_keys
            WHERE is_active = 1
              AND needs_attention = 0
@@ -550,9 +657,12 @@ def _eligible_rows(conn, only_ids: set[int] | None = None):
 
 def _order_by_health(rows) -> list[tuple[int, str]]:
     """Order eligible keys: free keys first, then healthiest first,
-    rotating least-recently-used among equally healthy keys."""
+    then fewest requests served today (pacing: spread the day's load
+    so per-project quotas drain evenly instead of in a clump), then
+    least-recently-used."""
     def keyfn(r):
         return (_health_score(r["id"], r["consecutive_failures"]),
+                _day_count(r),
                 r["last_used_at"] or "")
 
     free = sorted((r for r in rows if not r["is_paid"]), key=keyfn)
@@ -607,6 +717,8 @@ def _fast_candidates() -> list[tuple[int, str]]:
     the per-key rate cap. Active pool first; the reserve pool appears
     only when no active key is believed healthy (reserve rules, incl.
     the degraded-mode tap signal, are preserved). Ordered free-first,
+    then by fewest requests served today (pacing: never immediately
+    re-hit the key that just served while other healthy keys exist),
     then by recent latency, then least-recently-used. Empty when nothing
     is believed healthy — the caller then uses the classic sweep."""
     global _last_reserve_tap
@@ -633,6 +745,7 @@ def _fast_candidates() -> list[tuple[int, str]]:
             b = _belief.get(r["id"]) or {}
             lat = b.get("lat")
             return (0 if not r["is_paid"] else 1,
+                    _day_count(r),
                     lat if lat is not None else _UNKNOWN_LATENCY_S,
                     r["last_used_at"] or "")
 
@@ -696,6 +809,7 @@ def report_success(key_id: int) -> None:
                        last_success_at = ?,
                        last_used_at = ?,
                        total_requests = total_requests + 1,
+                       """ + _DAY_BUMP_SQL + """
                        quota_exhausted_until = NULL
                    WHERE id = ?""",
                 (_now_str(), _now_str(), key_id),
@@ -703,22 +817,55 @@ def report_success(key_id: int) -> None:
             conn.commit()
         finally:
             conn.close()
+        # A success fully restores the key: any transient streak is
+        # forgiven along with the failure counters.
+        _transient_streaks.pop(key_id, None)
         entry = _belief_entry_locked(key_id)
         entry["ok"] = True
         entry["at"] = time.time()
 
 
 def report_failure(key_id: int, error_type: str) -> None:
-    """error_type: 'quota' (429), 'payment' (402), or 'other'."""
+    """Record a failed attempt, by error class (2026-10-15 separation):
+
+    - 'quota' (429): exponential backoff ladder (5, 15, 60, 240 min via
+      quota_exhausted_until) and +1 consecutive_failures — a real wall.
+    - 'payment' (401/402/403 auth class): needs_attention = 1 and +1
+      consecutive_failures — a real wall an admin must clear.
+    - 'transient' (5xx, timeout, network drop; 'other' is accepted as
+      a legacy alias): a brief pause only — 15/30/60 seconds by streak,
+      written to quota_exhausted_until so selection skips the key —
+      with NO health consequences: consecutive_failures is untouched,
+      the recent-failure ranking signal is untouched, and the key can
+      never degrade or need attention over transient errors. The next
+      success restores it fully.
+    - 'request' (other 4xx — the call itself was bad): the request is
+      counted, nothing else. No failure count, no pause, no belief
+      change; the key did nothing wrong.
+    """
+    if error_type == "other":
+        error_type = "transient"
     with _lock:
         conn = db.connect()
         try:
             _ensure_table(conn)
             row = conn.execute(
-                "SELECT consecutive_failures FROM gemini_keys WHERE id = ?",
+                "SELECT consecutive_failures, quota_exhausted_until"
+                " FROM gemini_keys WHERE id = ?",
                 (key_id,),
             ).fetchone()
             if not row:
+                return
+            if error_type == "request":
+                conn.execute(
+                    """UPDATE gemini_keys
+                       SET total_requests = total_requests + 1,
+                           """ + _DAY_BUMP_SQL + """
+                           last_used_at = ?
+                       WHERE id = ?""",
+                    (_now_str(), key_id),
+                )
+                conn.commit()
                 return
             failures = (row["consecutive_failures"] or 0) + 1
             if error_type == "quota":
@@ -731,10 +878,12 @@ def report_failure(key_id: int, error_type: str) -> None:
                            last_failure_at = ?,
                            total_requests = total_requests + 1,
                            total_failures = total_failures + 1,
+                           """ + _DAY_BUMP_SQL + """
                            quota_exhausted_until = ?
                        WHERE id = ?""",
                     (failures, _now_str(), until, key_id),
                 )
+                _note_failure_locked(key_id)
             elif error_type == "payment":
                 conn.execute(
                     """UPDATE gemini_keys
@@ -742,32 +891,32 @@ def report_failure(key_id: int, error_type: str) -> None:
                            last_failure_at = ?,
                            total_requests = total_requests + 1,
                            total_failures = total_failures + 1,
+                           """ + _DAY_BUMP_SQL + """
                            needs_attention = 1
                        WHERE id = ?""",
                     (failures, _now_str(), key_id),
                 )
-            else:
-                # Circuit breaker for transient errors (5xx, timeout,
-                # network): 2-minute backoff for the first couple of
-                # failures so the next request immediately tries a
-                # different key, then 5+ minutes once a key shows a real
-                # failure streak — pull it from rotation fast instead of
-                # letting it burn requests.
-                wait = _OTHER_BACKOFF_MINUTES[
-                    min(failures - 1, len(_OTHER_BACKOFF_MINUTES) - 1)]
-                until = (datetime.now(timezone.utc)
-                         + timedelta(minutes=wait)).strftime("%Y-%m-%d %H:%M:%S")
+                _note_failure_locked(key_id)
+            else:  # transient
+                pause_s = _next_transient_pause_locked(key_id)
+                until_dt = datetime.now(timezone.utc) + timedelta(
+                    seconds=pause_s)
+                until = until_dt.strftime("%Y-%m-%d %H:%M:%S")
+                # Never shorten a longer window already in force
+                # (e.g. a quota backoff the key is also serving).
+                existing = _parse_ts(row["quota_exhausted_until"])
+                if existing is not None and existing > until_dt.timestamp():
+                    until = row["quota_exhausted_until"]
                 conn.execute(
                     """UPDATE gemini_keys
-                       SET consecutive_failures = ?,
-                           last_failure_at = ?,
+                       SET last_failure_at = ?,
                            total_requests = total_requests + 1,
                            total_failures = total_failures + 1,
+                           """ + _DAY_BUMP_SQL + """
                            quota_exhausted_until = ?
                        WHERE id = ?""",
-                    (failures, _now_str(), until, key_id),
+                    (_now_str(), until, key_id),
                 )
-            _note_failure_locked(key_id)
             conn.commit()
         finally:
             conn.close()
@@ -797,11 +946,20 @@ def retry_exhausted() -> int:
 
 
 def _classify_http_error(code: int | None) -> str:
+    """Map an upstream HTTP status to an error class (separation,
+    2026-10-15): 429 is a quota wall; 401/402/403 are the auth/payment
+    class (real consequences); 5xx is transient (a flaky upstream
+    minute, not the key's fault); any other 4xx means the request
+    itself was bad ('request') and no key could have served it."""
     if code == 429:
         return "quota"
-    if code == 402:
+    if code in (401, 402, 403):
         return "payment"
-    return "other"
+    if code is not None and 500 <= code <= 599:
+        return "transient"
+    if code is not None and 400 <= code <= 499:
+        return "request"
+    return "transient"
 
 
 def _all_active_keys() -> list[tuple[int, str]]:
@@ -835,11 +993,13 @@ def _http_post(url: str, payload: dict, key_value: str, timeout: float) -> dict:
 
 
 def _attempt(key_id: int, key_value: str, url: str, payload: dict,
-             timeout: float, source: str) -> tuple[bool, dict | None, float]:
+             timeout: float, source: str) -> tuple[bool, dict | None, float, str | None]:
     """One attempt against one key. Records the dispatch, latency, health
-    outcome and usage row. Returns (ok, data, seconds_taken). All failure
-    semantics (backoff ladders, needs_attention, circuit breaker) are the
-    classic report_failure ones — an attempt never sleeps."""
+    outcome and usage row. Returns (ok, data, seconds_taken,
+    error_class) where error_class is None on success and one of
+    'quota' / 'payment' / 'transient' / 'request' on failure. All
+    failure semantics live in report_failure — an attempt never
+    sleeps."""
     with _lock:
         _record_dispatch_locked(key_id)
     start = time.monotonic()
@@ -853,20 +1013,23 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
         except Exception:
             _err_body = ""
         logger.warning(
-            "gemini_keys attempt failed: source=%s key_id=%s http=%s %s",
-            source, key_id, e.code, _err_body)
+            "gemini_keys attempt failed: source=%s key_id=%s http=%s "
+            "class=%s %s",
+            source, key_id, e.code, error_type, _err_body)
     except Exception:
-        error_type = "other"
+        # Timeouts, connection drops, DNS, malformed responses: the
+        # transient class — brief pause, no health consequences.
+        error_type = "transient"
     seconds = time.monotonic() - start
     with _lock:
         _record_latency_locked(key_id, seconds)
     if error_type is None:
         report_success(key_id)
         _log_usage_conn(key_id, source, True, seconds)
-        return True, data, seconds
+        return True, data, seconds, None
     report_failure(key_id, error_type)
-    _log_usage_conn(key_id, source, False, seconds)
-    return False, None, seconds
+    _log_usage_conn(key_id, source, False, seconds, error_type)
+    return False, None, seconds, error_type
 
 
 def _try_candidates(candidates, url, payload, timeout, source, tried,
@@ -874,7 +1037,9 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
     """Try candidates in order until one succeeds. `tried` (set of key
     ids) and `state` ({"n": attempts made, "deadline": monotonic}) are
     shared across the phases of one post_json call so the attempt cap
-    and time budget hold globally."""
+    and time budget hold globally. A 'request'-class failure (the call
+    itself was bad) sets state["fatal"] and stops the walk: no other
+    key can fix a bad request."""
     for key_id, key_value in candidates:
         if key_id in tried:
             continue
@@ -882,10 +1047,13 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
             break
         tried.add(key_id)
         state["n"] += 1
-        ok, data, _seconds = _attempt(key_id, key_value, url, payload,
-                                      timeout, source)
+        ok, data, _seconds, error_type = _attempt(
+            key_id, key_value, url, payload, timeout, source)
         if ok:
             return data
+        if error_type == "request":
+            state["fatal"] = "request"
+            break
     return None
 
 
@@ -932,9 +1100,14 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                 continue
             for fut in done:
                 pending.pop(fut, None)
-                ok, data, _seconds = fut.result()
+                ok, data, _seconds, error_type = fut.result()
                 if ok:
                     return data
+                if error_type == "request":
+                    # The call itself was bad; racing more keys at it
+                    # cannot help.
+                    state["fatal"] = "request"
+                    return None
             # A failure drained: top up to one running attempt.
             while len(pending) < 1:
                 if not launch():
@@ -953,32 +1126,37 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     Fail-fast phases (no sleeping anywhere on the request path):
     1. Believed-healthy keys (kept fresh by the background prober and by
        real attempt outcomes): tried with a short per-attempt timeout,
-       active pool first, free first, latency-ranked. Optionally hedged
-       (GEMINI_HEDGE_AFTER_S) with at most 2 requests in flight.
+       active pool first, free first, ranked by today's usage then
+       latency. Optionally hedged (GEMINI_HEDGE_AFTER_S) with at most
+       2 requests in flight.
     2. The classic eligible-key sweep (free first, healthiest first) at
        the caller's timeout — covers cold starts and stale belief.
-    3. Last resort: all active keys ignoring backoff, as before.
+    3. Only when every active key has just failed into a pause/backoff:
+       one bounded pass over eligible RESERVE keys (their backoff
+       windows still respected), per the reserve pool's own rule.
+    There is no ignore-backoff all-keys sweep.
 
-    Every failure records health (backoff so later requests skip the
-    key) and the next key is tried immediately. Attempts per call are
+    Every failure records health (by error class — see report_failure)
+    and the next key is tried immediately. Attempts per call are
     capped (GEMINI_MAX_ATTEMPTS) inside a total time budget
-    (GEMINI_ATTEMPT_BUDGET_S). Returns the parsed JSON response, or None
-    when every attempt failed / no keys exist.
+    (GEMINI_ATTEMPT_BUDGET_S). Returns the parsed JSON response, or
+    None when every attempt failed / no keys exist.
 
     `source` names the calling app (e.g. "whispr-web", "creator-bot");
     each attempt is logged to gemini_key_usage for the admin endpoint.
 
-    `fail_fast` (also auto-enabled for live-voice sources — see
-    _FAIL_FAST_SOURCE_PREFIXES): when the manager knows nothing can
-    serve — no key believed healthy AND no key even eligible (every
-    key is inside a backoff window or flagged) — return None with
-    ZERO attempts instead of running phase 3's all-keys sweep. That
-    sweep fires up to the attempt cap of guaranteed-failure requests
-    per call, and every failed attempt re-stamps the key's backoff,
-    pushing pool recovery further out. Voice traffic makes many
-    calls per minute on a live call, so one Rover utterance used to
-    burn up to 16 doomed attempts (2026-10-14). The background
-    prober still finds recovery; the next call succeeds normally.
+    Fail-fast is unconditional since the 2026-10-15 efficiency pass
+    (the `fail_fast` parameter and the live-voice source prefix are
+    kept for compatibility but no longer change anything): when the
+    manager knows nothing can serve — no key believed healthy AND no
+    key even eligible (every key is inside a backoff window or
+    flagged) — post_json returns None with ZERO attempts instead of
+    sweeping every key. That sweep fired up to the attempt cap of
+    guaranteed-failure requests per call, and every failed attempt
+    re-stamped the key's backoff, pushing pool recovery further out —
+    one Rover utterance used to burn up to 16 doomed attempts
+    (2026-10-14). The background prober still finds recovery; the
+    next call succeeds normally.
     """
     if not fail_fast and (source or "").startswith(
             _FAIL_FAST_SOURCE_PREFIXES):
@@ -1023,13 +1201,16 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                                    source, tried, state)
         if data is not None:
             return data
+        if state.get("fatal"):
+            return None
     sweep = _only_free(get_candidate_keys())
-    if fail_fast and not sweep:
+    if not sweep:
         # Nothing believed healthy (phase 1 empty or all its attempts
-        # just failed into backoff) and nothing eligible for phase 2:
-        # the pool is known down. Phase 3 would only re-fire keys
-        # whose backoff says they are out — guaranteed failures that
-        # re-arm those backoffs. Fail with this one decision instead.
+        # just failed into a pause/backoff) and nothing eligible for
+        # phase 2: the pool is known down. Make the one no-healthy-key
+        # decision and return — never sweep keys whose backoff says
+        # they are out; those attempts almost always fail and every
+        # failure re-arms a backoff, pushing recovery out.
         logger.warning(
             "gemini_keys: pool down (no believed-healthy or eligible "
             "keys), failing fast for source=%s", source)
@@ -1038,8 +1219,27 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                            caller_timeout, source, tried, state)
     if data is not None:
         return data
-    return _try_candidates(_only_free(_all_active_keys()), url, payload,
-                           caller_timeout, source, tried, state)
+    if state.get("fatal"):
+        return None
+    # Every active key just failed into a pause/backoff, so the active
+    # pool is now exhausted by the reserve pool's own definition: one
+    # bounded pass over ELIGIBLE reserve keys (backoff windows still
+    # respected — this is not the old ignore-everything sweep), under
+    # the same attempt cap and time budget.
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            _active_ids, reserve_ids = _pool_ids(conn)
+            reserve_rows = [r for r in _eligible_rows(conn)
+                            if r["id"] in reserve_ids]
+        finally:
+            conn.close()
+    reserve = _only_free(_order_by_health(reserve_rows))
+    if reserve:
+        return _try_candidates(reserve, url, payload,
+                               caller_timeout, source, tried, state)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1057,21 +1257,29 @@ def _probe_payload() -> dict:
 
 
 def _probe_cycle() -> int:
-    """One prober pass. Sends a 1-token probe to each key whose true
-    state is stale or unknown:
+    """One prober pass (lean version, 2026-10-15). Sends a 1-token probe
+    to at most _PROBE_MAX_PER_CYCLE keys whose true state is stale or
+    unknown, most valuable first:
 
-    - backoff just expired (recovery check — prompt, not next-request),
-    - unknown state (never succeeded, or marked bad outside backoff),
-    - believed healthy but idle (re-confirm before belief lapses).
+    - priority 0: backoff expired or expiring within one cycle
+      (recovery check — prompt, not next-request),
+    - priority 1: unknown state (never succeeded, or marked bad
+      outside backoff),
+    - priority 2: believed healthy but idle past the confirm window
+      (re-confirm before belief lapses).
 
-    Never probes needs_attention or disabled keys, never inside a
-    backoff window, and never when real traffic touched the key within
-    _PROBE_QUIET_S (real evidence beats a probe, and probes must never
-    starve real traffic — each probe counts toward the per-key dispatch
-    window like any other dispatch). Returns probes sent."""
+    Never probes needs_attention or disabled keys, never deep inside a
+    backoff window (only near expiry — probing a key hours from
+    recovery teaches nothing and spends its quota), never the same key
+    more often than _PROBE_MIN_INTERVAL_S, and never when real traffic
+    touched the key within _PROBE_QUIET_S (real evidence beats a
+    probe, and probes must never starve real traffic — each probe
+    counts toward the per-key dispatch window like any other
+    dispatch). Returns probes sent."""
     global _prober_last_cycle_at, _probes_total, _probes_ok
     now_wall = time.time()
     now_mono = time.monotonic()
+    interval = _probe_interval_s()
     with _lock:
         conn = db.connect()
         try:
@@ -1094,20 +1302,22 @@ def _probe_cycle() -> int:
             if dq and (now_mono - dq[-1]) < _PROBE_QUIET_S:
                 continue
             until = _parse_ts(r["quota_exhausted_until"])
-            if until and until > now_wall + 5:
-                continue  # still cooling down; check again at expiry
+            if until and until > now_wall + interval:
+                continue  # deep in backoff; check again near expiry
             belief = _belief.get(key_id)
             if until:
-                due.append(r)  # backoff expired: confirm recovery now
+                due.append((0, r))  # backoff expired / expiring: confirm
             elif belief and belief.get("ok"):
                 if now_wall - belief.get("at", 0.0) >= _PROBE_CONFIRM_S:
-                    due.append(r)  # idle healthy key: re-confirm
+                    due.append((2, r))  # idle healthy key: re-confirm
             else:
-                due.append(r)  # unknown state: find out off-path
+                due.append((1, r))  # unknown state: find out off-path
+        due.sort(key=lambda d: d[0])
+        due = [r for _prio, r in due[:_PROBE_MAX_PER_CYCLE]]
     sent = 0
     for r in due:
         _last_probe_mono[r["id"]] = time.monotonic()
-        ok, _data, _seconds = _attempt(
+        ok, _data, _seconds, _err = _attempt(
             r["id"], r["key_value"], _PROBE_URL, _probe_payload(),
             _PROBE_TIMEOUT_S, "prober")
         sent += 1
@@ -1149,14 +1359,16 @@ def start_prober() -> bool:
 
 
 def _log_usage_conn(key_id: int | None, source: str, success: bool,
-                    seconds: float | None = None) -> None:
+                    seconds: float | None = None,
+                    error_class: str | None = None) -> None:
     """Open a short-lived connection just for usage logging."""
     try:
         conn = db.connect()
         try:
             _ensure_table(conn)
             _log_usage(conn, key_id, source, success,
-                       int(seconds * 1000) if seconds is not None else None)
+                       int(seconds * 1000) if seconds is not None else None,
+                       error_class)
         finally:
             conn.close()
     except Exception:
@@ -1173,7 +1385,7 @@ def get_usage(limit: int = 100) -> list[dict]:
             _ensure_table(conn)
             rows = conn.execute(
                 """SELECT u.id, u.created_at, u.key_id, u.source, u.success,
-                          u.latency_ms,
+                          u.latency_ms, u.error_class,
                           k.label AS key_label, k.is_paid AS is_paid
                    FROM gemini_key_usage u
                    LEFT JOIN gemini_keys k ON k.id = u.key_id
@@ -1190,6 +1402,7 @@ def get_usage(limit: int = 100) -> list[dict]:
                 "source": r["source"],
                 "success": bool(r["success"]),
                 "latency_ms": r["latency_ms"],
+                "error_class": r["error_class"],
             } for r in rows]
         finally:
             conn.close()
