@@ -234,7 +234,13 @@ MEDIA_REQUEST_COST_USD = {
 }
 
 # Where finished regular generations are saved and served from.
+# Persistence (2026-10-15): with no explicit CHLOE_GENERATED_DIR, the
+# media lives NEXT TO the SQLite database. Production points
+# CHLOE_DB_PATH at the Railway volume (/data/chloe.db), so generated
+# media lands on that same persistent volume instead of a
+# container-local folder that every redeploy wipes — a reusable media
+# pool can finally accumulate across days and deploys.
 GENERATED_DIR = os.environ.get(
     "CHLOE_GENERATED_DIR",
-    os.path.join(os.path.dirname(__file__), "..", "generated"))
+    os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "generated"))
 

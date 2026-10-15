@@ -112,6 +112,80 @@ def _herday_image_path(participant_ids: list[str], moment_key: str,
     return os.path.join(config.GENERATED_DIR, fname)
 
 
+def _pool_file_for(participant_ids: list[str], moment_key: str) -> str | None:
+    """Newest existing pool render for these participants + moment, ANY
+    date, or None.
+
+    Pool files share the deterministic herday naming
+    (herday_<sorted pids>_<YYYY-MM-DD>_<moment>.jpg) in GENERATED_DIR.
+    Since GENERATED_DIR is persistent (2026-10-15), prior days' renders
+    survive and can be reused date-independently for the same
+    participants+moment instead of rendering a fresh copy.
+    """
+    pids = "_".join(sorted(p.strip().lower() for p in participant_ids))
+    prefix = f"herday_{pids}_"
+    suffix = f"_{moment_key}.jpg"
+    try:
+        names = os.listdir(config.GENERATED_DIR)
+    except OSError:
+        return None
+    best: str | None = None
+    best_mtime = -1.0
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith(suffix)):
+            continue
+        date_part = name[len(prefix):len(name) - len(suffix)]
+        try:
+            datetime.strptime(date_part, "%Y-%m-%d")
+        except ValueError:
+            continue  # not a dated herday cache file — never pool it
+        path = os.path.join(config.GENERATED_DIR, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best, best_mtime = path, mtime
+    return best
+
+
+def validate_her_day_media_url(conn, url: str) -> str | None:
+    """Why `url` may not be attached to a Her Day post, or None if OK.
+
+    Her Day is SFW-only: a URL is acceptable only when it names a file
+    this app actually serves from GENERATED_DIR under /generated/ AND
+    that file is not registered in girl_media (the give library) under
+    any kind. Empty string is allowed (it clears the field).
+    """
+    if not url:
+        return None
+    rel = url.split("?", 1)[0]
+    if not rel.startswith("/generated/"):
+        return "url must be a /generated/ asset served by this app"
+    name = rel[len("/generated/"):]
+    if not name:
+        return "url names no file"
+    base = os.path.abspath(config.GENERATED_DIR)
+    path = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([base, path]) != base:
+        return "url escapes the generated dir"
+    if not os.path.isfile(path):
+        return "file not found in the generated pool"
+    if os.path.basename(name).startswith("give-upload-"):
+        return "give uploads are not Her Day media"
+    try:
+        rows = conn.execute("SELECT url FROM girl_media").fetchall()
+    except Exception:  # noqa: BLE001 — no library table, nothing to match
+        rows = []
+    candidate = os.path.basename(name)
+    for row in rows:
+        lib_url = (row[0] if not hasattr(row, "keys") else row["url"]) or ""
+        if lib_url == rel or \
+                os.path.basename(lib_url.split("?", 1)[0]) == candidate:
+            return "url is registered in the give library"
+    return None
+
+
 def _plan_day(girl_id: str, date_str: str,
               all_girls: list[dict[str, Any]]) -> list[tuple]:
     """Deterministic daily content plan for one girl.
@@ -534,11 +608,13 @@ def generate_daily() -> dict[str, Any]:
 # with caption-only rows (media_url = ''). Regeneration is blocked by
 # her_day_exists_today, so instead pair today's rows back to the
 # deterministic plan — rows for a (user, girl) were inserted in plan
-# order — and fill each image post from the shared per-day render
-# cache. The ~2k user rows therefore cost one render per distinct
-# (participants, moment). Voice posts are counted, not filled: voice
-# notes sit behind the owner's paid-TTS gate (app/voice.py) and cannot
-# be synthesized here.
+# order — and fill each image post POOL-FIRST: an existing render of
+# the same participants+moment from any earlier day in the persistent
+# GENERATED_DIR is reused (copied to today's cache name); only moments
+# with no pool file go through the render path (the shared per-day
+# render cache — one render per distinct (participants, moment)).
+# Voice posts are counted, not filled: voice notes sit behind the
+# owner's paid-TTS gate (app/voice.py) and cannot be synthesized here.
 # ---------------------------------------------------------------------------
 
 _backfill_lock = threading.Lock()
@@ -560,7 +636,8 @@ def backfill_today_media(date_str: str | None = None,
     girl_map = {g["id"]: g for g in all_girls}
     report: dict[str, Any] = {
         "date": date_str, "pairs_processed": 0, "pairs_skipped": 0,
-        "image_posts_filled": 0, "image_posts_still_empty": 0,
+        "image_posts_filled": 0, "image_posts_filled_from_pool": 0,
+        "image_posts_still_empty": 0,
         "voice_posts_without_audio": 0,
     }
 
@@ -610,9 +687,34 @@ def backfill_today_media(date_str: str | None = None,
                 else:
                     names = [ginfo.get("name") or gid]
                     participants = [gid]
-                url = _generate_sfw_image(
-                    names, ginfo.get("avatar_url") or "", participants,
-                    moment_key, sfw_scene, date_str)
+                url = ""
+                # Pool-first (2026-10-15): GENERATED_DIR is persistent
+                # now, so reuse an existing render of this exact
+                # participants+moment from any earlier day before
+                # paying for a new render. The pool file is copied to
+                # today's cache name so the row references today's
+                # dated file like a fresh render would.
+                pool_src = _pool_file_for(participants, moment_key)
+                if pool_src:
+                    dest = _herday_image_path(participants, moment_key,
+                                               date_str)
+                    try:
+                        if os.path.abspath(pool_src) != \
+                                os.path.abspath(dest):
+                            os.makedirs(config.GENERATED_DIR,
+                                        exist_ok=True)
+                            shutil.copyfile(pool_src, dest)
+                        url = "/generated/" + os.path.basename(dest)
+                    except OSError as e:  # noqa: BLE001
+                        print(f"[her_day] backfill pool copy failed "
+                              f"({moment_key}): {e}", flush=True)
+                        url = ""
+                    if url:
+                        report["image_posts_filled_from_pool"] += 1
+                if not url:
+                    url = _generate_sfw_image(
+                        names, ginfo.get("avatar_url") or "", participants,
+                        moment_key, sfw_scene, date_str)
                 if url:
                     conn.execute(
                         "UPDATE her_day_posts SET media_url = ?"
@@ -663,7 +765,8 @@ def backfill_status() -> dict[str, Any]:
         state["report"] = report
     # Live counters (the running backfill merges them into the state).
     for key in ("date", "pairs_processed", "pairs_skipped",
-                "image_posts_filled", "image_posts_still_empty",
+                "image_posts_filled", "image_posts_filled_from_pool",
+                "image_posts_still_empty",
                 "voice_posts_without_audio"):
         if key in _backfill_state:
             state[key] = _backfill_state[key]

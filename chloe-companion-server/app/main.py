@@ -51,6 +51,8 @@ GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
 POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
 POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls)
 POST /api/v1/admin/her-day/generate-all (admin) -> {ok, generated, skipped, failed, errors}
+POST /api/v1/admin/her-day/backfill-media (admin) -> pool-first repair of today's posts
+POST /api/v1/admin/her-day/set-media (admin) {post_id, media_url?, voice_url?} -> {ok, post}
 """
 from __future__ import annotations
 
@@ -2161,6 +2163,52 @@ def admin_her_day_backfill_media_status(request: Request):
     """Admin: backfill progress/final report (see backfill-media)."""
     _require_admin(request)
     return her_day.backfill_status()
+
+
+class HerDaySetMediaIn(BaseModel):
+    post_id: int
+    media_url: str | None = None
+    voice_url: str | None = None
+
+
+@app.post("/api/v1/admin/her-day/set-media")
+def admin_her_day_set_media(body: HerDaySetMediaIn, request: Request):
+    """Admin: attach EXISTING media to an existing Her Day post.
+
+    Body: post_id, and media_url and/or voice_url (at least one;
+    "" clears that field). Posts are otherwise insert-only — this is
+    the repair path for pointing a caption-only row at a file from
+    the persistent /generated/ pool.
+
+    Validation (Her Day stays SFW): each URL must name a file this app
+    serves from GENERATED_DIR under /generated/ that actually exists
+    there, and must not be registered in girl_media (the give
+    library). Violations are 400; an unknown post_id is 404.
+    Returns {ok, post} with the updated row.
+    """
+    _require_admin(request)
+    if body.media_url is None and body.voice_url is None:
+        raise HTTPException(status_code=400,
+                            detail="nothing_to_set: pass media_url "
+                                   "and/or voice_url")
+    conn = _conn()
+    try:
+        for field, url in (("media_url", body.media_url),
+                           ("voice_url", body.voice_url)):
+            if url is None:
+                continue
+            err = her_day.validate_her_day_media_url(conn, url)
+            if err:
+                raise HTTPException(status_code=400,
+                                    detail=f"{field}: {err}")
+        post = store.set_her_day_post_media(
+            conn, body.post_id,
+            media_url=body.media_url, voice_url=body.voice_url)
+        if post is None:
+            raise HTTPException(status_code=404, detail="post_not_found")
+        return {"ok": True, "post": post}
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

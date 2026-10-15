@@ -1395,6 +1395,40 @@ def mark_her_day_viewed(conn: "sqlite3.Connection", post_id: int,
     return cur.rowcount > 0
 
 
+def set_her_day_post_media(conn: "sqlite3.Connection", post_id: int,
+                           media_url: str | None = None,
+                           voice_url: str | None = None) -> dict | None:
+    """Attach existing media to an existing Her Day post (admin repair).
+
+    Posts are otherwise insert-only (save_her_day_post); this is the one
+    sanctioned in-place update, used to point a caption-only row at a
+    file from the persistent /generated/ pool. Only the fields passed
+    as not-None are written ("" clears a field). Returns the updated
+    row, or None when no post has that id. URL validation (SFW, pool
+    membership) is the caller's job — see her_day.validate_her_day_media_url.
+    """
+    row = conn.execute(
+        "SELECT * FROM her_day_posts WHERE id = ?", (post_id,)).fetchone()
+    if row is None:
+        return None
+    sets: list[str] = []
+    params: list = []
+    if media_url is not None:
+        sets.append("media_url = ?")
+        params.append(media_url or "")
+    if voice_url is not None:
+        sets.append("voice_url = ?")
+        params.append(voice_url or "")
+    if sets:
+        params.append(post_id)
+        conn.execute(
+            f"UPDATE her_day_posts SET {', '.join(sets)} WHERE id = ?",
+            params)
+        conn.commit()
+    return dict(conn.execute(
+        "SELECT * FROM her_day_posts WHERE id = ?", (post_id,)).fetchone())
+
+
 def cleanup_expired_her_day(conn: "sqlite3.Connection") -> int:
     """Delete expired Her Day posts. Returns count deleted."""
     cur = conn.execute(
