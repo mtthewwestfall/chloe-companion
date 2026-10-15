@@ -538,7 +538,11 @@ def browser_agent_poll(request: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
     conn = _conn()
     try:
-        return {"ok": True, "job": assist.claim_browse_job(conn)}
+        # Workers claim only their own lane (2026-10-15): no param
+        # keeps the original local worker's behavior; the Oracle VM
+        # worker polls with ?lane=ovm.
+        lane = request.query_params.get("lane")
+        return {"ok": True, "job": assist.claim_browse_job(conn, lane)}
     finally:
         conn.close()
 

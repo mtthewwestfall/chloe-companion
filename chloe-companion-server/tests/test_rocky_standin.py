@@ -179,5 +179,95 @@ class RockyPoolImageDeskTest(unittest.TestCase):
         desk.assert_not_called()
 
 
+class RockyBrowseLaneTest(unittest.TestCase):
+    """Stage 6: browse jobs carry a lane — 'local' for the worker on
+    his main machine, 'ovm' for the Oracle VM browser with his
+    seeded sessions. Each worker claims only its own lane."""
+
+    def setUp(self):
+        self.old_env = {k: os.environ.get(k) for k in
+                        ("ASSIST_ROLLOUT", "ASSIST_OWNER_IDS")}
+        os.environ["ASSIST_ROLLOUT"] = "owner"
+        os.environ["ASSIST_OWNER_IDS"] = "owner_1"
+        self.conn = _conn()
+
+    def tearDown(self):
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.conn.close()
+
+    def test_detect_routes_ovm_phrasing(self):
+        det = assist.detect_browse_request(
+            "open https://example.com in the browser on the oracle vm")
+        self.assertIsNotNone(det)
+        self.assertEqual(det["lane"], "ovm")
+        det2 = assist.detect_browse_request(
+            "screenshot https://example.com in the browser")
+        self.assertIsNotNone(det2)
+        self.assertEqual(det2["lane"], "local")
+
+    def test_claims_are_lane_isolated(self):
+        local_id = assist.enqueue_browse_job(
+            self.conn, "owner_1", "rocky", "https://a.example",
+            "read", None)
+        ovm_id = assist.enqueue_browse_job(
+            self.conn, "owner_1", "rocky", "https://b.example",
+            "read", None, lane="ovm")
+        job = assist.claim_browse_job(self.conn)
+        self.assertEqual(job["id"], local_id)
+        self.assertEqual(job["lane"], "local")
+        job = assist.claim_browse_job(self.conn, "ovm")
+        self.assertEqual(job["id"], ovm_id)
+        self.assertEqual(job["lane"], "ovm")
+        self.assertIsNone(assist.claim_browse_job(self.conn))
+        self.assertIsNone(assist.claim_browse_job(self.conn, "ovm"))
+        self.assertIsNone(assist.claim_browse_job(self.conn, "bogus"))
+
+    def test_lane_column_migrates_onto_old_tables(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA)
+        conn.execute(
+            "CREATE TABLE browse_jobs ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " user_id TEXT NOT NULL,"
+            " character_id TEXT NOT NULL DEFAULT 'rocky',"
+            " url TEXT NOT NULL,"
+            " action TEXT NOT NULL DEFAULT 'read',"
+            " question TEXT,"
+            " status TEXT NOT NULL DEFAULT 'queued',"
+            " title TEXT, final_url TEXT, result_text TEXT,"
+            " image_url TEXT, image_name TEXT, error TEXT,"
+            " created_at TEXT NOT NULL, claimed_at TEXT,"
+            " finished_at TEXT,"
+            " delivered INTEGER NOT NULL DEFAULT 0)")
+        conn.execute(
+            "INSERT INTO browse_jobs (user_id, url, created_at)"
+            " VALUES ('owner_1', 'https://old.example',"
+            " '2026-10-01T00:00:00Z')")
+        conn.commit()
+        assist.ensure_tables(conn)
+        job = assist.claim_browse_job(conn)
+        self.assertIsNotNone(job)
+        self.assertEqual(job["url"], "https://old.example")
+        self.assertIsNone(assist.claim_browse_job(conn, "ovm"))
+        conn.close()
+
+    def test_rocky_dispatch_queues_ovm_lane(self):
+        hit = assist.maybe_assist(
+            self.conn, OWNER,
+            "read https://example.com in the browser on the oracle vm",
+            "rocky")
+        self.assertIsNotNone(hit)
+        self.assertIn("Oracle VM", hit["brief"])
+        self.assertIsNone(assist.claim_browse_job(self.conn))
+        job = assist.claim_browse_job(self.conn, "ovm")
+        self.assertIsNotNone(job)
+        self.assertEqual(job["url"], "https://example.com")
+
+
 if __name__ == "__main__":
     unittest.main()

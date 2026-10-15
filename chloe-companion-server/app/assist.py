@@ -525,6 +525,14 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_browse_jobs_status "
         "ON browse_jobs (status, id)"
     )
+    # Browse lanes (2026-10-15): rows queued before lanes existed
+    # belong to the original worker on his main machine ('local');
+    # 'ovm' rows are claimed only by the Oracle VM browser worker.
+    browse_cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(browse_jobs)")}
+    if "lane" not in browse_cols:
+        conn.execute("ALTER TABLE browse_jobs ADD COLUMN lane "
+                     "TEXT NOT NULL DEFAULT 'local'")
     conn.commit()
 
 
@@ -3045,6 +3053,15 @@ _BROWSE_SHOT_RE = re.compile(r"\bscreen\s?shots?\b", re.IGNORECASE)
 _BROWSE_BROWSER_RE = re.compile(
     r"\bbrowser\b|\brender(?:ed|ing)?\b|\bjavascript\b|\bheadless\b",
     re.IGNORECASE)
+# Browse lanes (2026-10-15, owner amendment: "use ovm"): 'local'
+# jobs are claimed by the headless worker on his main machine;
+# 'ovm' jobs go to the browser on his Oracle VM — the one carrying
+# the sessions he seeded there himself. Naming the VM (or its
+# signed-in browser) in the ask is the routing signal.
+_BROWSE_OVM_RE = re.compile(
+    r"\b(?:oracle|ovm|on the vm|the vm'?s browser|vm browser|"
+    r"google voice browser|logged[ -]?in browser|"
+    r"signed[ -]?in browser)\b", re.IGNORECASE)
 _BROWSE_MAX_ACTIVE = 3
 _BROWSE_TEXT_CAP = 20000
 _BROWSE_IMAGE_MAX_BYTES = 6 * 1024 * 1024
@@ -3061,6 +3078,7 @@ def detect_browse_request(text: str) -> dict | None:
     shot = bool(_BROWSE_SHOT_RE.search(t))
     if not (shot or _BROWSE_BROWSER_RE.search(t)):
         return None
+    lane = "ovm" if _BROWSE_OVM_RE.search(t) else "local"
     m = _BROWSE_URL_RE.search(t)
     if not m:
         # Signal but no link: only ask him for the URL when he is
@@ -3069,12 +3087,13 @@ def detect_browse_request(text: str) -> dict | None:
         if _BROWSE_LINK_HINT_RE.search(t):
             return {"url": None,
                     "action": "screenshot" if shot else "read",
-                    "question": None}
+                    "question": None, "lane": lane}
         return None
     url = m.group(1).rstrip(".,);]")
     rest = (t[:m.start()] + " " + t[m.end():]).strip()
     rest = _BROWSE_SHOT_RE.sub(" ", rest)
     rest = _BROWSE_BROWSER_RE.sub(" ", rest)
+    rest = _BROWSE_OVM_RE.sub(" ", rest)
     rest = re.sub(
         r"\b(look at|pull up|open|load|read|check out|check|visit|"
         r"show me|use|using|with|in the|of|the|a|an|please|for me|"
@@ -3083,7 +3102,8 @@ def detect_browse_request(text: str) -> dict | None:
     if question and len(question) < 4:
         question = None
     return {"url": url, "action": "screenshot" if shot else "read",
-            "question": (question[:500] if question else None)}
+            "question": (question[:500] if question else None),
+            "lane": lane}
 
 
 def _browse_url_ok(url: str) -> bool:
@@ -3109,13 +3129,16 @@ def _browse_url_ok(url: str) -> bool:
 
 def enqueue_browse_job(conn: sqlite3.Connection, user_id: str,
                        character_id: str, url: str, action: str,
-                       question: str | None) -> int:
+                       question: str | None,
+                       lane: str = "local") -> int:
     ensure_tables(conn)
+    lane = lane if lane in ("local", "ovm") else "local"
     cur = conn.execute(
         "INSERT INTO browse_jobs (user_id, character_id, url, action, "
-        "question, status, created_at) VALUES (?, ?, ?, ?, ?, "
-        "'queued', ?)",
-        (user_id, character_id, url, action, question, _utc_iso()))
+        "question, status, created_at, lane) VALUES (?, ?, ?, ?, ?, "
+        "'queued', ?, ?)",
+        (user_id, character_id, url, action, question, _utc_iso(),
+         lane))
     conn.commit()
     return int(cur.lastrowid)
 
@@ -3147,16 +3170,26 @@ def _handle_browse_request(conn: sqlite3.Connection, user_id: str,
         return {"brief": FIXED_REPLY_PREFIX +
                 "my browser is already on a couple of pages for you — "
                 "let those land first, then give me the next one."}
+    lane = det.get("lane") or "local"
     jid = enqueue_browse_job(conn, user_id, character_id, url,
                              det.get("action") or "read",
-                             det.get("question"))
+                             det.get("question"), lane=lane)
     action_word = ("screenshot" if det.get("action") == "screenshot"
                    else "read")
+    if lane == "ovm":
+        worker_txt = (
+            "The browser on his Oracle VM — the one holding the "
+            "sessions he signed into himself — will load the actual "
+            "page (JavaScript and all), read-only, and the result "
+            "will arrive HERE as your follow-up message.")
+    else:
+        worker_txt = (
+            "A browser worker on his machine will load the actual "
+            "page (JavaScript and all) and the result will arrive "
+            "HERE as your follow-up message.")
     return {"brief":
             f"You just queued a REAL browser job (#{jid}) to "
-            f"{action_word} {url}. A browser worker on his machine "
-            "will load the actual page (JavaScript and all) and the "
-            "result will arrive HERE as your follow-up message. Tell "
+            f"{action_word} {url}. " + worker_txt + " Tell "
             "him it's queued, briefly and in your own voice. Do NOT "
             "describe the page, guess what it says, or promise when "
             "it will land."}
@@ -3169,12 +3202,21 @@ def _handle_browse_request(conn: sqlite3.Connection, user_id: str,
 # any response; when unset, every bridge call fails closed and the
 # chat intent stays dark.
 # ---------------------------------------------------------------------------
-def claim_browse_job(conn: sqlite3.Connection) -> dict | None:
-    """Atomically claim the oldest queued browse job for the worker."""
+def claim_browse_job(conn: sqlite3.Connection,
+                     lane: str | None = None) -> dict | None:
+    """Atomically claim the oldest queued browse job for a worker.
+
+    Workers claim ONLY their own lane (2026-10-15): lane=None keeps
+    the original worker's behavior (the 'local' lane); the Oracle
+    VM worker polls with lane='ovm' explicitly.
+    """
     ensure_tables(conn)
+    lane = (lane or "local").strip().lower()
+    if lane not in ("local", "ovm"):
+        lane = "local"
     row = conn.execute(
         "SELECT id FROM browse_jobs WHERE status = 'queued' "
-        "ORDER BY id LIMIT 1").fetchone()
+        "AND lane = ? ORDER BY id LIMIT 1", (lane,)).fetchone()
     if not row:
         return None
     cur = conn.execute(
@@ -3187,7 +3229,7 @@ def claim_browse_job(conn: sqlite3.Connection) -> dict | None:
         "SELECT id, url, action, question, created_at FROM browse_jobs "
         "WHERE id = ?", (row[0],)).fetchone()
     return {"id": r[0], "url": r[1], "action": r[2], "question": r[3],
-            "created_at": r[4]}
+            "created_at": r[4], "lane": lane}
 
 
 def _save_browse_image(image_bytes: bytes, image_format: str) -> str:
