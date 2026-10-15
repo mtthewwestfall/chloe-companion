@@ -705,6 +705,20 @@ def admin_girls(request: Request):
     return _admin_girls()
 
 
+@app.get("/api/v1/admin/rocky-claim-blocks")
+def admin_rocky_claim_blocks(request: Request, limit: int = 50):
+    """Rocky claim gate (2026-10-15): the dev claims the screen
+    blocked, newest first — what Rocky tried to assert, when, and
+    the reply it rode in on. The owner's inspection window into
+    the gate; the gate itself lives in assist.screen_rocky_reply."""
+    _require_admin(request)
+    conn = _conn()
+    try:
+        return {"blocks": assist.rocky_claim_blocks(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/admin/girls")
 def admin_create_girl(body: GirlIn, request: Request):
     _require_admin(request)
@@ -1068,8 +1082,43 @@ def chat(body: ChatIn, request: Request):
                 and not context.get("assist_result"):
             context["assist_result"] = lg_hit["brief"]
 
+        # Rocky claim gate, part 1 (owner order 2026-10-15):
+        # pre-generation grounding. When a Rocky owner turn touches
+        # dev work — or answers his dev proposal with a bare "yes" —
+        # the real builder-queue state rides in as the brief, the
+        # only facts he may state about that work. Assist-claimed
+        # turns already carry their own real brief; lanes win first.
+        if assist.rocky_gate_applies(cid, is_owner) \
+                and not context.get("assist_result"):
+            try:
+                last_rocky = ""
+                for turn in reversed(context.get("recent") or []):
+                    if turn.get("role") == cid:
+                        last_rocky = turn.get("text") or ""
+                        break
+                if assist.rocky_turn_needs_grounding(
+                        effective_message, last_rocky):
+                    context["assist_result"] = assist.rocky_ground_brief(
+                        conn, user_id,
+                        phantom=assist.rocky_phantom_start(
+                            effective_message, last_rocky))
+            except Exception:
+                pass
+
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
         reply_text = brain.compose_reply(effective_message, context, cid)
+
+        # Rocky claim gate, part 2: the deterministic claim screen.
+        # A dev action/result assertion ships only when a real queue
+        # record backs it; anything unbacked is replaced with the
+        # grounded state and logged (assist.rocky_claim_blocks).
+        # Fixed replies are server text (the credential confirmation)
+        # and are never screened.
+        if assist.rocky_gate_applies(cid, is_owner) \
+                and not (context.get("assist_result") or "").startswith(
+                    brain.FIXED_REPLY_PREFIX):
+            reply_text = assist.screen_rocky_reply(
+                conn, user_id, reply_text, cid)
         store.log_turn(conn, user_id, cid, reply_text, cid)
 
         # Slower brain path: learn durable typed memories from his message

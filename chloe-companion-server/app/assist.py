@@ -475,6 +475,23 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_dev_jobs_status "
         "ON dev_jobs (status, id)"
     )
+    # Rocky claim gate (2026-10-15): every dev claim Rocky's screen
+    # blocked, kept for the owner/admin to inspect — what was claimed,
+    # when, and the reply it rode in on.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS rocky_claim_blocks (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               character_id TEXT NOT NULL DEFAULT 'rocky',
+               created_at TEXT NOT NULL,
+               claim_kind TEXT NOT NULL DEFAULT '',
+               claim_text TEXT NOT NULL DEFAULT '',
+               reply_excerpt TEXT NOT NULL DEFAULT '')"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rocky_claim_blocks_id "
+        "ON rocky_claim_blocks (id)"
+    )
     # Merge grant (2026-10-08, owner: "let her merge and push"): rows
     # queued before the grant predate these columns.
     dev_cols = {r[1] for r in conn.execute("PRAGMA table_info(dev_jobs)")}
@@ -2499,6 +2516,441 @@ def _handle_dev_merge(conn: sqlite3.Connection, user_id: str,
             "it lands — the merged commit or the plain blocked "
             "reason. Tell him you're on it, warm and brief; promise "
             "nothing about timing."}
+
+
+# ---------------------------------------------------------------------------
+# Rocky claim gate (owner order, 2026-10-15: "Build the hard gate —
+# Rocky can't claim work without a real job behind it"). Prompt rules
+# proved insufficient: with the "check before you claim" pack section
+# already live, Rocky narrated a staging push, a five-scan dry run
+# (two of them garage-door scans — a trade roof-scout does not have)
+# and a patch in progress, on an evening when the queue held zero
+# jobs and every lookup in the turn had failed. This gate is
+# deterministic and scoped to Rocky's OWNER turns only:
+#
+#   GROUND TRUTH — the owner's real dev-queue and browser-queue rows,
+#   read fresh. They are the only records a dev claim may rest on.
+#   There is no staging anywhere in this system and no scan record
+#   of any kind, so staging claims and scan/run-result claims are
+#   unbackable by construction — exactly the incident's shape.
+#
+#   CLAIM SCREEN — Rocky's outgoing reply is screened sentence by
+#   sentence for dev action/result assertions. An assertion ships
+#   only when a consistent record backs it (a merged claim needs a
+#   job with a merged commit; a running claim needs a claimed job;
+#   a named job number must exist and match). Any unbacked
+#   assertion blocks the whole reply: it is replaced with a grounded
+#   statement of the real state, and the blocked claim is logged to
+#   rocky_claim_blocks for the owner/admin to inspect.
+#
+#   NO PHANTOM STARTS — when a Rocky turn touches dev work (or the
+#   owner answers a Rocky dev proposal with a bare "yes"), the
+#   ground truth is injected BEFORE generation, stating plainly that
+#   nothing was started by an approval alone: a real start still
+#   needs the existing enqueue gates (change verb + repo target),
+#   and a merge still needs his explicit merge word.
+#
+# Fail-closed: if the ground truth cannot be read, every dev claim
+# is unbacked and the replacement says he couldn't check.
+# ---------------------------------------------------------------------------
+
+_ROCKY_COULDNT_CHECK_LINE = (
+    "Straight with you: I couldn't check the builder queue just "
+    "now, so I'm not going to claim anything about builds, runs or "
+    "pushes. Nothing I say about that work is real unless it comes "
+    "off the actual queue — ask me again in a moment and I'll check "
+    "first.")
+
+
+def rocky_gate_applies(character_id, is_owner) -> bool:
+    """The gate's whole scope: Rocky, talking to the owner. Every
+    other character — and any non-owner Rocky turn — is untouched."""
+    return bool(is_owner) and _is_rocky(character_id)
+
+
+def rocky_dev_ground_truth(conn: sqlite3.Connection,
+                           user_id: str) -> dict:
+    """The real front-door state for this owner: his latest dev-queue
+    jobs and browser-queue jobs, with the fields a claim can be
+    checked against. Never raises — a read failure reports
+    available=False and the screen fails closed on it."""
+    try:
+        ensure_tables(conn)
+        jobs = []
+        for r in conn.execute(
+                "SELECT id, repo, kind, status, branch, merged_sha, "
+                "task, created_at, finished_at FROM dev_jobs "
+                "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+                (user_id,)).fetchall():
+            jobs.append({
+                "id": r[0], "repo": r[1] or "",
+                "repo_short": (r[1] or "").split("/")[-1].lower(),
+                "kind": r[2] or "build", "status": r[3] or "",
+                "branch": r[4] or "", "merged_sha": r[5] or "",
+                "task": r[6] or "", "created_at": r[7] or "",
+                "finished_at": r[8] or ""})
+        brows = []
+        for r in conn.execute(
+                "SELECT id, url, action, status FROM browse_jobs "
+                "WHERE user_id = ? ORDER BY id DESC LIMIT 5",
+                (user_id,)).fetchall():
+            brows.append({"id": r[0], "url": r[1] or "",
+                          "action": r[2] or "", "status": r[3] or ""})
+        return {"available": True, "jobs": jobs, "browse_jobs": brows}
+    except Exception:  # noqa: BLE001 — fail closed, never raise
+        return {"available": False, "jobs": [], "browse_jobs": []}
+
+
+def _ground_lines(ground: dict) -> list[str]:
+    """The ground truth as plain lines for a brief or a reply."""
+    if not ground.get("available"):
+        return ["the builder queue could NOT be checked just now"]
+    lines = []
+    for j in ground.get("jobs", [])[:5]:
+        line = (f"job #{j['id']} on {j['repo_short'] or j['repo']}: "
+                f"{j['status']}")
+        if j["branch"]:
+            line += f", branch {j['branch']}"
+        if j["merged_sha"]:
+            line += ", merged to main"
+        if j["task"]:
+            line += f" — {j['task'][:70]}"
+        lines.append(line)
+    for b in ground.get("browse_jobs", [])[:3]:
+        lines.append(f"browser job #{b['id']}: {b['status']} "
+                     f"({b['url'][:60]})")
+    if not lines:
+        lines.append("the builder queue is EMPTY — no job queued, "
+                     "running, or finished, and no browser job either")
+    return lines
+
+
+def rocky_grounded_reply(ground: dict) -> str:
+    """The deterministic replacement for a blocked reply: the real
+    state, in Rocky's plain register, and nothing else."""
+    if not ground.get("available"):
+        return _ROCKY_COULDNT_CHECK_LINE
+    lines = _ground_lines(ground)
+    if not ground.get("jobs") and not ground.get("browse_jobs"):
+        return (
+            "Real state of the builder queue, checked just now: "
+            "it's empty — nothing running, nothing queued, nothing "
+            "finished waiting. I haven't pushed, run, or started "
+            "anything, and I'm not going to narrate work that isn't "
+            "on the queue. If you want something started, give me "
+            "the change and the repo in one line — like \"fix the "
+            "login bug in roof-scout\" — and I'll queue it for real "
+            "and hand you the job number.")
+    body = "; ".join(lines)
+    return (
+        "Real state of the builder queue, checked just now: "
+        + body + ". Anything beyond that didn't happen — I dropped "
+        "a line about the work that the queue doesn't back, rather "
+        "than send it.")
+
+
+# --- dev-touch + phantom-start detection (pre-generation) ----------
+
+_ROCKY_DEV_TOUCH_RE = re.compile(
+    r"\b(build|builder|worker|jobs?|queue|queued|push\w*|merge\w*|"
+    r"deploy\w*|scans?|patch|staging|branch|repos?|landed|progress|"
+    r"status|running|finished|shipped|dry\s*run)\b", re.IGNORECASE)
+
+_ROCKY_BARE_APPROVAL_RE = re.compile(
+    r"^\s*(yes|yeah|yep|yup|ok|okay|sure|go|go\s+ahead|do\s+it|"
+    r"please\s+do|sounds\s+good)\b[.! ]*$", re.IGNORECASE)
+
+_ROCKY_PROPOSAL_RE = re.compile(
+    r"\b(shall\s+i|want\s+me\s+to|should\s+i|"
+    r"i\s+can\s+(build|fix|push|run|queue|start|pull|check)|"
+    r"i'?ll\s+(build|fix|push|run|queue|start|pull|check))\b",
+    re.IGNORECASE)
+
+_ROCKY_PROPOSAL_DEV_RE = re.compile(
+    r"\b(build|fix|push|run|queue|pull|audit|scan|patch|deploy|"
+    r"merge|version|repo|code|staging|job|worker)\b", re.IGNORECASE)
+
+
+def rocky_phantom_start(user_text: str,
+                        last_rocky_text: str) -> bool:
+    """True when the owner's message is a bare approval answering a
+    dev proposal Rocky floated — the exact shape that preceded the
+    fabricated dry run. A bare approval satisfies neither the
+    enqueue gates (change verb + repo target) nor the merge gate
+    (explicit merge word), so nothing was started by it."""
+    t = (user_text or "").strip()
+    if len(t) > 40 or not _ROCKY_BARE_APPROVAL_RE.match(t):
+        return False
+    last = last_rocky_text or ""
+    return bool(_ROCKY_PROPOSAL_RE.search(last)
+                and _ROCKY_PROPOSAL_DEV_RE.search(last))
+
+
+def rocky_turn_needs_grounding(user_text: str,
+                               last_rocky_text: str = "") -> bool:
+    """A Rocky owner turn gets the ground truth injected when it
+    touches dev work at all, or when it is a bare approval after a
+    dev proposal (phantom-start guard)."""
+    if rocky_phantom_start(user_text, last_rocky_text):
+        return True
+    return bool(_ROCKY_DEV_TOUCH_RE.search(user_text or ""))
+
+
+def rocky_ground_brief(conn: sqlite3.Connection, user_id: str,
+                       phantom: bool = False) -> str:
+    """The pre-generation grounding brief: the real queue state as
+    the ONLY facts Rocky may state about dev work this turn."""
+    ground = rocky_dev_ground_truth(conn, user_id)
+    lines = _ground_lines(ground)
+    parts = [
+        "DEV GROUND TRUTH — you checked his real builder queue "
+        "this second. These are the ONLY facts you may state about "
+        "builds, pushes, scans, runs, merges or deploys this turn:",
+        *[f"- {ln}" for ln in lines],
+        "If it isn't in that list, it did not happen and is not "
+        "happening — say so plainly if he asks. There is no staging "
+        "in his pipeline and the queue holds no scan results, ever.",
+    ]
+    if phantom:
+        parts.append(
+            "He just answered your proposal with a bare yes. That "
+            "yes started NOTHING — no job was queued by it. A real "
+            "start needs the change and the repo named (a change "
+            "verb plus a repo), and a merge needs his explicit "
+            "merge/push/ship word. Tell him plainly that nothing "
+            "was started, and what a real start needs.")
+    if not ground.get("available"):
+        parts.append(
+            "The queue check itself FAILED — so on anything about "
+            "builds or runs, your line is that you couldn't check, "
+            "full stop. Do not state a single build fact this turn.")
+    return "\n".join(parts)
+
+
+# --- the claim screen (post-generation, pre-delivery) --------------
+
+_CLAIM_FIRST_PERSON_RE = re.compile(
+    r"\b(i|i'm|i've|we|we're|we've)\b", re.IGNORECASE)
+_CLAIM_PUSH_VERB_RE = re.compile(
+    r"\b(pushed|merged|deployed|shipped|committed)\b", re.IGNORECASE)
+_CLAIM_PUSH_TARGET_RE = re.compile(
+    r"\b(main|staging|production|prod|branch|repo)\b", re.IGNORECASE)
+_CLAIM_LIVE_RE = re.compile(
+    r"\b(the\s+)?(change|patch|fix|update|build)\b[^.!?]{0,25}"
+    r"\b(is|went|are)\b[^.!?]{0,12}\blive\b", re.IGNORECASE)
+_CLAIM_PROG_SUBJECT_RE = re.compile(
+    r"\b(i'm|i\s+am|we're|we\s+are|it'?s|the\s+worker\s+is|"
+    r"the\s+builder\s+is|the\s+job\s+is)\b", re.IGNORECASE)
+_CLAIM_PROG_VERB_RE = re.compile(
+    r"\b(running|tweaking|working\s+on|building|fixing|deploying|"
+    r"pushing|processing|testing)\b", re.IGNORECASE)
+_CLAIM_RUN_VERB_RE = re.compile(
+    r"\b(ran|queued|started|kicked\s+off|created|tested)\b",
+    re.IGNORECASE)
+_CLAIM_RESULT_RE = re.compile(
+    r"\b(finished|passed|held|came\s+back|results?\s+(are\s+in|"
+    r"came\s+back)|ready\s+for\s+you\s+to\s+approve|"
+    r"patch\s+is\s+ready|all\s+(five|four|three|two|\d+)\b)",
+    re.IGNORECASE)
+_CLAIM_DEV_OBJ_RE = re.compile(
+    r"\b(scan|scans|batch|dry\s*run|patch|build|job|jobs|branch|"
+    r"repo|deploy\w*|staging|threshold|module|constraint|queue|"
+    r"worker|builder|grade|grading|siding|garage|roof|roofs)\b",
+    re.IGNORECASE)
+_CLAIM_SCAN_OBJ_RE = re.compile(
+    r"\b(scan|scans|dry\s*run|batch|grade|grading|siding|garage|"
+    r"roofs?(?!-scout))\b", re.IGNORECASE)
+_CLAIM_STAGING_RE = re.compile(r"\bstaging\b", re.IGNORECASE)
+_CLAIM_JOB_ID_RE = re.compile(
+    r"\bjob\s+#?(\d+)\b|#(\d+)\b", re.IGNORECASE)
+_CLAIM_BROWSER_RE = re.compile(
+    r"\b(browser|screenshot|page\s+load)\b", re.IGNORECASE)
+
+
+def _claim_sentences(text: str) -> list[str]:
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t:
+        return []
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", t)
+            if s.strip()]
+
+
+def detect_dev_claims(text: str,
+                      repo_shorts: set | None = None) -> list[dict]:
+    """Deterministic scan of an outgoing Rocky reply for dev
+    action/result assertions. Each claim carries the record it
+    would need ("need"): merged | active | done | mergeable |
+    any_job | never (no record type in this system can back it —
+    staging and scan-result claims land here by construction).
+    Ordinary chat, product facts and non-dev uses of the same verbs
+    do not match: every family needs a dev object or a push/merge
+    verb with a dev target."""
+    repos = repo_shorts or set()
+    claims = []
+    for s in _claim_sentences(text):
+        low = s.lower()
+        first = bool(_CLAIM_FIRST_PERSON_RE.search(s))
+        dev_obj = bool(_CLAIM_DEV_OBJ_RE.search(s))
+        scan_obj = bool(_CLAIM_SCAN_OBJ_RE.search(s))
+        m = _CLAIM_JOB_ID_RE.search(s)
+        job_id = None
+        if m:
+            job_id = int(m.group(1) or m.group(2))
+        repo = None
+        for r in repos:
+            if r and r in low:
+                repo = r
+                break
+        browser = bool(_CLAIM_BROWSER_RE.search(s))
+        kind = need = None
+        if _CLAIM_STAGING_RE.search(s) and (
+                _CLAIM_PUSH_VERB_RE.search(s)
+                or _CLAIM_PROG_VERB_RE.search(s)
+                or _CLAIM_RESULT_RE.search(s)
+                or (first and dev_obj)):
+            kind, need = "staging", "never"
+        elif _CLAIM_PUSH_VERB_RE.search(s) and (
+                first or _CLAIM_PUSH_TARGET_RE.search(s)):
+            kind, need = "merged_or_pushed", "merged"
+        elif _CLAIM_LIVE_RE.search(s):
+            kind, need = "deployed_live", "merged"
+        elif (_CLAIM_PROG_SUBJECT_RE.search(s)
+                and _CLAIM_PROG_VERB_RE.search(s) and dev_obj):
+            kind, need = "in_progress", "active"
+        elif (scan_obj and job_id is None and "job" not in low
+                and (first or _CLAIM_RESULT_RE.search(s)
+                     or _CLAIM_RUN_VERB_RE.search(s))):
+            # Scan/run-result narration — unless the sentence is
+            # about a queue job, which the job families below judge
+            # against the real record.
+            kind, need = "scan_or_grade_run", "never"
+        elif _CLAIM_RESULT_RE.search(s) and dev_obj:
+            if "patch" in low and "ready" in low:
+                kind, need = "result", "mergeable"
+            else:
+                kind, need = "result", "done"
+        elif first and _CLAIM_RUN_VERB_RE.search(s) and dev_obj:
+            kind, need = "started", "any_job"
+        if kind:
+            claims.append({"kind": kind, "need": need,
+                           "sentence": s[:300], "job_id": job_id,
+                           "repo": repo, "browser": browser})
+    return claims
+
+
+def _claim_backed(claim: dict, ground: dict) -> bool:
+    """A claim ships only when a real record backs it, consistently:
+    a named job number must exist and fit, a named repo must match
+    the backing job's repo, and the job's state must fit the claim.
+    Unavailable ground truth backs nothing (fail closed)."""
+    if not ground.get("available"):
+        return False
+    need = claim.get("need")
+    if need == "never":
+        return False
+    job_id = claim.get("job_id")
+    repo = claim.get("repo")
+
+    def fits(j: dict, pred) -> bool:
+        if job_id is not None and j["id"] != job_id:
+            return False
+        if repo and j["repo_short"] != repo:
+            return False
+        return pred(j)
+
+    jobs = ground.get("jobs", [])
+    if need == "merged":
+        return any(fits(j, lambda j: bool(j["merged_sha"]))
+                   for j in jobs)
+    if need == "active":
+        if any(fits(j, lambda j: j["status"] == "claimed")
+               for j in jobs):
+            return True
+        if claim.get("browser"):
+            return any(b["status"] == "claimed"
+                       for b in ground.get("browse_jobs", []))
+        return False
+    if need == "done":
+        return any(fits(j, lambda j: j["status"] in ("done", "failed"))
+                   for j in jobs)
+    if need == "mergeable":
+        return any(fits(j, lambda j: j["status"] == "done"
+                        and bool(j["branch"])
+                        and not j["merged_sha"]) for j in jobs)
+    if need == "any_job":
+        if any(fits(j, lambda j: True) for j in jobs):
+            return True
+        if claim.get("browser"):
+            return bool(ground.get("browse_jobs"))
+        return False
+    return False
+
+
+def _log_rocky_claim_blocks(conn: sqlite3.Connection, user_id: str,
+                            character_id: str, claims: list[dict],
+                            reply_text: str) -> None:
+    ensure_tables(conn)
+    now = _utc_iso()
+    for c in claims:
+        conn.execute(
+            "INSERT INTO rocky_claim_blocks (user_id, character_id, "
+            "created_at, claim_kind, claim_text, reply_excerpt) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, character_id, now, c.get("kind", ""),
+             c.get("sentence", ""), (reply_text or "")[:500]))
+    conn.commit()
+
+
+def rocky_claim_blocks(conn: sqlite3.Connection,
+                       limit: int = 50) -> list[dict]:
+    """The blocked-claim log, newest first — what the admin endpoint
+    serves so the owner can inspect what the gate stopped."""
+    ensure_tables(conn)
+    rows = conn.execute(
+        "SELECT id, user_id, character_id, created_at, claim_kind, "
+        "claim_text, reply_excerpt FROM rocky_claim_blocks "
+        "ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [{"id": r[0], "user_id": r[1], "character_id": r[2],
+             "created_at": r[3], "claim_kind": r[4],
+             "claim_text": r[5], "reply_excerpt": r[6]}
+            for r in rows]
+
+
+def screen_rocky_reply(conn: sqlite3.Connection, user_id: str,
+                       reply_text: str,
+                       character_id: str = "rocky") -> str:
+    """The claim screen: post-generation, pre-delivery, fail-closed.
+
+    No dev claims -> the reply ships untouched. Every claim backed
+    by a real queue record -> it ships. Any unbacked claim -> the
+    WHOLE reply is replaced with the grounded state (a partial edit
+    could leave a fabricated narrative standing around a removed
+    sentence), the blocked claims are logged, and only the grounded
+    text is what gets stored, voiced and sent. Never raises: an
+    internal failure replaces with the couldn't-check line rather
+    than letting an unscreened claim through."""
+    try:
+        text = (reply_text or "").strip()
+        if not text:
+            return reply_text
+        ground = rocky_dev_ground_truth(conn, user_id)
+        repos = {j["repo_short"] for j in ground.get("jobs", [])}
+        repos |= set(LANE_REPOS.values())
+        claims = detect_dev_claims(text, repos)
+        if not claims:
+            return reply_text
+        unbacked = [c for c in claims
+                    if not _claim_backed(c, ground)]
+        if not unbacked:
+            return reply_text
+        try:
+            _log_rocky_claim_blocks(conn, user_id, character_id,
+                                    unbacked, text)
+        except Exception:  # noqa: BLE001 — logging never unblocks
+            pass
+        return rocky_grounded_reply(ground)
+    except Exception:  # noqa: BLE001 — fail closed
+        return _ROCKY_COULDNT_CHECK_LINE
 
 
 # ---------------------------------------------------------------------------
