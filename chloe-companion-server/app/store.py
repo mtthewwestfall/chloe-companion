@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import random
+import re
 import sqlite3
 import time
 from typing import Any
@@ -597,7 +598,8 @@ def list_local_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         for r in conn.execute(
             "SELECT id, name, avatar_url, persona, companion_voice, blurb, "
             "door_title, sort_order, enabled, verified_fictional, photos, "
-            "owner_user_id, roleplay_locked, created_at, updated_at "
+            "owner_user_id, roleplay_locked, gallery_public, created_at, "
+            "updated_at "
             "FROM local_characters ORDER BY sort_order, name"
         ).fetchall()
     ]
@@ -620,12 +622,17 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
     _owner = _owner.strip() if isinstance(_owner, str) else None
     _owner = _owner or None
     _owner_provided = 1 if "owner_user_id" in char else 0
+    # Gallery opt-in (2026-10-15): same provided-key guard as owner_user_id,
+    # so routine admin edits never silently publish (or unpublish) a
+    # creator's companion. Absent on insert means private (0).
+    _gallery = 1 if char.get("gallery_public") else 0
+    _gallery_provided = 1 if "gallery_public" in char else 0
     conn.execute(
         "INSERT INTO local_characters "
         "(id, name, avatar_url, persona, companion_voice, blurb, door_title, "
         " sort_order, enabled, verified_fictional, photos, owner_user_id, "
-        " updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        " gallery_public, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
         "ON CONFLICT(id) DO UPDATE SET "
         "name=excluded.name, avatar_url=excluded.avatar_url, "
         "persona=excluded.persona, companion_voice=excluded.companion_voice, "
@@ -635,6 +642,8 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
         "photos=excluded.photos, "
         "owner_user_id=CASE WHEN ? THEN excluded.owner_user_id "
         "ELSE local_characters.owner_user_id END, "
+        "gallery_public=CASE WHEN ? THEN excluded.gallery_public "
+        "ELSE local_characters.gallery_public END, "
         "updated_at=datetime('now')",
         (
             cid,
@@ -649,7 +658,9 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
             1 if char.get("verified_fictional") else 0,
             _photos,
             _owner,
+            _gallery,
             _owner_provided,
+            _gallery_provided,
         ),
     )
     conn.commit()
@@ -657,6 +668,72 @@ def upsert_local_character(conn: sqlite3.Connection, char: dict[str, Any]) -> di
         "SELECT * FROM local_characters WHERE id = ?", (cid,)
     ).fetchone()
     return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Public companion gallery (2026-10-15)
+#
+# A creator-made companion appears in the gallery ONLY when its creator
+# opted in (gallery_public = 1) and the character is enabled. Characters
+# are born private (gallery_public defaults to 0), so nothing surfaces
+# without the creator's affirmative choice. The persona column holds the
+# compiled persona FILE — including the private backstory the user never
+# sees — so gallery cards take their snippet ONLY from the user-written
+# "Personality" section of that file, never the backstory.
+# ---------------------------------------------------------------------------
+
+_PERSONA_SECTION_RE = re.compile(
+    r"Personality[^\n]*\n(.*?)\n\s*Private backstory", re.DOTALL)
+
+
+def _persona_snippet(persona: str, limit: int = 160) -> str:
+    """The user-written personality blurb from a compiled persona file,
+    whitespace-collapsed and truncated. Empty for personas that are not
+    in the creator template's shape (backstory is never included)."""
+    m = _PERSONA_SECTION_RE.search(persona or "")
+    if not m:
+        return ""
+    text = " ".join(m.group(1).split())
+    return text[:limit]
+
+
+def list_gallery_characters(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Card data for the public gallery: opted-in, enabled companions
+    only, newest first. avatar_url is the creator's first photo (the
+    creator port stores it as the avatar)."""
+    rows = conn.execute(
+        "SELECT lc.id, lc.name, lc.avatar_url, lc.blurb, lc.persona, "
+        "u.name AS creator_name "
+        "FROM local_characters lc "
+        "LEFT JOIN users u ON u.user_id = lc.owner_user_id "
+        "WHERE lc.gallery_public = 1 AND lc.enabled = 1 "
+        "ORDER BY lc.created_at DESC, lc.name"
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "avatar_url": r["avatar_url"] or "",
+            "tagline": r["blurb"] or "",
+            "persona_snippet": _persona_snippet(r["persona"] or ""),
+            "creator_name": r["creator_name"] or None,
+            "chat_url": f"/?character={r['id']}",
+        }
+        for r in rows
+    ]
+
+
+def set_character_gallery_public(conn: sqlite3.Connection, char_id: str,
+                                 public: bool) -> bool:
+    """Flip one character's gallery opt-in. Returns False when the
+    character does not exist."""
+    cur = conn.execute(
+        "UPDATE local_characters SET gallery_public = ?, "
+        "updated_at = datetime('now') WHERE id = ?",
+        (1 if public else 0, (char_id or "").strip().lower()),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def delete_local_character(conn: sqlite3.Connection, char_id: str) -> bool:

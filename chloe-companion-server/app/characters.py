@@ -114,7 +114,8 @@ def _local_characters() -> list[dict[str, Any]]:
         try:
             rows = conn.execute(
                 "SELECT id, name, avatar_url, persona, companion_voice, blurb,"
-                " door_title, sort_order, owner_user_id, roleplay_locked"
+                " door_title, sort_order, owner_user_id, roleplay_locked,"
+                " gallery_public"
                 " FROM local_characters "
                 "WHERE enabled = 1 ORDER BY sort_order, name"
             ).fetchall()
@@ -188,8 +189,12 @@ def get_characters(refresh: bool = False,
         chars.append(dict(CHLOE_FALLBACK))
     if not include_private:
         uid = user_id or ""
+        # Owner-scoped characters stay private UNLESS their creator opted
+        # them into the public gallery (gallery_public, 2026-10-15) — the
+        # opt-in is the creator's affirmative publish choice.
         chars = [c for c in chars
-                 if not c.get("owner_user_id") or c.get("owner_user_id") == uid]
+                 if not c.get("owner_user_id") or c.get("owner_user_id") == uid
+                 or c.get("gallery_public")]
     chars.sort(key=lambda c: (0 if c["id"] == "chloe" else 1, c.get("sort_order") or 0))
     return chars
 
@@ -227,11 +232,35 @@ def owner_of(character_id: str | None) -> str | None:
     return (row[0] if row else None) or None
 
 
+def _gallery_public(character_id: str | None) -> bool:
+    """True when a companion-local character's creator opted it into the
+    public gallery. Never raises — visibility checks must not break."""
+    cid = (character_id or "").strip().lower()
+    if not cid:
+        return False
+    try:
+        from . import db as _db
+        conn = _db.connect()
+        try:
+            row = conn.execute(
+                "SELECT gallery_public FROM local_characters WHERE id = ?",
+                (cid,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(row and row[0])
+
+
 def visible_to(character_id: str | None, user_id: str | None) -> bool:
     """True when this user may see/interact with the character: public
-    characters always; owner-scoped ones only for their owner."""
+    characters always; owner-scoped ones only for their owner — or for
+    anyone once the creator opted the character into the public gallery."""
     owner = owner_of(character_id)
-    return owner is None or owner == (user_id or "")
+    if owner is None or owner == (user_id or ""):
+        return True
+    return _gallery_public(character_id)
 
 
 def public_list(user_id: str | None = None) -> list[dict[str, Any]]:

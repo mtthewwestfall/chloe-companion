@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import hmac
+import html as _html
 import json
 import os
 import re
@@ -232,6 +233,11 @@ class CompanionCreateIn(BaseModel):
     attest_18: bool = False
     attest_rights: bool = False
     images: list[str] = []           # data URIs, 1-3 real photos
+    gallery_public: bool = False     # opt-in: list in the public gallery
+
+
+class GalleryVisibilityIn(BaseModel):
+    public: bool = False
 
 
 class CreditOverageIn(BaseModel):
@@ -2769,6 +2775,134 @@ def create_companion(body: CompanionCreateIn, request: Request):
         return {"ok": True, "companion": comp}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Public companion gallery (2026-10-15): browseable cards for creator-made
+# companions whose creators opted in (gallery_public). Private by default;
+# only opted-in + enabled characters ever appear here. The gallery is the
+# creator funnel: the empty state still features the create-your-own CTA.
+# ---------------------------------------------------------------------------
+
+def _gallery_cards() -> list[dict]:
+    conn = _conn()
+    try:
+        return store.list_gallery_characters(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/gallery")
+def gallery_list():
+    return {"companions": _gallery_cards()}
+
+
+@app.post("/api/v1/companions/{companion_id}/gallery")
+def set_companion_gallery(companion_id: str, body: GalleryVisibilityIn,
+                          request: Request):
+    """Owner-only: flip a companion's public-gallery opt-in. Only the
+    character's creator may publish or unpublish her."""
+    user_id = _current_user_id(request)
+    cid = (companion_id or "").strip().lower()
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT owner_user_id FROM local_characters WHERE id = ?",
+            (cid,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        if (row["owner_user_id"] or "") != user_id:
+            raise HTTPException(status_code=403, detail="not_your_companion")
+        store.set_character_gallery_public(conn, cid, body.public)
+    finally:
+        conn.close()
+    characters.bust_cache()
+    return {"ok": True, "id": cid, "gallery_public": bool(body.public)}
+
+
+_GALLERY_CSS = """
+:root{--pink:#ff2d78;--purple:#a855f7;--grad:linear-gradient(135deg,#ff2d78,#a855f7);
+--bg:#0a0a12;--bg-soft:#12121c;--text:#fff;--sub:#8e8e93;--border:#2a2a3a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
+font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1060px;margin:0 auto;padding:28px 16px 56px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.brand{font-size:22px;font-weight:800}.brand span{color:var(--pink)}
+a.back{color:var(--sub);text-decoration:none;font-size:14px}
+h1{font-size:30px;margin:18px 0 4px}.lede{color:var(--sub);margin:0 0 22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+.card{display:flex;flex-direction:column;background:var(--bg-soft);
+border:1px solid var(--border);border-radius:16px;padding:10px;text-align:center}
+.card img{width:100%;aspect-ratio:3/4;border-radius:12px;object-fit:cover;background:#2a2a3a}
+.name{font-size:16px;font-weight:700;margin-top:9px}
+.tag{color:#c4b5fd;font-size:12.5px;margin-top:3px}
+.snip{font-size:12px;color:var(--sub);line-height:1.4;margin:7px 0 10px;flex:1}
+.by{font-size:11px;color:var(--sub);margin-bottom:8px}
+.chat{display:block;background:var(--grad);color:#fff;text-decoration:none;
+border-radius:8px;padding:9px 0;font-size:13px;font-weight:700}
+.cta{margin-top:30px;background:var(--bg-soft);border:1px solid var(--border);
+border-radius:16px;padding:22px;text-align:center}
+.cta p{color:var(--sub);margin:6px 0 14px}
+.btn{display:inline-block;background:var(--grad);color:#fff;text-decoration:none;
+padding:11px 26px;border-radius:999px;font-weight:700;font-size:14px}
+.empty{border:1px dashed var(--border);border-radius:16px;padding:34px 18px;
+text-align:center;color:var(--sub)}
+"""
+
+
+def _gallery_page_html(cards: list[dict]) -> str:
+    parts = [
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        "<title>Community Gallery — Whispr AI</title>",
+        "<meta name=\"description\" content=\"Companions created by Whispr "
+        "members. Browse the gallery, or create your own.\">",
+        f"<style>{_GALLERY_CSS}</style></head><body><div class=\"wrap\">",
+        "<div class=\"top\"><div class=\"brand\">Whispr <span>AI</span></div>",
+        "<a class=\"back\" href=\"/\">← Back to Whispr</a></div>",
+        "<h1>Community Gallery</h1>",
+        "<p class=\"lede\">Companions imagined and created by Whispr "
+        "members. Pick one and start talking.</p>",
+    ]
+    if cards:
+        parts.append("<div class=\"grid\">")
+        for c in cards:
+            name = _html.escape(c.get("name") or "")
+            tag = _html.escape(c.get("tagline") or "")
+            snip = _html.escape(c.get("persona_snippet") or "")
+            by = _html.escape(c.get("creator_name") or "")
+            avatar = _html.escape(c.get("avatar_url") or "", quote=True)
+            chat = _html.escape(c.get("chat_url") or "/", quote=True)
+            parts.append("<div class=\"card\">")
+            if avatar:
+                parts.append(f"<img src=\"{avatar}\" alt=\"{name}\" loading=\"lazy\">")
+            parts.append(f"<div class=\"name\">{name}</div>")
+            if tag:
+                parts.append(f"<div class=\"tag\">{tag}</div>")
+            if snip:
+                parts.append(f"<div class=\"snip\">{snip}</div>")
+            if by:
+                parts.append(f"<div class=\"by\">by {by}</div>")
+            parts.append(
+                f"<a class=\"chat\" href=\"{chat}\">Chat on Whispr</a></div>")
+        parts.append("</div>")
+    else:
+        parts.append(
+            "<div class=\"empty\">No community companions yet — "
+            "yours could be the first.</div>")
+    parts.append(
+        "<div class=\"cta\"><div style=\"font-size:19px;font-weight:700\">"
+        "Create your own companion</div>"
+        "<p>Design her personality, upload her photos — she goes live "
+        "instantly, and you choose whether she joins this gallery.</p>"
+        "<a class=\"btn\" href=\"/?create=1\">✨ Create a Companion</a></div>")
+    parts.append("</div></body></html>")
+    return "".join(parts)
+
+
+@app.get("/gallery", response_class=HTMLResponse, include_in_schema=False)
+def gallery_page():
+    return _gallery_page_html(_gallery_cards())
 
 
 @app.get("/api/v1/submissions/mine")

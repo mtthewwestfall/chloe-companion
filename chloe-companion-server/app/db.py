@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS local_characters (
     photos           TEXT NOT NULL DEFAULT '[]',  -- 2026-10-01: creator photo set (JSON data URIs)
     owner_user_id    TEXT,  -- 2026-10-08: owner-only private character (NULL = public roster)
     roleplay_locked  INTEGER NOT NULL DEFAULT 0,  -- 2026-10-13: persistent roleplay lock; owner's release word turns it off
+    gallery_public   INTEGER NOT NULL DEFAULT 0,  -- 2026-10-15: creator opt-in to the public companion gallery (default PRIVATE)
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -565,6 +566,20 @@ def _migrate_roleplay_lock_column(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_gallery_column(conn: sqlite3.Connection) -> None:
+    """2026-10-15: public companion gallery opt-in. Existing installs get
+    a gallery_public flag on local_characters, default 0 (PRIVATE) for
+    every existing character — nobody's companion appears in the public
+    gallery until its creator explicitly opts in."""
+    if _table_exists(conn, "local_characters") and not _column_exists(
+        conn, "local_characters", "gallery_public"
+    ):
+        conn.execute(
+            "ALTER TABLE local_characters ADD COLUMN gallery_public "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 def _migrate_roleplay_scenes_table(conn: sqlite3.Connection) -> None:
     """2026-10-14: roleplay scene state for the owner's start flow
     ("role play" -> she asks the casting -> his brief starts a scene
@@ -682,6 +697,7 @@ def init_db(db_path: str | None = None) -> None:
         _migrate_creator_columns(conn)
         _migrate_owner_column(conn)
         _migrate_roleplay_lock_column(conn)
+        _migrate_gallery_column(conn)
         _migrate_roleplay_scenes_table(conn)
         _migrate_referral_columns(conn)
         _migrate_conversation_attachments(conn)

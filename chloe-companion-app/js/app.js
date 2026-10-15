@@ -352,6 +352,31 @@
     renderGirlCards();
   });
 
+  /* ---------- gallery deep links ---------- */
+  // /?character=<id> (from the public gallery) opens that companion's
+  // chat. She must be on the roster — the server only lists public or
+  // owner-visible characters, so an unknown/private id simply does
+  // nothing. /?create=1 (the gallery's create CTA) opens the creator
+  // sheet; its usual login gate applies.
+  let deepLinkHandled = false;
+  function handleDeepLink() {
+    if (deepLinkHandled) return;
+    deepLinkHandled = true;
+    let params;
+    try { params = new URLSearchParams(location.search); } catch (e) { return; }
+    const cid = (params.get('character') || '').toLowerCase();
+    if (cid) {
+      const girl = CHARACTERS.find((c) => c.id === cid);
+      if (girl) { showApp(); openChat(girl.id); }
+      return;
+    }
+    if (params.get('create') === '1') {
+      showApp();
+      const btn = $('createCompanionBtn');
+      if (btn) btn.click();
+    }
+  }
+
   function showListView() {
     $('onboarding').classList.add('hidden');
     $('app').classList.remove('hidden');
@@ -1325,6 +1350,7 @@
           name, persona, blurb, gender,
           attest_18: true, attest_rights: true,
           images: photoDataUris,
+          gallery_public: !!($('creatorGalleryPublic') || {}).checked,
         });
         closeSheet('creatorSheet');
         reset();
@@ -1350,6 +1376,8 @@
       $('creatorPhotoPreview').innerHTML = '';
       $('creatorAttest18').checked = false;
       $('creatorAttestRights').checked = false;
+      const gp = $('creatorGalleryPublic');
+      if (gp) gp.checked = false;
       photoDataUris = [];
       setGender('female');
       clearError();
@@ -1768,7 +1796,7 @@
   WhisprFeed.init();
 
   // Go.
-  loadRoster();
+  loadRoster().then(handleDeepLink);
   if (localStorage.getItem('chloe_name')) {
     showApp();
     bootChat(false);

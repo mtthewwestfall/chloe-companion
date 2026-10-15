@@ -217,6 +217,9 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
         # Private by default (2026-10-08): user-created companions are
         # owner-only — visible in the roster only to their creator.
         "owner_user_id": user_id,
+        # Public gallery opt-in (2026-10-15): defaults to private; the
+        # creator must explicitly ask for a gallery listing.
+        "gallery_public": bool(data.get("gallery_public")),
     })
     return {
         "id": girl["id"],
@@ -224,5 +227,6 @@ def create_companion(conn: sqlite3.Connection, user_id: str,
         "avatar_url": girl["avatar_url"],
         "gender": gender,
         "photo_count": len(images),
+        "gallery_public": bool(girl.get("gallery_public")),
     }
 
