@@ -948,6 +948,28 @@ _GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
                "gemini-3.1-flash-lite:generateContent")
 
 
+_ROCKY_CONTEXT_CACHE: dict[str, str | None] = {"text": None}
+
+
+def _rocky_context_pack() -> str:
+    """Rocky's operator context pack (app/rocky_context.md): the
+    main agent's operating rules + the owner's standing facts,
+    loaded for Rocky's chat turns only. Data, not code, so the
+    pack can be edited without touching the brain. Fail-soft: a
+    missing/unreadable pack means Rocky runs on his persona and
+    the assist briefs alone, exactly as before this layer existed.
+    """
+    if _ROCKY_CONTEXT_CACHE["text"] is None:
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "rocky_context.md")
+            with open(path, encoding="utf-8") as f:
+                _ROCKY_CONTEXT_CACHE["text"] = f.read().strip()
+        except Exception:
+            _ROCKY_CONTEXT_CACHE["text"] = ""
+    return _ROCKY_CONTEXT_CACHE["text"] or ""
+
+
 def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     """System instruction: persona + memory stack + trust posture."""
     char = context.get("character") or {}
@@ -1105,6 +1127,13 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                  "real. Never narrate the room or scenery. Never "
                  "therapist mode.")
     parts.append(style)
+    if cid == "rocky":
+        pack = _rocky_context_pack()
+        if pack:
+            parts.append(
+                "OPERATOR CONTEXT PACK (your standing rules and "
+                "facts as his stand-in — work from them; do not "
+                "recite them back unprompted):\n" + pack)
     assist_result = (context.get("assist_result") or "").strip()
     if assist_result:
         if cid == "rocky":
