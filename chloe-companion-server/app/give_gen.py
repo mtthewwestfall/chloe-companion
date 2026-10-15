@@ -482,11 +482,19 @@ def spawn_give_generation_job(gen_id: int) -> None:
     # Route through the single processor (below): a dedicated render
     # thread per gen was one of the two concurrent Sogni clients that
     # destroyed each other's session in production. The spawned
-    # thread only hands the id to the processor loop, which either
-    # becomes the processor or queues behind the running one.
+    # thread only wakes the processor, which either becomes the
+    # processor or queues behind the running one.
+    #
+    # This is the chat-driven single-id hand-off (assist's studio
+    # renders): a caller is actively polling for this row, so the id
+    # goes to the processor's PRIORITY lane — the one lane that may
+    # pass the pending backlog. Batch triggers do NOT get this lane
+    # (see _process_queued_give_generations).
+    with _PROCESSOR_GUARD:
+        _PRIORITY_GIVE_IDS.append(gen_id)
     t = threading.Thread(
         target=_process_queued_give_generations,
-        args=([gen_id],),
+        args=([],),
         daemon=True,
         name=f"give-gen-{gen_id}",
     )
@@ -579,15 +587,37 @@ def _has_unrendered_pending() -> bool:
 # Each render creates its own Sogni client, the second client's
 # session superseded the first's, and both batches died at the SDK's
 # account check — the single-flight sign-in lock could not help,
-# because no sign-in was involved. So every trigger now hands its ids
-# to ONE shared pending queue: the first caller to find the processor
-# idle becomes it; callers that find it running just enqueue and
-# return. The processor drains the queue, then sweeps the DB for
-# unrendered queued rows (rows a trigger queued mid-drain, or rows a
-# dead processor left behind), and stands down only when both are
-# empty.
+# because no sign-in was involved. So every trigger now wakes ONE
+# shared processor: the first caller to find the processor idle
+# becomes it; callers that find it running just leave their wake-up
+# behind and return. There is never a second processor.
+#
+# Selection order (2026-10-14 drain fix): the processor does NOT
+# work from the ids a trigger hands in. Handed-in batch ids used to
+# be popped first, so every fresh trigger batch (boot auto-loop,
+# 12h tick, admin generate-daily) cut in line ahead of the pending
+# backlog — and when a job parked (throttle / dead session) the
+# processor stood down with the rest of that batch still sitting
+# in the in-memory hand-in deque, where the next deploy silently
+# discarded it; those rows stayed pending for a day while fresh
+# batches rendered around them. Now the work selection is:
+#   1. the priority lane (single-id hand-offs from
+#      spawn_give_generation_job — a chat caller is polling for
+#      that one row);
+#   2. the DB claim: the OLDEST unrendered pending row, in global
+#      id order — trigger rows are DB rows and take their turn
+#      behind everything older, so the backlog drains in order
+#      no matter how often triggers fire, and a park stand-down
+#      strands nothing (the next wake re-derives the work from
+#      the DB, never from memory);
+#   3. the hand-in deque, only as a fallback for ids whose rows
+#      are not claimable from the DB.
+# The processor stands down only when all three are empty, or the
+# moment a job parks (the park discipline is unchanged: a parked
+# job ends the drain, the queue stays pending for the next wake).
 _PROCESSOR_GUARD = threading.Lock()
 _PENDING_GIVE_IDS: collections.deque[int] = collections.deque()
+_PRIORITY_GIVE_IDS: collections.deque[int] = collections.deque()
 _GIVE_PROCESSOR_ACTIVE = False
 
 # Deploy-overlap boot grace: right after a deploy, the old and new
@@ -676,13 +706,27 @@ def _claim_next_queued_give_id(exclude: set[int]) -> int | None:
         conn.close()
 
 
+def _discard_handed_in(gen_id: int) -> None:
+    """Drop a selected id from the hand-in deque when it is there:
+    the deque is only a fallback lane now, and a row the priority
+    lane or the DB claim already selected must not be handed to the
+    fallback later in the same drain."""
+    with _PROCESSOR_GUARD:
+        try:
+            _PENDING_GIVE_IDS.remove(gen_id)
+        except ValueError:
+            pass
+
+
 def _process_queued_give_generations(gen_ids: list[int]) -> None:
-    """Enqueue ids and, when idle, become the single give processor.
+    """Wake the single give processor (handed-in ids are a wake-up,
+    not a work order — see the selection-order note above).
 
     Batch triggers spawn a thread targeting this, so the first
     trigger's thread IS the processor and every later trigger's
-    thread just enqueues and exits — there is never a second
-    processor. Each queued row is processed exactly once per run.
+    thread just enqueues its wake-up and exits — there is never a
+    second processor. Each queued row is processed exactly once
+    per run.
     """
     global _GIVE_PROCESSOR_ACTIVE
     with _PROCESSOR_GUARD:
@@ -695,12 +739,17 @@ def _process_queued_give_generations(gen_ids: list[int]) -> None:
         _boot_grace_wait()
         while True:
             with _PROCESSOR_GUARD:
-                gen_id = _PENDING_GIVE_IDS.popleft() \
-                    if _PENDING_GIVE_IDS else None
+                gen_id = _PRIORITY_GIVE_IDS.popleft() \
+                    if _PRIORITY_GIVE_IDS else None
             if gen_id is None:
                 gen_id = _claim_next_queued_give_id(processed)
             if gen_id is None:
+                with _PROCESSOR_GUARD:
+                    gen_id = _PENDING_GIVE_IDS.popleft() \
+                        if _PENDING_GIVE_IDS else None
+            if gen_id is None:
                 return
+            _discard_handed_in(gen_id)
             if gen_id in processed:
                 continue
             processed.add(gen_id)
