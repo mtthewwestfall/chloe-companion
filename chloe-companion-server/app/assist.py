@@ -3859,6 +3859,40 @@ def detect_image_request(text: str) -> str | None:
     return prompt.strip(" \t\r\n.!?")[:1000]
 
 
+_POOL_HINT_RE = re.compile(
+    r"\b(?:gemini|image desk|picture desk|the pool|my pool|"
+    r"the runner|work runner)\b", re.IGNORECASE)
+_POOL_HINT_STRIP_RE = re.compile(
+    r"\b(?:on|using|via|with|through|from)\s+(?:my\s+|the\s+)?"
+    r"(?:gemini|image desk|picture desk|pool|runner)\b[:,]?\s*",
+    re.IGNORECASE)
+
+
+def detect_pool_image_request(text: str) -> str | None:
+    """Rocky's direct line to the Gemini picture desk (2026-10-15).
+
+    Fires only when the ask BOTH names the pool machinery (Gemini /
+    image desk / pool / runner) AND carries an image ask. Returns
+    the visual prompt with the routing words scrubbed out, or None
+    (not a pool ask). Deliberately separate from the Sogni routing:
+    naming the pool is the owner's explicit routing instruction.
+    """
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or not _POOL_HINT_RE.search(t):
+        return None
+    prompt = detect_image_request(t)
+    if prompt is None:
+        m = re.search(
+            r"\b(?:image job|picture|image|photo)\b[^:]{0,50}[:\-]\s*"
+            r"(.+)$", t, re.IGNORECASE)
+        if not m:
+            return None
+        prompt = m.group(1)
+    prompt = _POOL_HINT_STRIP_RE.sub("", prompt).strip(" \t,.:-")
+    prompt = re.sub(r"^(?:of|for)\s+", "", prompt, flags=re.IGNORECASE)
+    return prompt[:1000]
+
+
 def _image_usage_row(conn: sqlite3.Connection, user_id: str,
                      day: str) -> tuple[int, float]:
     row = conn.execute(
@@ -9269,6 +9303,17 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         if attachments:
             return analyze_chat_attachments(conn, user, text,
                                             character_id, attachments)
+        # Rocky picture desk (owner-only, ROCKY'S THREAD ONLY,
+        # 2026-10-15): an ask that names the Gemini pool/desk goes
+        # straight to the picture desk (_handle_image_request) —
+        # his explicit routing beats the Sogni lane's claim on
+        # make-asks, and the result returns in chat as an image
+        # bubble. The girls never see this branch.
+        if _is_rocky(character_id):
+            pool_prompt = detect_pool_image_request(text)
+            if pool_prompt is not None:
+                return _handle_image_request(conn, user_id,
+                                             character_id, pool_prompt)
         # Sogni plan lane (owner-only, assistant threads only) —
         # checked before the image lane so "make a video" never lands
         # in the picture desk. ANY Sogni mention routes here (plus

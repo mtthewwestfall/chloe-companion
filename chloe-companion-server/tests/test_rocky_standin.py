@@ -119,5 +119,65 @@ class RockyStatusBoardTest(unittest.TestCase):
         self.assertNotIn("Sogni render queue", mia)
 
 
+class RockyPoolImageDeskTest(unittest.TestCase):
+    """Stage 5: Rocky can send an image job to the owner's Gemini
+    pool by naming it, and the file comes back in chat. The girls'
+    routing is untouched."""
+
+    def setUp(self):
+        self.old_env = {k: os.environ.get(k) for k in
+                        ("ASSIST_ROLLOUT", "ASSIST_OWNER_IDS")}
+        os.environ["ASSIST_ROLLOUT"] = "owner"
+        os.environ["ASSIST_OWNER_IDS"] = "owner_1"
+        self.conn = _conn()
+
+    def tearDown(self):
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.conn.close()
+
+    def test_detect_needs_hint_and_cleans_prompt(self):
+        out = assist.detect_pool_image_request(
+            "make an image on my gemini of a red barn at dusk")
+        self.assertIsNotNone(out)
+        self.assertIn("red barn", out)
+        self.assertNotIn("gemini", out.lower())
+        self.assertIsNone(assist.detect_pool_image_request(
+            "make an image of a red barn at dusk"))
+        self.assertIsNone(assist.detect_pool_image_request(
+            "check the gemini pool status"))
+        out2 = assist.detect_pool_image_request(
+            "run an image job on the runner: a lighthouse in fog")
+        self.assertIsNotNone(out2)
+        self.assertIn("lighthouse", out2)
+
+    def test_rocky_dispatch_returns_image_in_chat(self):
+        fake = {"status": "ok", "image_url": "/generated/barn.png",
+                "model": "gemini-2.5-flash-image", "latency_s": 0.1,
+                "bytes": b"", "mime_type": "image/png"}
+        with mock.patch.object(assist, "_generate_gemini_image",
+                               return_value=fake):
+            hit = assist.maybe_assist(
+                self.conn, OWNER,
+                "make an image on my gemini of a red barn", "rocky")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.get("image_url"), "/generated/barn.png")
+        self.assertNotIn("gemini", (hit.get("image_prompt") or ""))
+
+    def test_hannah_never_reaches_the_pool_desk(self):
+        with mock.patch.object(assist, "_handle_sogni_lane",
+                               return_value={"brief": "sogni lane"}) as lane, \
+                mock.patch.object(assist, "_handle_image_request") as desk:
+            hit = assist.maybe_assist(
+                self.conn, OWNER,
+                "make an image on my gemini of a red barn", "hannah")
+        self.assertEqual(hit, {"brief": "sogni lane"})
+        lane.assert_called_once()
+        desk.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
