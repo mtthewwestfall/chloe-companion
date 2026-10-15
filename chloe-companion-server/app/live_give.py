@@ -33,9 +33,11 @@ reference frames only — never a user-uploaded photo — and lands the
 finished media in the same chat via store.log_turn with a media
 attachment, the shape _sogni_plan_deliver uses. On ANY failure (no
 session, dead session after the shared resolve+retry, render error)
-the worker falls back to the closest preset from her own give library;
-with no preset either, nothing is surfaced and the conversation simply
-continues.
+the worker falls back to the preset from her own give library
+closest to what he asked for — the ask's stage is derived from his
+words (stage_for_ask_text), with the progression walk as the
+no-stage-named fallback; with no preset either, nothing is surfaced
+and the conversation simply continues.
 
 Session discipline is inherited, not reinvented: the stored plan pair,
 assist.resolve_dead_sogni_session for recovery, and give_gen's
@@ -54,6 +56,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 from . import assist, characters, config, db, give_gen, store
@@ -199,6 +202,85 @@ def detect_initiative_ask(text: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# Ask text -> give stage. The fallback picker serves the preset closest
+# to WHAT WAS ASKED (2026-10-14 picker fix), so the ask's stage is
+# derived from its text against give_gen's stage vocabulary (STAGE_
+# NAMES / STAGE_DESCRIPTIONS, both genders — one shared table, keyed to
+# the acts those stages name). This is the ONE mapping: the live hook
+# derives it from his chat message and custom_video derives it from the
+# request description. Tight by design, like the detectors: a text that
+# names no stage act returns None and the picker keeps its legacy
+# progression walk, unchanged.
+# ---------------------------------------------------------------------------
+
+_STAGE_ASK_RES: tuple[tuple[int, re.Pattern], ...] = tuple(
+    (stage, re.compile(pat, re.IGNORECASE))
+    for stage, pat in (
+        # 7 "titty fuck" / between-her-breasts: its "fuck" is not
+        # stage 9's — stage 9's fuck pattern below requires an object.
+        (7, r"\btit(?:ty)?\s*fuck\b|\bdeep\s+thrusts?\b"
+            r"|\bbetween\b[^.!?]{0,20}\b(boobs|tits|breasts|titties)\b"),
+        (9, r"\bsex\b|\bmake\s+love\b|\bpenetrat\w*\b"
+            r"|\binside\s+(you|me|her)\b"
+            r"|(?<!titty )(?<!tit )\bfuck\b[^.!?]{0,20}\b(me|her|him|you)\b"
+            r"|\bride\b[^.!?]{0,12}\b(me|my\s+cock|my\s+dick)\b"),
+        (8, r"\boral\b|\bblow\s*job\b|\bblowjob\b"
+            r"|\bgiv\w*\b[^.!?]{0,12}\bhead\b|\bgetting\s+head\b|\bbj\b"
+            r"|\bsuck\b[^.!?]{0,20}\b(cock|dick|me|it|him)\b"
+            r"|\blick\b[^.!?]{0,16}\b(cock|dick)\b"),
+        (6, r"\bmasturbat\w*\b|\bplays?\s+w/\s*(herself|yourself|himself)\b"
+            r"|\b(play|plays|playing|touch|touching|rub|rubbing|finger|"
+            r"fingering|stroke|stroking)\b[^.!?]{0,20}"
+            r"\b(yourself|herself|himself)\b"),
+        (5, r"\b(pants|jeans|shorts)\s+off\b"
+            r"|\b(take|taking|pull|remove|removing)\s+off\b[^.!?]{0,16}"
+            r"\b(pants|jeans|shorts|panties)\b"
+            r"|\b(take|taking|pull|remove|removing)\b[^.!?]{0,20}"
+            r"\b(pants|jeans|shorts)\b[^.!?]{0,8}\boff\b"
+            r"|\bunderwear\b|\bpanties\b"),
+        # 4's signature is the nipples themselves (pinch/tease/touch).
+        (4, r"\bnipples?\b"),
+        (3, r"\b(grab|grabbing|touch|touching|hold|holding|squeeze|"
+            r"squeezing|cup|feel|feeling|rub|rubbing)\b[^.!?]{0,20}"
+            r"\b(boobs|breasts|tits|titties|chest)\b"
+            r"|\b(show|see)\b[^.!?]{0,16}\b(boobs|breasts|tits|titties)\b"
+            r"|\bboob\s*grabs?\b|\bchest\s+flex\b"
+            r"|\bflex\b[^.!?]{0,16}\b(chest|arms)\b"),
+        (2, r"\btopless\b|\bshirtless\b|\b(top|shirt|bra)\s+off\b"
+            r"|\b(take|taking|pull|slip|peel|remove|removing)\s+off\b"
+            r"[^.!?]{0,16}\b(top|shirt|bra)\b"
+            r"|\b(take|taking|pull|slip|peel|remove|removing)\b"
+            r"[^.!?]{0,20}\b(top|shirt|bra)\b[^.!?]{0,8}\boff\b"),
+        (1, r"\b(lift|lifting)\b[^.!?]{0,16}\b(shirt|top)\b"
+            r"|\bshirt\s+lift\b|\blift\s+tease\b"),
+    )
+)
+
+# A bare "fuck" with no more specific stage evidence still reads as
+# stage 9 — but only as the last resort, so "titty fuck" (stage 7's
+# own pattern above) is never escalated by it.
+_BARE_STAGE_NINE_RE = re.compile(r"\bfuck(?:ing)?\b", re.IGNORECASE)
+
+
+def stage_for_ask_text(text: str) -> int | None:
+    """The give stage an ask's text names, or None when it names none.
+
+    Every stage whose act the text mentions is a candidate; the ask's
+    peak (the highest) wins — an ask that escalates ("take off your
+    top and play with yourself") is a request for its furthest point,
+    and the fallback should match that heat, not its first clause.
+    Shared by the live hook (his message) and custom_video (the
+    request description) so both fallbacks read an ask the same way."""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t:
+        return None
+    hits = {stage for stage, pat in _STAGE_ASK_RES if pat.search(t)}
+    if not hits and _BARE_STAGE_NINE_RE.search(t):
+        hits = {9}
+    return max(hits) if hits else None
+
+
+# ---------------------------------------------------------------------------
 # Per-(user, girl) state: in-flight flag + cooldown clocks. In-process,
 # like main's _LAST_PRESET_SENT — a chat-speed feature, not a queue.
 # ---------------------------------------------------------------------------
@@ -238,6 +320,16 @@ def _next_stage(conn: Any, user_id: str, girl_id: str) -> int:
 # ---------------------------------------------------------------------------
 # Preset fallback — her OWN give library, mirroring preset_video's
 # stage walk (DB rows first, then the static media-dir library).
+#
+# Which stage serves (2026-10-14 picker fix): when the ask's stage is
+# known (stage_for_ask_text over his message / the request
+# description), the pick is ASK-aware — her preset at that stage, else
+# the nearest stage by distance, ties preferring the stage at-or-below
+# the ask before the one above. Production proved the old behaviour
+# wrong: the picker consulted only his progression, so "take off your
+# top" was answered with a stage-8 clip because his walk sat at 8.
+# With no stage derivable, the legacy progression walk below runs
+# exactly as it always has.
 # ---------------------------------------------------------------------------
 
 def _media_type_of(url: str) -> str:
@@ -245,10 +337,44 @@ def _media_type_of(url: str) -> str:
     return "image" if u.endswith(_IMAGE_EXTS) else "video"
 
 
+def _static_media_dir() -> str:
+    """The shipped static give library (<girl>-give-stage<N>.mp4),
+    served under /media/."""
+    return os.path.join(os.path.dirname(config.DATA_DIR),
+                        "chloe-companion-app", "media")
+
+
+def _stage_order_from(want_stage: int) -> list[int]:
+    """Stage visit order for an ask-aware pick: the asked stage first,
+    then by distance, the stage below before the stage above at each
+    distance (1 away below, 1 away above, 2 below, 2 above, ...)."""
+    return sorted(range(1, 10),
+                  key=lambda s: (abs(s - want_stage),
+                                 0 if s <= want_stage else 1))
+
+
+def _prefer_within_stage(rows: list[dict[str, Any]], want_kind: str,
+                         seen: set) -> dict[str, Any] | None:
+    """The picker's standing within-stage preferences, unchanged:
+    the requested kind first, then unseen clips, then row order
+    (id ASC for DB rows, filename order for the static library)."""
+    if not rows:
+        return None
+    kind_rows = [r for r in rows if r["media_type"] == want_kind] or rows
+    fresh = [r for r in kind_rows if r["id"] not in seen] or kind_rows
+    return fresh[0]
+
+
 def _pick_preset(conn: Any, user_id: str, girl_id: str,
-                 want_kind: str) -> dict[str, Any] | None:
-    """Closest preset from her own library: the stage walk the preset
-    endpoint uses, preferring the requested kind, then unseen clips."""
+                 want_kind: str,
+                 want_stage: int | None = None) -> dict[str, Any] | None:
+    """Closest preset from her own library. With `want_stage` (the
+    ask's stage, stage_for_ask_text) the closest is to the ASK: exact
+    stage, else nearest by distance, below before above. Without it,
+    the legacy progression walk, byte-for-byte the old behaviour.
+    Within a stage: the requested kind, then unseen, then row order."""
+    if want_stage is not None and not (1 <= int(want_stage) <= 9):
+        want_stage = None
     try:
         row = conn.execute(
             "SELECT gives_received FROM user_give_progress "
@@ -261,6 +387,9 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
             (user_id, girl_id)).fetchall()}
     except Exception:  # noqa: BLE001
         gives, seen = 0, set()
+    if want_stage is not None:
+        return _pick_preset_for_stage(conn, girl_id, want_kind,
+                                      int(want_stage), seen)
     stage = (gives % 9) + 1
     rows: list[dict[str, Any]] = []
     try:
@@ -280,8 +409,7 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
         # Static media-dir library (e.g. brooklyn's shipped clips):
         # <girl>-give-stage<N>[-variant].mp4, served under /media/.
         try:
-            media_dir = os.path.join(os.path.dirname(config.DATA_DIR),
-                                     "chloe-companion-app", "media")
+            media_dir = _static_media_dir()
             for fn in sorted(os.listdir(media_dir)):
                 fl = fn.lower()
                 if not fl.startswith(girl_id + "-give-") \
@@ -301,18 +429,99 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
     return fresh[0]
 
 
+def _pick_preset_for_stage(conn: Any, girl_id: str, want_kind: str,
+                           want_stage: int,
+                           seen: set) -> dict[str, Any] | None:
+    """Ask-aware pick: her presets grouped by stage (DB rows first;
+    the static library only when she has no staged DB rows at all —
+    the same precedence as the legacy walk), visited in
+    _stage_order_from order."""
+    by_stage: dict[int, list[dict[str, Any]]] = {}
+    try:
+        found = conn.execute(
+            "SELECT id, url, stage FROM girl_media WHERE girl_id = ? "
+            "AND kind = 'give' ORDER BY id ASC",
+            (girl_id,)).fetchall()
+        for r in found:
+            st = int(r[2] or 0)
+            if 1 <= st <= 9:
+                by_stage.setdefault(st, []).append(
+                    {"id": r[0], "url": r[1],
+                     "media_type": _media_type_of(r[1]), "stage": st})
+    except Exception:  # noqa: BLE001
+        by_stage = {}
+    if not by_stage:
+        try:
+            media_dir = _static_media_dir()
+            for fn in sorted(os.listdir(media_dir)):
+                fl = fn.lower()
+                if not fl.startswith(girl_id + "-give-") \
+                        or not fl.endswith(".mp4"):
+                    continue
+                m = re.search(r"-stage(\d+)", fl)
+                st = int(m.group(1)) if m else 0
+                if 1 <= st <= 9:
+                    by_stage.setdefault(st, []).append(
+                        {"id": None, "url": "/media/" + fn,
+                         "media_type": "video", "stage": st})
+        except OSError:
+            pass
+    for st in _stage_order_from(want_stage):
+        pick = _prefer_within_stage(by_stage.get(st) or [], want_kind,
+                                    seen)
+        if pick:
+            return pick
+    return None
+
+
+def _preset_size_bytes(preset: dict[str, Any]) -> int | None:
+    """A preset's real byte size when its URL resolves to a local
+    file — /generated/ rows (fresh renders registered in girl_media)
+    and the static /media/ library, by bare path or full URL alike.
+    girl_media carries no size column, so the filesystem is the one
+    source. None when the size cannot be determined (remote URL only,
+    file gone): the delivery then omits the size rather than recording
+    a false 0 (the client renders a missing size as no label at all)."""
+    raw = (preset.get("url") or "").split("?", 1)[0]
+    if not raw:
+        return None
+    path = urllib.parse.urlparse(raw).path if "://" in raw else raw
+    base = os.path.basename(path)
+    if not base:
+        return None
+    candidates = []
+    if path.startswith("/generated/"):
+        candidates.append(os.path.join(config.GENERATED_DIR, base))
+    elif path.startswith("/media/"):
+        candidates.append(os.path.join(_static_media_dir(), base))
+    for cand in candidates:
+        try:
+            size = os.path.getsize(cand)
+        except OSError:
+            continue
+        if size > 0:
+            return int(size)
+    return None
+
+
 def _deliver_preset(conn: Any, user_id: str, girl_id: str,
                     preset: dict[str, Any], *, during_render: bool,
                     line: str | None = None) -> None:
     """Land a library preset in the chat + the preset endpoint's
     progress bookkeeping (DB rows only). `line` overrides the spoken
     line (the custom-video fallback speaks its own swap line); the
-    default lines are unchanged."""
+    default lines are unchanged. The attachment records the file's
+    real size when it can be determined (2026-10-14) — never a
+    placeholder 0 for an existing file."""
     kind = preset["media_type"]
     ext = "mp4" if kind == "video" else \
         (preset["url"].split("?", 1)[0].rsplit(".", 1)[-1] or "jpg")
-    attachments = [{"kind": kind, "url": preset["url"],
-                    "name": f"{girl_id}-give.{ext}", "size": 0}]
+    attachment = {"kind": kind, "url": preset["url"],
+                  "name": f"{girl_id}-give.{ext}"}
+    size = _preset_size_bytes(preset)
+    if size:
+        attachment["size"] = size
+    attachments = [attachment]
     if line is None:
         line = ("here, babe — hold onto this one while I make your new one."
                 if during_render else
@@ -464,6 +673,9 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
     conn = None
     delivered = False
     preset_attempted = False
+    # The fallback serves what he ASKED for, not where his
+    # progression sits (2026-10-14 picker fix).
+    want_stage = stage_for_ask_text(trigger_text)
     try:
         conn = db.connect()
         girl = characters.get_character(girl_id, user_id=user_id)
@@ -490,7 +702,8 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
                   f"{user_id}", flush=True)
         else:
             preset_attempted = True
-            preset = _pick_preset(conn, user_id, girl_id, kind)
+            preset = _pick_preset(conn, user_id, girl_id, kind,
+                                  want_stage)
             if preset:
                 _deliver_preset(conn, user_id, girl_id, preset,
                                 during_render=False)
@@ -508,7 +721,8 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
             try:
                 fconn = conn if conn is not None else db.connect()
                 try:
-                    preset = _pick_preset(fconn, user_id, girl_id, kind)
+                    preset = _pick_preset(fconn, user_id, girl_id, kind,
+                                          want_stage)
                     if preset:
                         _deliver_preset(fconn, user_id, girl_id, preset,
                                         during_render=False)
@@ -635,7 +849,8 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
                     st["last_initiative"] = ts
                 action = "start"
         if action == "preset":
-            preset = _pick_preset(conn, user_id, gid, det["kind"])
+            preset = _pick_preset(conn, user_id, gid, det["kind"],
+                                  stage_for_ask_text(text))
             if not preset:
                 _log_eval(gid, user_id, det, assist_claimed,
                           "holdover_no_preset")

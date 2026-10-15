@@ -82,15 +82,18 @@ def _scrub_detail(text: Any) -> str:
 
 
 def _deliver_preset_fallback(conn, req: dict[str, Any]) -> str:
-    """Deliver the closest preset from THIS GIRL'S OWN give library
-    into the requesting user's chat with her — live_give's selection
-    and delivery machinery (stage walk over her own girl_media, then
-    her static library), never another girl's media and never Chloe's
-    fallback pool. Returns the delivered media URL, or "" when she
-    has no preset to send."""
+    """Deliver the ask-closest preset from THIS GIRL'S OWN give
+    library into the requesting user's chat with her — live_give's
+    selection and delivery machinery (stage derived from the request
+    description via live_give.stage_for_ask_text, progression walk
+    when the text names no stage; her own girl_media, then her static
+    library), never another girl's media and never Chloe's fallback
+    pool. Returns the delivered media URL, or "" when she has no
+    preset to send."""
     from . import live_give
     preset = live_give._pick_preset(
-        conn, req["user_id"], req["girl_id"], "video")
+        conn, req["user_id"], req["girl_id"], "video",
+        live_give.stage_for_ask_text(req.get("description") or ""))
     if not preset:
         return ""
     live_give._deliver_preset(
