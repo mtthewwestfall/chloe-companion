@@ -58,5 +58,66 @@ class RockyContextPackTest(unittest.TestCase):
             self.assertNotIn("OPERATOR CONTEXT PACK", text)
 
 
+FAKE_STATUS = {"onefetch": {"founder_count": 3, "founder_spots_left": 197,
+                             "founder_open": True, "ai_available": True,
+                             "site_status": 200},
+               "roof_rover": {"shelf_leads": 5, "site_status": 200},
+               "gemini": {"believed_healthy": 2,
+                          "pool": {"healthy": 2}, "degraded": False}}
+
+
+def _conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(db.SCHEMA)
+    assist.ensure_tables(conn)
+    return conn
+
+
+class RockyStatusBoardTest(unittest.TestCase):
+    """Stage 4: Rocky's status answer is the full board — project
+    lines + Whispr numbers + the Sogni render queue — read live."""
+
+    def setUp(self):
+        self.conn = _conn()
+        patcher = mock.patch.object(assist, "fetch_app_status",
+                                    return_value=FAKE_STATUS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_rocky_status_includes_whispr_and_render_queue(self):
+        brief = assist._status_brief(self.conn, "rocky")
+        self.assertIn("Gemini key pool", brief)
+        self.assertIn("Whispr:", brief)
+        self.assertIn("Sogni render queue: empty", brief)
+
+    def test_render_queue_counts_waiting_jobs(self):
+        for status in ("pending", "pending", "generating", "approved"):
+            self.conn.execute(
+                "INSERT INTO give_generations (girl_id, stage, prompt,"
+                " day, status) VALUES ('mia', 2, 'p', '2026-10-15', ?)",
+                (status,))
+        self.conn.commit()
+        lines = assist._render_queue_lines(self.conn)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("3 give render(s)", lines[0])
+        self.assertIn("pending: 2", lines[0])
+        self.assertIn("generating: 1", lines[0])
+        brief = assist._status_brief(self.conn, "rocky")
+        self.assertIn("Sogni render queue: 3", brief)
+
+    def test_render_queue_fails_soft(self):
+        self.conn.execute("DROP TABLE give_generations")
+        lines = assist._render_queue_lines(self.conn)
+        self.assertIn("UNREACHABLE", lines[0])
+
+    def test_girls_status_unchanged_by_the_board(self):
+        hannah = assist._status_brief(self.conn, "hannah")
+        self.assertNotIn("Sogni render queue", hannah)
+        mia = assist._status_brief(self.conn, "mia")
+        self.assertIn("Whispr:", mia)
+        self.assertNotIn("Sogni render queue", mia)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1596,6 +1596,30 @@ def _status_lane_redirect(character_id: str, text: str) -> dict | None:
     return None
 
 
+def _render_queue_lines(conn: sqlite3.Connection) -> list[str]:
+    """Sogni render queue state from the app's own database: give
+    generations still waiting (pending) or mid-render (generating).
+    One slice of Rocky's status board (2026-10-15) — fails soft and
+    says so rather than inventing a queue."""
+    try:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) FROM give_generations "
+            "WHERE status IN ('pending', 'generating') "
+            "GROUP BY status").fetchall()
+        counts = {str(r[0]): int(r[1]) for r in rows}
+        total = sum(counts.values())
+        if not total:
+            return ["Sogni render queue: empty — no give renders "
+                    "waiting or rendering right now."]
+        detail = ", ".join(f"{k}: {v}" for k, v in sorted(
+            counts.items()))
+        return [f"Sogni render queue: {total} give render(s) "
+                f"waiting or rendering ({detail})"]
+    except Exception:
+        return ["Sogni render queue: UNREACHABLE — you could not "
+                "read the render queue just now."]
+
+
 def _status_brief(conn: sqlite3.Connection,
                   character_id: str = "hannah") -> str:
     lane = character_lane(character_id)
@@ -1610,6 +1634,14 @@ def _status_brief(conn: sqlite3.Connection,
         lines = _onefetch_lines(s) + _gemini_lines(s)
     else:
         lines = _status_lines(fetch_app_status())
+        if _is_rocky(character_id):
+            # The stand-in's board (2026-10-15): the combined
+            # project lines PLUS the Whispr app numbers and the
+            # Sogni render queue — Rocky is the only thread whose
+            # status answer covers all of it, read live at
+            # ask-time like every other slice.
+            lines = lines + _whispr_status_lines(conn) \
+                + _render_queue_lines(conn)
     return ("You just checked his live numbers yourself, right "
             "now. Report ONLY the numbers in the LIVE block below, "
             "in your own voice, short and plain. Any line that says "
