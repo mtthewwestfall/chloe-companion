@@ -23,7 +23,10 @@ Production evidence (deployment 8cf31152, pool fully down):
    phase 3's backoff-ignoring sweep (up to the 8-attempt cap of
    guaranteed 429s, each re-stamping the key's backoff). Fix: voice
    sources fail fast — no believed-healthy and no eligible key means
-   one decision, zero attempts. Chat behavior unchanged.
+   one decision, zero attempts. Chat behavior unchanged AT THIS FIX;
+   superseded 2026-10-15 by the efficiency pass, which removed the
+   last-resort sweep for every source (see the updated chat test
+   below).
 
 Run:  python -m pytest tests/test_chloe_fix_2026_10_14.py
 """
@@ -248,18 +251,19 @@ class VoiceFailFastTest(unittest.TestCase):
         self.assertEqual(calls, [])  # one decision, no per-key sweep
 
     def test_chat_pool_down_behavior_unchanged(self):
+        # RENAMED IN EFFECT by the 2026-10-15 efficiency pass: this
+        # test originally pinned chat keeping the phase-3 last-resort
+        # sweep while voice failed fast. The efficiency pass (owner
+        # order) removed the sweep for EVERY source — when no key is
+        # believed healthy and none is eligible, chat now makes the
+        # same one no-healthy-key decision as voice: zero attempts.
+        # The method name is kept so history stays traceable.
         self._pool_down()
-
-        def behavior(key_value):
-            raise urllib.error.HTTPError(
-                "https://example.test/gen", 429, "err", None, None)
-
-        calls = self._patch_http(behavior)
+        calls = self._patch_http(lambda kv: {"ok": True})
         result = gemini_keys.post_json(
             "https://example.com/gen", {"x": 1}, source="whispr-chat")
         self.assertIsNone(result)
-        # Chat still runs the last-resort sweep (legacy behavior).
-        self.assertGreater(len(calls), 0)
+        self.assertEqual(calls, [])  # one decision, no per-key sweep
 
     def test_voice_healthy_key_still_serves(self):
         key = gemini_keys.add_key("voice-ok", "v", False)
