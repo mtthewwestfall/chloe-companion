@@ -2023,6 +2023,154 @@ def get_public_her_day():
         conn.close()
 
 
+def _today_time_ago(created_at: str) -> str:
+    """Relative label for a her_day_posts created_at (UTC text)."""
+    from datetime import datetime
+    try:
+        created = datetime.strptime((created_at or "")[:19],
+                                    "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+    mins = max(1, int((datetime.utcnow() - created).total_seconds() // 60))
+    if mins < 60:
+        return f"{mins}m"
+    hrs = mins // 60
+    if hrs < 24:
+        return f"{hrs}h"
+    return f"{hrs // 24}d"
+
+
+_TODAY_CSS = """
+*{box-sizing:border-box}
+body{margin:0;background:#0a0a12;color:#f5f5fa;
+font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}
+.today-wrap{max-width:560px;margin:0 auto;padding:20px 14px 40px}
+.today-brand{font-size:1.6rem;font-weight:900;letter-spacing:1px;
+background:linear-gradient(90deg,#ec4899,#9d4edd);-webkit-background-clip:text;
+-webkit-text-fill-color:transparent}
+.today-h1{font-size:1.35rem;margin:10px 0 2px}
+.today-sub{color:#9a9ab0;margin:0 0 16px;font-size:.95rem}
+.today-cta{display:block;text-align:center;text-decoration:none;color:#fff;
+font-weight:700;font-size:1.05rem;padding:14px 16px;border-radius:14px;
+background:linear-gradient(90deg,#ec4899,#9d4edd);margin:16px 0 6px}
+.today-cta-sub{text-align:center;color:#9a9ab0;font-size:.85rem;margin:0 0 18px}
+.today-card{background:#12121c;border:1px solid rgba(255,255,255,.08);
+border-radius:18px;padding:14px;margin:0 0 14px}
+.today-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.today-avatar{width:40px;height:40px;border-radius:50%;object-fit:cover;flex:none}
+.today-avatar-fallback{width:40px;height:40px;border-radius:50%;flex:none;
+display:flex;align-items:center;justify-content:center;font-weight:800;
+color:#fff;background:linear-gradient(135deg,#ec4899,#9d4edd)}
+.today-name{font-weight:700}
+.today-time{color:#9a9ab0;font-size:.82rem;margin-left:auto;flex:none}
+.today-media{width:100%;border-radius:12px;display:block;margin:6px 0}
+.today-voice{display:flex;align-items:center;gap:8px;margin:6px 0;color:#9a9ab0}
+.today-voice audio{flex:1;min-width:0}
+.today-caption{margin:6px 0 2px;line-height:1.45;white-space:pre-wrap;
+word-wrap:break-word}
+.today-textcard .today-caption{font-size:1.12rem;line-height:1.55}
+.today-empty{background:#12121c;border:1px solid rgba(255,255,255,.08);
+border-radius:18px;padding:22px;text-align:center;color:#9a9ab0}
+.today-foot{text-align:center;color:#66667c;font-size:.8rem;margin-top:22px}
+"""
+
+
+def _render_today_page(posts: list[dict]) -> str:
+    """Server-render the public Today page from public Her Day posts.
+
+    Posts arrive newest-first (store order). Media renders ONLY when the
+    post actually carries a url — a post with empty media_url/voice_url
+    is a pure text card with no media elements and no placeholders.
+    """
+    esc = _html.escape
+    cards = []
+    for p in posts:
+        name = p.get("girl_name") or p.get("girl_id") or ""
+        avatar = (p.get("girl_avatar_url") or "").strip()
+        if avatar:
+            avatar_html = (f'<img class="today-avatar" src="{esc(avatar, quote=True)}"'
+                           f' alt="" loading="lazy">')
+        else:
+            initial = esc((name[:1] or "?").upper())
+            avatar_html = f'<div class="today-avatar-fallback">{initial}</div>'
+        media_html = ""
+        media_url = (p.get("media_url") or "").strip()
+        voice_url = (p.get("voice_url") or "").strip()
+        if p.get("post_type") == "video" and media_url:
+            media_html += (f'<video class="today-media" src="{esc(media_url, quote=True)}"'
+                           ' controls playsinline preload="metadata"></video>')
+        elif media_url:
+            media_html += (f'<img class="today-media" src="{esc(media_url, quote=True)}"'
+                           ' alt="" loading="lazy">')
+        if voice_url:
+            media_html += ('<div class="today-voice"><span>&#9834; voice note</span>'
+                           f'<audio controls src="{esc(voice_url, quote=True)}"></audio></div>')
+        text_only = " today-textcard" if not media_html else ""
+        ago = _today_time_ago(p.get("created_at") or "")
+        time_html = f'<span class="today-time">{esc(ago)}</span>' if ago else ""
+        cards.append(
+            f'<article class="today-card{text_only}">'
+            f'<div class="today-head">{avatar_html}'
+            f'<span class="today-name">{esc(name)}</span>{time_html}</div>'
+            f"{media_html}"
+            f'<p class="today-caption">{esc(p.get("caption") or "")}</p>'
+            "</article>")
+    if cards:
+        feed_html = "\n".join(cards)
+    else:
+        feed_html = ('<div class="today-empty">Nothing yet today — '
+                     "the girls post fresh moments every morning.</div>")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Today — Whispr Feed | Whispr AI</title>
+<meta name="description" content="A glimpse into their day — fresh Her Day moments from the Whispr girls, updated daily.">
+<style>{_TODAY_CSS}</style>
+</head>
+<body>
+<main class="today-wrap">
+<div class="today-brand">Whispr AI</div>
+<h1 class="today-h1">Today</h1>
+<p class="today-sub">A glimpse into their day — fresh moments, updated daily.</p>
+<a class="today-cta" href="/">Join Whispr — get 50 free messages</a>
+<p class="today-cta-sub">No card required &middot; then $0.99 for 100 more, or $9.99/mo</p>
+{feed_html}
+<a class="today-cta" href="/">Join Whispr — get 50 free messages</a>
+<p class="today-cta-sub">No card required &middot; then $0.99 for 100 more, or $9.99/mo</p>
+<p class="today-foot">Whispr AI &middot; Your private connection, always a message away.</p>
+</main>
+</body>
+</html>"""
+
+
+@app.get("/today", response_class=HTMLResponse)
+def today_page():
+    """Public Today page — the full Her Day feed as a standalone page.
+
+    Read-only over the same shared day-set as GET /api/v1/her-day/public
+    (no generation, no schema changes, SFW Her Day posts only — never
+    Give/private-library content). Text-only posts render as clean text
+    cards; media/voice appear automatically when a post carries them.
+    The CTA lands on the app root, whose signup sheet opens on arrival
+    for logged-out visitors (50 free messages; existing trial/plans).
+    """
+    conn = _conn()
+    try:
+        store.cleanup_expired_her_day(conn)
+        posts = store.get_public_her_day_posts(conn, limit=24)
+        girl_map = {g["id"]: g for g in characters.public_list()}
+        for p in posts:
+            g = girl_map.get(p.get("girl_id"), {})
+            p["girl_name"] = g.get("name", p.get("girl_id", ""))
+            p["girl_avatar_url"] = g.get("avatar_url", "")
+        return HTMLResponse(_render_today_page(posts),
+                            headers={"Cache-Control": "public, max-age=120"})
+    finally:
+        conn.close()
+
+
 class HerDayViewIn(BaseModel):
     post_id: int
 

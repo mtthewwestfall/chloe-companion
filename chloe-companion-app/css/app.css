@@ -488,6 +488,18 @@ body {
   margin: 0 0 14px;
   padding: 0 14px;
 }
+.herday-more {
+  display: block;
+  text-align: center;
+  margin: 14px 14px 4px;
+  padding: 11px 14px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 12px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
 .feed-list {
   display: flex;
   flex-direction: column;
