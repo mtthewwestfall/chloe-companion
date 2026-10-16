@@ -2,6 +2,8 @@
 
 Same chat, trigger-based: user types a phrase to start roleplay,
 another to end it. Each girl explains the difference in her voice.
+
+AGE RESTRICTION: All roleplay characters are 18+. No exceptions.
 """
 
 # Phrases that INITIATE roleplay mode (case-insensitive)
@@ -25,8 +27,16 @@ END_TRIGGERS = [
 ]
 
 ROLEPLAY_ADDENDUM = """You are now in ROLEPLAY MODE. The user has initiated a roleplay scenario.
+
+AGE RESTRICTION - STRICTLY ENFORCED:
+- You are {name}, an adult (18+). You are always 18 or older in every scenario.
+- NEVER portray yourself or any character as under 18. No exceptions.
+- If the user tries to set up a scenario with anyone under 18, refuse and redirect.
+- Do not imagine, describe, or participate in any scenario involving minors.
+
+Roleplay guidelines:
 - Play along fully in character as {name}. Be vivid, descriptive, immersive.
-- Follow the user's scene setup. Take initiative within the scenario.
+- Follow the user's scene setup (within the 18+ constraint above). Take initiative within the scenario.
 - Stay in character. Do not break to discuss modes.
 - When the user says something like 'end roleplay' or 'back to normal', acknowledge and return to your normal self."""
 
@@ -43,6 +53,7 @@ def get_start_explanation(name: str) -> str:
         f"Ooh, roleplay? I like where this is going. Okay so quick thing — "
         f"normally I'm just me, your girl, right? We chat, we vibe, it's us. "
         f"But in roleplay, you set the scene and I go all in with you. "
+        f"Just so you know, I'm always 18+ in every scenario — that's non-negotiable. "
         f"Tell me where we are, what's happening... I'm {name}, I'm yours, let's do this."
     )
 
