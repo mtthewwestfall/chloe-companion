@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import sqlite3
 
-from . import config
+from . import config, trust_migration
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -691,7 +691,7 @@ def init_db(db_path: str | None = None) -> None:
         # the schema script's new indexes reference the column. On fresh
         # installs the tables don't exist yet and the schema script creates
         # them with the column directly.
-        _migrate_character_columns(conn)
+        _migrate_character_columns(conn); trust_migration.migrate(conn)
         _migrate_auth_columns(conn)
         _migrate_submission_columns(conn)
         _migrate_creator_columns(conn)
