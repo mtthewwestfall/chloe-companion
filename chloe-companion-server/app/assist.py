@@ -6111,9 +6111,17 @@ def _sogni_plan_params(prompt: str, ref_path: str | None = None,
     env var, or fallback anywhere that can switch a job to credits
     billing — a guard test keeps it that way."""
     if kind == "image":
+        model_id = model or config.SOGNI_IMAGE_MODEL
+        if not ref_path and "image_edit" in model_id:
+            # An edit model edits a picture it is handed; with no
+            # reference there is nothing to edit and Sogni refuses
+            # the job outright (4007: "send it as contextImage1...
+            # For a prompt-only render, choose a non-edit model").
+            # Prompt-only image renders use the non-edit sibling.
+            model_id = config.SOGNI_IMAGE_TEXT_MODEL
         params: dict = {
             "type": "image",
-            "modelId": model or config.SOGNI_IMAGE_MODEL,
+            "modelId": model_id,
             "positivePrompt": prompt,
             "numberOfMedia": 1,
             "width": 768,
@@ -6133,7 +6141,18 @@ def _sogni_plan_params(prompt: str, ref_path: str | None = None,
             "billingMode": _SOGNI_PLAN_BILLING_MODE,
         }
     if ref_path:
-        params["referenceImage"] = ref_path
+        if kind == "image":
+            # Image jobs take their input picture ONLY as
+            # contextImages: the SDK uploads them as contextImage1..N
+            # and sets hasContextImage1..N from that list.
+            # "referenceImage" is a VIDEO-only asset — the image
+            # pipeline never reads it — so plan image renders used to
+            # reach the edit model with no context image attached and
+            # every one was refused (Sogni 4007; Her Day posted
+            # caption-only for two days, 2026-10-15/16).
+            params["contextImages"] = [ref_path]
+        else:
+            params["referenceImage"] = ref_path
     return params
 
 

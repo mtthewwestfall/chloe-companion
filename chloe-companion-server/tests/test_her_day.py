@@ -100,6 +100,29 @@ class GenerateSfwImageTest(unittest.TestCase):
         self.assertEqual(params["billingMode"], "subscription")
         self.assertEqual(params["type"], "image")
 
+    def test_image_reference_travels_as_context_image(self):
+        # Regression (2026-10-16): image jobs used to carry the
+        # reference as "referenceImage", a video-only asset the SDK's
+        # image pipeline never reads — the edit model received no
+        # context image and Sogni refused every render (4007).
+        from app import assist
+        params = assist._sogni_plan_params(
+            "prompt", "/tmp/her.jpg", config.SOGNI_IMAGE_MODEL,
+            kind="image")
+        self.assertEqual(params["contextImages"], ["/tmp/her.jpg"])
+        self.assertNotIn("referenceImage", params)
+        self.assertEqual(params["modelId"], config.SOGNI_IMAGE_MODEL)
+
+    def test_image_without_reference_uses_non_edit_model(self):
+        # A prompt-only render can never satisfy an edit model
+        # (4007 again), so it must go to the non-edit sibling.
+        from app import assist
+        params = assist._sogni_plan_params(
+            "prompt", None, config.SOGNI_IMAGE_MODEL, kind="image")
+        self.assertEqual(params["modelId"], config.SOGNI_IMAGE_TEXT_MODEL)
+        self.assertNotIn("contextImages", params)
+        self.assertNotIn("referenceImage", params)
+
 
 class BackfillTest(unittest.TestCase):
     def setUp(self):

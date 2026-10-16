@@ -224,6 +224,12 @@ SOGNI_VIDEO_MODEL = os.environ.get(
     "SOGNI_VIDEO_MODEL", "minimax-h3-fastvideo-int8_i2v_turbo")
 SOGNI_IMAGE_MODEL = os.environ.get(
     "SOGNI_IMAGE_MODEL", "qwen_image_edit_2511_fp8")
+# Prompt-only image renders (no reference picture to edit) cannot use
+# the edit model above — Sogni refuses them outright (error 4007:
+# "For a prompt-only render, choose a non-edit model"). This non-edit
+# sibling is used whenever a plan image render carries no reference.
+SOGNI_IMAGE_TEXT_MODEL = os.environ.get(
+    "SOGNI_IMAGE_TEXT_MODEL", "qwen_image_2512_fp8")
 
 # Booked cost per fulfilled regular request (live Sogni quotes 2026-09-30:
 # ~$0.1175 per 6s clip, ~$0.01-0.03 per image). Logged per request.
