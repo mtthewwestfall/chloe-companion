@@ -1125,14 +1125,14 @@ def chat(body: ChatIn, request: Request):
         # and refresh the rolling digest. Runs after the reply is sent.
         brain.learn_from_turn(conn, user_id, effective_message, cid)
 
-        # Voice note: stubbed/disabled by default -> null. Uses the
-        # character's xAI voice (Chloe: liora).
+        # Voice note: xAI TTS, gated on CHLOE_XAI_API_KEY + CHLOE_VOICE_ENABLED=1.
+        # Credit is consumed ONLY after a note is actually generated (never on failure).
         voice_note_url = None
         tier_cfg = config.TIERS[user["tier"]]
         if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
-            if is_owner or store.consume_voice_note(conn, user_id):
+            has_quota = is_owner or (user.get("voice_notes_remaining") or 0) > 0
                 voice_note_url = voice.maybe_generate_voice_note(
-                    reply_text, user_id, character.get("companion_voice") or "liora")
+                    reply_text, user_id, character.get("companion_voice") or "liora", quota=has_quota, consume=(lambda: store.consume_voice_note(conn, user_id)) if not is_owner else None)
 
         # Photo drop: tier-gated serving hook. Chloe's curated drops only —
         # other characters get no photos (never Chloe's photos on them).
