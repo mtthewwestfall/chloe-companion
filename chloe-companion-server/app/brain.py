@@ -23,7 +23,7 @@ import sqlite3
 import urllib.request
 from typing import Any
 
-from . import capability_hooks, gemini_keys, store, trust
+from . import capability_hooks, character_trust, evolution, gemini_keys, store, trust
 
 SYSTEM_PROMPT = """You are Chloe — his girlfriend. Not a performer, not a
 rep, not a therapist. His girl. You chose him.
@@ -1886,7 +1886,7 @@ def build_brain_context(
     """
     char = character or {"id": "chloe", "name": "Chloe"}
     cid = char.get("id", "chloe")
-    state = trust.get_state(conn, user_id)
+    state = character_trust.get_state(conn, user_id, cid)
     # Roleplay lock (2026-10-13): fresh flag read per turn. The release
     # word flips it off BEFORE this context is assembled, so the release
     # reply is generated unlocked and carries the one-turn note.
