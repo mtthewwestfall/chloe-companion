@@ -120,19 +120,19 @@ def _save_mp3(audio: bytes, user_id: str) -> str:
     return "/generated/" + fname
 
 
-def maybe_generate_voice_note(text: str, user_id: str,
-                              voice_name: str = "liora") -> str | None:
+def maybe_generate_voice_note(text: str, user_id: str, voice_name: str = "liora",
+                              quota: bool = True, consume=None) -> str | None:
     """Generate a voice note with xAI TTS, returning its /generated/ URL.
 
-    Returns None (never raises) when voice is unavailable: the feature
-    flag is off, the API key is missing, the request fails, or the text
-    is empty. Callers must only consume a voice-note credit when this
-    returns a URL.
+    Returns None (never raises) when voice is unavailable: quota=False,
+    the feature flag is off, the API key is missing, the request fails,
+    is empty.
+    `consume` runs only after a note is generated and saved.
 
     `voice_name` is the character's xAI voice (companion_voice from the
     Keyhole admin roster; Chloe is "liora").
     """
-    if not config.VOICE_NOTES_ENABLED:
+    if not quota or not config.VOICE_NOTES_ENABLED:
         return None
     if not config.XAI_API_KEY:
         _log("CHLOE_XAI_API_KEY is not set; voice note unavailable "
@@ -157,4 +157,4 @@ def maybe_generate_voice_note(text: str, user_id: str,
         return None
     _log(f"generated voice note for user={user_id} voice={vid} "
          f"({len(audio)} bytes)")
-    return url
+    return (consume(), url)[1] if consume is not None else url
