@@ -3452,7 +3452,7 @@ def auth_verify(token: str = ""):
         # Chloe opens with her line the moment the email is verified — it
         # lands as the first turn in his chat history when the app loads.
         if not store.recent_turns(conn, user_id, 1, "chloe"):
-            store.log_turn(conn, user_id, "chloe", WELCOME_LINE, "chloe")
+            store.log_turn(conn, user_id, "chloe", onboarding.greeting_line({"id": "chloe", "name": "Chloe"}), "chloe")
         # JVZoo affiliate channel (2026-09-30): attach any paid JVZoo
         # subscription bought under this email before the account existed.
         _user = store.get_or_create_user(conn, user_id)
