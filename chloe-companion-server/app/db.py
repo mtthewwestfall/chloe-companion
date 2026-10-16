@@ -7,7 +7,7 @@ without a user_id filter — see tests/test_memory_isolation.py.
 
 Character namespacing (2026-09-29): memory, conversation, and digest rows
 also carry character_id (default 'chloe'), so each character remembers him
-separately. Banks and trust state stay per-user (shared across characters).
+separately. Trust posture went per-character on 2026-10-16 (each girl has her own relationship clock). Banks stay per-user (shared across characters).
 """
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS user_give_seen (
     PRIMARY KEY (user_id, girl_id, media_id)
 );
 
--- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
+-- Trust posture: per-(user, character) relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS local_characters (
     id               TEXT PRIMARY KEY,   -- slug, lowercase, e.g. 'nova'
@@ -225,7 +225,7 @@ CREATE TABLE IF NOT EXISTS girl_footage (
 CREATE INDEX IF NOT EXISTS idx_girl_footage_girl ON girl_footage(girl_id);
 
 CREATE TABLE IF NOT EXISTS trust_state (
-    user_id         TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
     milestone       INTEGER NOT NULL DEFAULT 5,
     stage_entered_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
