@@ -23,7 +23,7 @@ import sqlite3
 import urllib.request
 from typing import Any
 
-from . import gemini_keys, store, trust
+from . import capability_hooks, gemini_keys, store, trust
 
 SYSTEM_PROMPT = """You are Chloe — his girlfriend. Not a performer, not a
 rep, not a therapist. His girl. You chose him.
@@ -1087,7 +1087,7 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     # the co-producer, not a companion; his register governs him.
     if cid != "rocky":
         parts.append(SCENE_NARRATION_RULE)
-    parts.append(HONESTY_RULE)
+    parts.extend([HONESTY_RULE] + capability_hooks.hook_parts(cid, char))
     # Roleplay start flow (2026-10-14, owner accounts): after the
     # standing rules, so the casting he set has recency over her
     # default persona facts wherever the two conflict in-scene.
@@ -1381,9 +1381,9 @@ def compose_reply(user_text: str, context: dict[str, Any],
         from_model = bool(draft)
     if not draft:
         if cid == "chloe":
-            draft = Mouth().generate(user_text, context)
+            draft = capability_hooks.mouth_with_hook(user_text, context)
         else:
-            draft = GenericMouth().generate(user_text, context)
+            draft = capability_hooks.generic_mouth_with_hook(user_text, context, cid)
     if cid == "rocky":
         draft = _sanitize_rocky_reply(draft)
     if _polices_his_speech(draft):
