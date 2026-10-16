@@ -225,7 +225,7 @@ CREATE TABLE IF NOT EXISTS girl_footage (
 CREATE INDEX IF NOT EXISTS idx_girl_footage_girl ON girl_footage(girl_id);
 
 CREATE TABLE IF NOT EXISTS trust_state (
-    user_id         TEXT NOT NULL,
+    user_id         TEXT PRIMARY KEY,
     milestone       INTEGER NOT NULL DEFAULT 5,
     stage_entered_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
