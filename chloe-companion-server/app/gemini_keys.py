@@ -156,6 +156,13 @@ _FAIL_FAST_SOURCE_PREFIXES = ("roof-rover-voice",)
 _FAST_TIMEOUT_DEFAULT_S = 8.0
 # Max attempts (across all phases) for one post_json call.
 _MAX_ATTEMPTS_DEFAULT = 8
+# Extra attempts granted to the reserve/fallback pass (post_json
+# phase 3) beyond the shared cap — only when every attempt so far
+# failed with the quota class. A quota wall is per-project: the
+# active pool being walled says nothing about held-back keys, whose
+# quotas are separate. A transient storm is upstream weather and
+# earns no extension (the fallback keys face the same weather).
+_RESERVE_FALLBACK_MAX_EXTRA = 5
 # Total wall-clock budget for one post_json call across attempts.
 _ATTEMPT_BUDGET_DEFAULT_S = 50.0
 # Ranking latency assumed for a believed-healthy key with no samples yet.
@@ -1051,6 +1058,8 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
             key_id, key_value, url, payload, timeout, source)
         if ok:
             return data
+        if error_type == "quota":
+            state["quota_failures"] = state.get("quota_failures", 0) + 1
         if error_type == "request":
             state["fatal"] = "request"
             break
@@ -1103,6 +1112,9 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                 ok, data, _seconds, error_type = fut.result()
                 if ok:
                     return data
+                if error_type == "quota":
+                    state["quota_failures"] = \
+                        state.get("quota_failures", 0) + 1
                 if error_type == "request":
                     # The call itself was bad; racing more keys at it
                     # cannot help.
@@ -1165,7 +1177,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     attempt_timeout = max(1, min(caller_timeout, int(_fast_timeout_s())))
     attempt_cap = _max_attempts() if max_attempts is None else max(1, int(max_attempts))
     state = {"n": 0, "deadline": time.monotonic() + _attempt_budget_s(),
-             "max_n": attempt_cap}
+             "max_n": attempt_cap, "quota_failures": 0}
     tried: set[int] = set()
 
     if free_only:
@@ -1223,21 +1235,40 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         return None
     # Every active key just failed into a pause/backoff, so the active
     # pool is now exhausted by the reserve pool's own definition: one
-    # bounded pass over ELIGIBLE reserve keys (backoff windows still
-    # respected — this is not the old ignore-everything sweep), under
-    # the same attempt cap and time budget.
+    # bounded pass over ELIGIBLE reserve keys, with any untried paid
+    # key last (backoff windows still respected — this is not the old
+    # ignore-everything sweep), under the same time budget.
+    #
+    # Attempt budget (2026-10-16 fix): the pass used to share the
+    # global attempt cap, so whenever the active phases had eligible
+    # keys numbering >= the cap — the normal case — the cap was spent
+    # before this pass ran and the fallback could never fire in
+    # exactly the failure it exists for (a request class quota-walled
+    # on the whole active pool: grounded search and image generation
+    # on 2026-10-15, where the held-back keys were never attempted).
+    # The pass now earns its own bounded allowance, but ONLY when
+    # every attempt so far failed with the quota class: quota is
+    # per-project, so a wall on the actives says nothing about the
+    # held-back keys. A transient storm earns no extension.
     with _lock:
         conn = db.connect()
         try:
             _ensure_table(conn)
             _active_ids, reserve_ids = _pool_ids(conn)
-            reserve_rows = [r for r in _eligible_rows(conn)
+            eligible = _eligible_rows(conn)
+            reserve_rows = [r for r in eligible
                             if r["id"] in reserve_ids]
+            paid_rows = [r for r in eligible
+                         if r["is_paid"] and r["id"] not in tried]
         finally:
             conn.close()
-    reserve = _only_free(_order_by_health(reserve_rows))
-    if reserve:
-        return _try_candidates(reserve, url, payload,
+    fallback = _only_free(_order_by_health(reserve_rows + paid_rows))
+    if fallback:
+        if state["n"] > 0 \
+                and state.get("quota_failures", 0) >= state["n"]:
+            state["max_n"] = max(state["max_n"], state["n"] + min(
+                len(fallback), _RESERVE_FALLBACK_MAX_EXTRA))
+        return _try_candidates(fallback, url, payload,
                                caller_timeout, source, tried, state)
     return None
 

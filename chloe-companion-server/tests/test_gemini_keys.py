@@ -287,6 +287,81 @@ class TestPostJson(GeminiKeysTestBase):
         self.assertGreaterEqual(mine[0]["latency_ms"], 0)
 
 
+class TestReserveFallback(GeminiKeysTestBase):
+    """Phase-3 fallback reachability (2026-10-16 fix).
+
+    The fallback pass (held-back reserve keys, then any untried paid
+    key) shares the global attempt cap; when the active pool has at
+    least as many eligible keys as the cap and the request is
+    quota-walled on all of them, the cap used to be spent before the
+    fallback could fire — the fallback was unreachable in exactly
+    the failure it exists for. On a pure quota wall the pass now
+    earns a bounded extra allowance. A transient wall earns none:
+    the cap test (test_attempt_cap) must keep holding exactly.
+    """
+
+    def _patch_http(self, behavior):
+        calls = []
+
+        def fake(url, payload, key_value, timeout):
+            calls.append(key_value)
+            return behavior(key_value)
+
+        patcher = mock.patch.object(gemini_keys, "_http_post",
+                                    side_effect=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_quota_wall_reaches_reserve(self):
+        # 12 free keys -> 4 reserve (highest ids), 8 active. The cap
+        # is 8: the active sweep alone spends it all on 429s.
+        for i in range(12):
+            self._add(f"qw{i}", f"q{i}", False)
+        active_vals = {f"qw{i}" for i in range(8)}
+
+        def behavior(key_value):
+            if key_value in active_vals:
+                raise _http_error(429)
+            return {"ok": True}
+
+        calls = self._patch_http(behavior)
+        result = gemini_keys.post_json("https://example.com/gen", {"x": 1})
+        self.assertIsNotNone(result)
+        self.assertEqual(len([c for c in calls if c in active_vals]), 8)
+        self.assertGreater(len(calls), 8)  # fallback fired past the cap
+
+    def test_quota_wall_reaches_paid_when_reserve_walled(self):
+        # Every free key 429s (actives and reserves alike); the paid
+        # key must still be attempted by the fallback pass.
+        for i in range(12):
+            self._add(f"pw{i}", f"p{i}", False)
+        self._add("pw-paid", "paid", True)
+
+        def behavior(key_value):
+            if key_value == "pw-paid":
+                return {"ok": True}
+            raise _http_error(429)
+
+        calls = self._patch_http(behavior)
+        result = gemini_keys.post_json("https://example.com/gen", {"x": 1})
+        self.assertIsNotNone(result)
+        self.assertIn("pw-paid", calls)
+
+    def test_transient_wall_earns_no_extension(self):
+        os.environ["GEMINI_MAX_ATTEMPTS"] = "3"
+        for i in range(6):
+            self._add(f"tw{i}", f"t{i}", False)
+
+        def behavior(key_value):
+            raise _http_error(500)
+
+        calls = self._patch_http(behavior)
+        result = gemini_keys.post_json("https://example.com/gen", {"x": 1})
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 3)  # cap holds exactly
+
+
 class TestFastPath(GeminiKeysTestBase):
     def test_believed_healthy_tried_first(self):
         keys = [self._add(f"fk{i}", f"f{i}", False) for i in range(4)]
