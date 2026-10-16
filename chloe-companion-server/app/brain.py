@@ -448,7 +448,7 @@ def _pick(tag: str, name: str, context: dict[str, Any]) -> str:
         return corr
     # Sometimes lead with a genuine memory callback instead of a bank line.
     if tag in ("fallback", "greet", "howru", "trust") and random.random() < 0.3:
-        cb = _memory_callback(context)
+        cb = _memory_callback(context) or evolution.evolution_callback(context)
         if cb:
             return cb
     bank = _LINES.get(tag, _LINES["fallback"])
@@ -884,7 +884,7 @@ def _male_pick(tag: str, name: str, char: dict[str, Any],
         bank.update(_ELI_LINES)
     if tag in ("fallback", "greet", "howru", "trust") \
             and random.random() < 0.3:
-        cb = _memory_callback(context)
+        cb = _memory_callback(context) or evolution.evolution_callback(context)
         if cb:
             return cb
     return _pick_bank_line(bank, tag, name, context)
@@ -913,7 +913,7 @@ def _generic_pick(tag: str, name: str, char: dict[str, Any],
         intro = f"i'm {char_name.lower()}."
         return f"{intro} {persona}" if persona else intro
     if tag in ("fallback", "greet", "howru", "trust") and random.random() < 0.3:
-        cb = _memory_callback(context)
+        cb = _memory_callback(context) or evolution.evolution_callback(context)
         if cb:
             return cb
     bank = _GENERIC_LINES.get(tag, _GENERIC_LINES["fallback"])
