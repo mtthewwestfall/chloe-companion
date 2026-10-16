@@ -1131,8 +1131,8 @@ def chat(body: ChatIn, request: Request):
         tier_cfg = config.TIERS[user["tier"]]
         if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
             has_quota = is_owner or (user.get("voice_notes_remaining") or 0) > 0
-                voice_note_url = voice.maybe_generate_voice_note(
-                    reply_text, user_id, character.get("companion_voice") or "liora", quota=has_quota, consume=(lambda: store.consume_voice_note(conn, user_id)) if not is_owner else None)
+            voice_note_url = voice.maybe_generate_voice_note(
+            reply_text, user_id, character.get("companion_voice") or "liora", quota=has_quota, consume=(lambda: store.consume_voice_note(conn, user_id)) if not is_owner else None)
 
         # Photo drop: tier-gated serving hook. Chloe's curated drops only —
         # other characters get no photos (never Chloe's photos on them).
