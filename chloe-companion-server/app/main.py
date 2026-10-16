@@ -75,7 +75,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
