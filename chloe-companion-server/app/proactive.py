@@ -517,7 +517,12 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
         conn.execute("UPDATE proactive_outbox SET status = 'dry_run' "
                      "WHERE id = ?", (msg["id"],))
         conn.commit()
-        _record_sent(conn, user_id, character_id, mtype, today_str)
+        # No _record_sent here: a dry run must not burn the day's slot.
+        # Recording it as sent marks last_morning_date = today and
+        # bumps the daily counter, so the real send never fires once
+        # dry-run is switched off (exactly what ate the morning of
+        # 2026-10-17 — dry-run ticks ran 8:00-8:56am, the fix deployed
+        # mid-window, and every later tick saw "already sent today").
         print(f"[proactive] dry-run: {mtype} for {user_id}/{character_id}",
               flush=True)
         return True
