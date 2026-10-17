@@ -77,7 +77,7 @@ from pydantic import BaseModel
 
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
-from . import sims_saves
+from . import push_routes, sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 app.add_middleware(
@@ -2414,7 +2414,7 @@ def admin_her_day_set_media(body: HerDaySetMediaIn, request: Request):
 
 
 # ---------------------------------------------------------------------------
-her_day_delete.register_her_day_delete(app, _require_admin, _conn)
+her_day_delete.register_her_day_delete(app, _require_admin, _conn); push_routes.register(app, _current_user_id)
 
 # Admin: girl media library (2026-10-06)
 # Manage gives, mains, typing mains, activities per character.
