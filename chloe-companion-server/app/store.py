@@ -1554,6 +1554,41 @@ def get_public_her_day_posts(conn: "sqlite3.Connection",
     return [dict(r) for r in rows]
 
 
+def post_slug(girl_id: str, created_at: str, caption: str) -> str:
+    """Stable public slug for a Her Day moment: girl-date-hash6. The
+    same moment fans out to many users' rows; the slug identifies the
+    moment, not a row (2026-10-17, permalink pages)."""
+    import hashlib
+    day = (created_at or "")[:10].replace("-", "")
+    h = hashlib.sha1((caption or "").encode("utf-8")).hexdigest()[:6]
+    return f"{(girl_id or 'her').strip().lower()}-{day}-{h}"
+
+
+def find_public_post_by_slug(conn: "sqlite3.Connection",
+                             slug: str) -> dict | None:
+    """Resolve a post slug to one visible public row, or None."""
+    parts = (slug or "").rsplit("-", 2)
+    if len(parts) != 3:
+        return None
+    girl_id, day, _h = parts
+    if len(day) != 8 or not day.isdigit():
+        return None
+    day_iso = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+    rows = conn.execute(
+        "SELECT girl_id, post_type, media_url, voice_url, caption,"
+        " created_at FROM her_day_posts"
+        " WHERE girl_id = ? AND date(created_at) = ?"
+        " AND expires_at > datetime('now')"
+        " AND created_at <= datetime('now')"
+        " ORDER BY created_at DESC LIMIT 200",
+        (girl_id.lower(), day_iso)).fetchall()
+    for r in rows:
+        d = dict(r)
+        if post_slug(d["girl_id"], d["created_at"], d["caption"]) == slug:
+            return d
+    return None
+
+
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
                          girl_id: str) -> bool:
     """Check if a girl already has Her Day posts generated today for a user."""

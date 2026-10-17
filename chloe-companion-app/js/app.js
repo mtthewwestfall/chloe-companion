@@ -2015,6 +2015,15 @@ async function updateBalance() {
 
         const likesCountEl = likesText.querySelector('.feed-likes-count');
         likeBtn.addEventListener('click', () => toggleLike(key, likeBtn, likesCountEl, baseLikes));
+        shareBtn.addEventListener('click', async () => {
+          const url = p.slug ? (location.origin + '/p/' + p.slug) : location.origin;
+          const shareData = { title: 'Whispr AI', text: (p.caption || 'See what she is up to today') + ' \uD83D\uDC9C', url };
+          if (navigator.share) {
+            try { await navigator.share(shareData); } catch (e) {}
+          } else if (navigator.clipboard) {
+            try { await navigator.clipboard.writeText(url); showToast('Link copied \u2014 share her moment \uD83D\uDC9C', 2400); } catch (e) {}
+          }
+        });
 
         // 5. Caption
         const cap = document.createElement('div');
