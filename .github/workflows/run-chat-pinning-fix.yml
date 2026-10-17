@@ -14,6 +14,7 @@ jobs:
         run: |
           python3 << 'PYEOF'
           import sys, subprocess
+          N = chr(10)
           path = 'chloe-companion-app/js/app.js'
           with open(path, encoding='utf-8') as f:
               src = f.read()
@@ -26,10 +27,10 @@ jobs:
               src = src.replace(old, new, 1)
               print(f'OK {name}')
           rep("function addMsg(who, html, opts = {}) {",
-              "/* Pin a caption to the character who sent it. Callers pass the speaker name\n   explicitly so a reply that arrives after a character switch is still\n   captioned with the right name (see sendMessage / sendPresetVideo). */\nfunction herCaption(speakerName) {\n  return (speakerName || currentGirl.name) + ' \u00b7 ' + timeNow();\n}\nfunction addMsg(who, html, opts = {}) {",
+              "/* Pin a caption to the character who sent it. Callers pass the speaker name" + N + "   explicitly so a reply that arrives after a character switch is still" + N + "   captioned with the right name (see sendMessage / sendPresetVideo). */" + N + "function herCaption(speakerName) {" + N + "  return (speakerName || currentGirl.name) + ' \u00b7 ' + timeNow();" + N + "}" + N + "function addMsg(who, html, opts = {}) {",
               "helper")
-          rep("  wrap.appendChild(b);\n  if (opts.caption) {",
-              "  wrap.appendChild(b);\n  // opts.speakerName pins the caption to the character who sent the message,\n  // even if currentGirl changed while the reply was in flight.\n  const caption = opts.caption || (opts.speakerName ? herCaption(opts.speakerName) : '');\n  if (caption) {",
+          rep("  wrap.appendChild(b);" + N + "  if (opts.caption) {",
+              "  wrap.appendChild(b);" + N + "  // opts.speakerName pins the caption to the character who sent the message," + N + "  // even if currentGirl changed while the reply was in flight." + N + "  const caption = opts.caption || (opts.speakerName ? herCaption(opts.speakerName) : '');" + N + "  if (caption) {",
               "addMsg-caption")
           rep("    t.textContent = opts.caption;",
               "    t.textContent = caption;",
@@ -40,14 +41,14 @@ jobs:
           rep("addMsg(who, esc(text), { caption: who === 'her' ? currentGirl.name + ' \u00b7 ' + timeNow() : timeNow() });",
               "addMsg(who, esc(text), { caption: who === 'her' ? herCaption(speakerName) : timeNow() });",
               "addText-caption")
-          rep("function addPhotoDrop(url, caption) {\n  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' \u00b7 ' + timeNow() });",
-              "function addPhotoDrop(url, caption, speakerName) {\n  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: herCaption(speakerName) });",
+          rep("function addPhotoDrop(url, caption) {" + N + "  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' \u00b7 ' + timeNow() });",
+              "function addPhotoDrop(url, caption, speakerName) {" + N + "  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: herCaption(speakerName) });",
               "addPhotoDrop")
           rep('alt="Photo ${currentGirl.name} sent you"',
               'alt="Photo ${speakerName || currentGirl.name} sent you"',
               "addPhotoDrop-alt")
-          rep("function addGeneratedImage(url) {\n  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' \u00b7 ' + timeNow() });",
-              "function addGeneratedImage(url, speakerName) {\n  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: herCaption(speakerName) });",
+          rep("function addGeneratedImage(url) {" + N + "  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' \u00b7 ' + timeNow() });",
+              "function addGeneratedImage(url, speakerName) {" + N + "  const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: herCaption(speakerName) });",
               "addGeneratedImage")
           rep("function addAttachments(who, attachments) {",
               "function addAttachments(who, attachments, speakerName) {",
@@ -56,16 +57,16 @@ jobs:
               "caption: who === 'her' ? herCaption(speakerName) : timeNow(),",
               "addAttachments-caption")
           rep("let sending = false;",
-              "let sending = false;\nlet presetSheetGirl = null;",
+              "let sending = false;" + N + "let presetSheetGirl = null;",
               "presetSheetGirl-decl")
           rep("  const targetCharacterId = currentGirl.id;",
-              "  const targetCharacterId = currentGirl.id;\n  const targetCharacterName = currentGirl.name;",
+              "  const targetCharacterId = currentGirl.id;" + N + "  const targetCharacterName = currentGirl.name;",
               "sendMessage-capture")
-          rep("  if (res.voice_note_url) {\n    addVoiceNote(res.voice_note_url, res.reply_text);\n  } else {\n    addText('her', res.reply_text || '\u2026');\n  }\n  if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '');\n  if (res.image_url) addGeneratedImage(res.image_url);\n  if (res.sogni_login_box) addSogniLoginButton();",
-              "  if (currentGirl.id !== targetCharacterId) {\n    // She replied while another chat was open: don't paint her reply into\n    // the wrong thread. The reply is already saved in her own history.\n    showToast(targetCharacterName + ' replied in her chat', 3200);\n  } else {\n    if (res.voice_note_url) {\n      addVoiceNote(res.voice_note_url, res.reply_text);\n    } else {\n      addText('her', res.reply_text || '\u2026', {}, targetCharacterName);\n    }\n    if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '', targetCharacterName);\n    if (res.image_url) addGeneratedImage(res.image_url, targetCharacterName);\n    if (res.sogni_login_box) addSogniLoginButton();\n  }",
+          rep("  if (res.voice_note_url) {" + N + "    addVoiceNote(res.voice_note_url, res.reply_text);" + N + "  } else {" + N + "    addText('her', res.reply_text || '\u2026');" + N + "  }" + N + "  if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '');" + N + "  if (res.image_url) addGeneratedImage(res.image_url);" + N + "  if (res.sogni_login_box) addSogniLoginButton();",
+              "  if (currentGirl.id !== targetCharacterId) {" + N + "    // She replied while another chat was open: don't paint her reply into" + N + "    // the wrong thread. The reply is already saved in her own history." + N + "    showToast(targetCharacterName + ' replied in her chat', 3200);" + N + "  } else {" + N + "    if (res.voice_note_url) {" + N + "      addVoiceNote(res.voice_note_url, res.reply_text);" + N + "    } else {" + N + "      addText('her', res.reply_text || '\u2026', {}, targetCharacterName);" + N + "    }" + N + "    if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '', targetCharacterName);" + N + "    if (res.image_url) addGeneratedImage(res.image_url, targetCharacterName);" + N + "    if (res.sogni_login_box) addSogniLoginButton();" + N + "  }",
               "sendMessage-guard")
-          rep("$('plusBtn').addEventListener('click', async () => {\n  const list = $('presetList');",
-              "$('plusBtn').addEventListener('click', async () => {\n  presetSheetGirl = { id: currentGirl.id, name: currentGirl.name };\n  const list = $('presetList');",
+          rep("$('plusBtn').addEventListener('click', async () => {" + N + "  const list = $('presetList');",
+              "$('plusBtn').addEventListener('click', async () => {" + N + "  presetSheetGirl = { id: currentGirl.id, name: currentGirl.name };" + N + "  const list = $('presetList');",
               "plusBtn-capture")
           rep("const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(currentGirl.id));",
               "const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(presetSheetGirl.id));",
@@ -77,7 +78,7 @@ jobs:
               "list.innerHTML = '<div class=\"sheet-sub\">No presets yet for ' + presetSheetGirl.name + '.</div>';",
               "plusBtn-nopresets")
           rep("  const res = await ApiClient.requestPreset(currentGirl.id, presetName);",
-              "  const girl = presetSheetGirl || { id: currentGirl.id, name: currentGirl.name };\n  const res = await ApiClient.requestPreset(girl.id, presetName);",
+              "  const girl = presetSheetGirl || { id: currentGirl.id, name: currentGirl.name };" + N + "  const res = await ApiClient.requestPreset(girl.id, presetName);",
               "sendPresetVideo-girl")
           rep("    addPresetMediaBubble(res.video_url, res.media_type || 'video', presetName);",
               "    addPresetMediaBubble(res.video_url, res.media_type || 'video', presetName, girl.name);",
@@ -88,8 +89,8 @@ jobs:
           rep("  addText('her', 'hmm, couldn\\'t pull that one up. try again?');",
               "  addText('her', 'hmm, couldn\\'t pull that one up. try again?', {}, girl.name);",
               "sendPresetVideo-error")
-          rep("function addPresetMediaBubble(url, mediaType, presetName) {\n  const wrap = addMsg('her', '', {\n    bubbleClass: 'photo-bubble',\n    caption: currentGirl.name + ' \u00b7 ' + timeNow(),\n  });",
-              "function addPresetMediaBubble(url, mediaType, presetName, speakerName) {\n  const wrap = addMsg('her', '', {\n    bubbleClass: 'photo-bubble',\n    caption: herCaption(speakerName),\n  });",
+          rep("function addPresetMediaBubble(url, mediaType, presetName) {" + N + "  const wrap = addMsg('her', '', {" + N + "    bubbleClass: 'photo-bubble'," + N + "    caption: currentGirl.name + ' \u00b7 ' + timeNow()," + N + "  });",
+              "function addPresetMediaBubble(url, mediaType, presetName, speakerName) {" + N + "  const wrap = addMsg('her', '', {" + N + "    bubbleClass: 'photo-bubble'," + N + "    caption: herCaption(speakerName)," + N + "  });",
               "addPresetMediaBubble")
           with open(path, 'w', encoding='utf-8') as f:
               f.write(src)
