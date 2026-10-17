@@ -135,6 +135,9 @@ Roleplay mode is ON for you right now, and it stays on — this is not a scene h
 
 ROLEPLAY_RELEASE_NOTE = """He just said the release word — roleplay mode is now OFF. Acknowledge it briefly in your normal voice (a few words that roleplay is off), then keep talking with him normally, out of scene. Do not stay in the character or the scene you were just playing."""
 
+IN_SCENE_NO_META_RULE = """IN SCENE — NO META: you are inside the scene right now. Never use the words 'roleplay' or 'role play' in your replies, and never refer to 'the scene', 'the setup', 'playing a part/character', or the fact that any of this is pretend or acting. There is no frame to reference — you are simply there, as her/him, first person, present tense. If he says something that steps outside the scene, answer as the person you are in the scene would answer. The ban on the word lasts until the scene ends or he uses the release word."""
+
+
 SCENE_NARRATION_RULE = """SCENE NARRATION — STANDING RULE:
 Inside a roleplay scene, YOU carry the scene. When you are asked to describe — the action, how it feels, what you are doing, what happens next — you describe it yourself: in character, first person, in sensory detail, and you advance the scene with what you say instead of handing the narration back as a question. A description may run longer than your usual texting length; a real paragraph of scene beats a one-line deflection. Never bounce the narration back: no "and then what happened?", no "go on", no "tell me more", no "i like hearing you talk" as a scene answer. Asking questions is fine in ordinary conversation — inside a scene, describing is your job, not theirs."""
 
@@ -1090,7 +1093,14 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     # the co-producer, not a companion; his register governs him.
     if cid != "rocky":
         parts.append(SCENE_NARRATION_RULE)
-    parts.extend([HONESTY_RULE] + capability_hooks.hook_parts(cid, char))
+    # 2026-10-17: while a roleplay scene is active (or the roleplay lock
+    # is on), skip the capability hook parts -- they mention roleplay and
+    # break immersion. HONESTY_RULE is always kept.
+    in_scene = (context.get("scene_state") == "active") or bool(context.get("roleplay_locked"))
+    if in_scene:
+        parts.append(HONESTY_RULE)
+    else:
+        parts.extend([HONESTY_RULE] + capability_hooks.hook_parts(cid, char))
     # Roleplay start flow (2026-10-14, owner accounts): after the
     # standing rules, so the casting he set has recency over her
     # default persona facts wherever the two conflict in-scene.
@@ -1118,6 +1128,10 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                     "part you were cast in. Do not ask what happens; "
                     "begin it.")
             parts.append(block)
+            # 2026-10-17: in-scene meta ban, placed right after the scene
+            # brief so it has recency while the scene is active.
+            if in_scene and cid != "rocky":
+                parts.append(IN_SCENE_NO_META_RULE)
     if cid == "rocky":
         style = ("Style: 1-3 short sentences, like a text. Direct, "
                  "dry, and plain. No pet names, ever.")
@@ -1271,6 +1285,11 @@ _SCENE_SIGNAL_RE = re.compile(
     r"|right there|faster|harder|slower|pretend (we|you|i))\b",
     re.IGNORECASE)
 _ASTERISK_ACTION_RE = re.compile(r"\*[^*\n]{3,}\*")
+_SCENE_START_RE = re.compile(
+    r"let'?s pretend|\bpretend\s+(we|you|i)\b|\bimagine\s+(we|you)\b"
+    r"|\bact\s+like\s+you'?re\b|\byou\s+play\s+the\b|\brole[\s-]?play\b",
+    re.IGNORECASE)
+_YOURE_A_ROLE_RE = re.compile(r"\byou'?re a \w+|\byou are a \w+", re.IGNORECASE)
 
 # Narration bounces: replies whose whole substance is handing the
 # scene back to him. Matched only on SHORT replies — a long reply
@@ -1734,7 +1753,7 @@ def _set_roleplay_locked(conn: sqlite3.Connection, character_id: str,
 
 
 # ---------------------------------------------------------------------------
-# ROLEPLAY START FLOW (2026-10-14, owner accounts only) — a per-character
+# ROLEPLAY START FLOW (2026-10-14; all users since 2026-10-17) — a per-character
 # scene layer on top of the lock machinery. He says "role play" (whole
 # message) and she asks for the casting; his next message is the brief,
 # stored VERBATIM and injected into her prompt every turn while the
@@ -1763,6 +1782,36 @@ def _is_roleplay_trigger(user_text: str | None) -> bool:
     t = (user_text or "").strip().lower().strip(".!?,~").strip()
     t = re.sub(r"\s+", " ", t)
     return t in _ROLEPLAY_TRIGGER_FORMS
+
+
+_SCENE_ESCAPE_FORMS = {
+    "end roleplay", "end role play", "stop roleplay", "stop role play",
+    "end scene", "stop the scene", "scene over", "back to normal",
+    "out of character",
+}
+
+
+def _is_scene_escape(user_text: str | None) -> bool:
+    """Whole message is a plain-language scene end ("end scene",
+    "back to normal", ...) — same matching style as the trigger:
+    any case, optional trailing punctuation. The phrase inside a
+    sentence never ends a scene."""
+    t = (user_text or "").strip().lower().strip(".!?,~").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t in _SCENE_ESCAPE_FORMS
+
+
+def _is_hand_started_scene(user_text: str | None) -> bool:
+    """True when his message starts a scene by hand — pretend/imagine
+    framing, a casting line ("you're a ..."), a roleplay mention
+    with setup content, or an asterisk action — as opposed to
+    merely continuing one."""
+    t = (user_text or "").strip()
+    if not t:
+        return False
+    if _SCENE_START_RE.search(t) or _ASTERISK_ACTION_RE.search(t):
+        return True
+    return bool(_YOURE_A_ROLE_RE.search(t)) and len(t.split()) > 3
 
 
 def _owner_ids() -> set[str]:
@@ -1835,23 +1884,30 @@ def _advance_scene_state(
     """Run one turn of the start-flow state machine. Returns
     (scene_state, scene_brief, scene_opening, scene_just_ended).
 
-    Transitions (owner accounts only; for anyone else this is inert
-    and writes nothing):
+    Transitions apply to all users — scene rows are keyed per
+    (user_id, character_id), so each user's scenes stay isolated:
       none     --"role play"-->  awaiting   (her reply is the ask)
       awaiting --his brief-->    active     (brief stored verbatim;
                                              this turn opens the scene)
       awaiting --"role play"-->  awaiting   (she asks again)
       active   --any message-->  active     (brief re-injected)
+      none     --hand-started--> active     (his scene-setting message
+                                             becomes the brief)
+      awaiting --escape phrase--> none      (plain-language end)
+      active   --escape phrase--> none      (plain-language end)
       any      --"pickles"-->    none       (scene ends; Brooklyn's
                                              lock release runs in the
                                              lock flip above)
     """
-    if not _is_owner(user_id):
-        return (None, "", False, False)
     row = get_scene_state(conn, user_id, character_id)
     state = row["state"] if row else None
     brief = row["brief"] if row else ""
     if _is_roleplay_release(user_text):
+        if row:
+            _clear_scene_state(conn, user_id, character_id)
+            return (None, "", False, True)
+        return (None, "", False, False)
+    if _is_scene_escape(user_text):
         if row:
             _clear_scene_state(conn, user_id, character_id)
             return (None, "", False, True)
@@ -1867,6 +1923,9 @@ def _advance_scene_state(
     if _is_roleplay_trigger(user_text):
         _set_scene_state(conn, user_id, character_id, "awaiting", "")
         return ("awaiting", "", False, False)
+    if _is_hand_started_scene(user_text):
+        _set_scene_state(conn, user_id, character_id, "active", user_text)
+        return ("active", user_text, True, False)
     return (None, "", False, False)
 
 
