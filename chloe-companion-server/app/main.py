@@ -3713,6 +3713,25 @@ def memory_export(body: UserIdIn, request: Request):
         conn.close()
 
 
+class MemoryDeleteOneIn(BaseModel):
+    character_id: str = "chloe"
+    memory_id: int
+
+
+@app.post("/api/v1/memory/delete-one")
+def memory_delete_one(body: MemoryDeleteOneIn, request: Request):
+    """Delete a single saved memory (the 'What she remembers' page)."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        removed = store.delete_memory(conn, user_id,
+                                      body.character_id or "chloe",
+                                      body.memory_id)
+        return {"ok": True, "removed": removed}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/memory/delete")
 def memory_delete(body: UserIdIn, request: Request):
     user_id = _current_user_id(request)

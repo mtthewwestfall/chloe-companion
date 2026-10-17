@@ -1018,6 +1018,93 @@ let presetSheetGirl = null;
   }
 
   $('referralBtn').addEventListener('click', () => { closeSheet('profileSheet'); openReferral(); });
+
+  /* ---------- what she remembers (2026-10-17) ---------- */
+  async function memFetch(path, body) {
+    const res = await fetch(CONFIG.API_BASE_URL + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
+      body: JSON.stringify(body || {}),
+    });
+    return res.json();
+  }
+
+  function renderMemories(mems) {
+    const list = $('memList');
+    list.innerHTML = '';
+    $('memForgetAll').classList.toggle('hidden', !mems.length);
+    if (!mems.length) {
+      const d = document.createElement('div');
+      d.className = 'mem-empty';
+      d.textContent = "She's still getting to know you \u2014 nothing saved yet. Tell her your name, your favorites, what's going on in your life, and it will show up here.";
+      list.appendChild(d);
+      return;
+    }
+    mems.forEach((m) => {
+      const row = document.createElement('div');
+      row.className = 'mem-item';
+      const main = document.createElement('div');
+      main.className = 'mem-main';
+      const tag = document.createElement('span');
+      tag.className = 'mem-type';
+      tag.textContent = (m.mem_type || 'fact');
+      const txt = document.createElement('span');
+      txt.className = 'mem-text';
+      txt.textContent = m.text || '';
+      main.appendChild(tag);
+      main.appendChild(txt);
+      const when = document.createElement('div');
+      when.className = 'mem-when';
+      when.textContent = (m.created_at || '').slice(0, 10);
+      const del = document.createElement('button');
+      del.className = 'mem-del';
+      del.textContent = '\u2715';
+      del.setAttribute('aria-label', 'Forget this');
+      del.addEventListener('click', async () => {
+        del.disabled = true;
+        try {
+          await memFetch('/api/v1/memory/delete-one', { character_id: currentGirl.id, memory_id: m.id });
+          row.remove();
+          if (!$('memList').children.length) renderMemories([]);
+        } catch (e) { del.disabled = false; }
+      });
+      row.appendChild(main);
+      row.appendChild(when);
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+  }
+
+  async function openMemorySheet() {
+    $('memGirlName').textContent = currentGirl.name;
+    openSheet('memorySheet');
+    $('memList').innerHTML = '<div class="mem-empty">Loading\u2026</div>';
+    try {
+      const d = await memFetch('/api/v1/memory/export', { character_id: currentGirl.id });
+      renderMemories(d.memories || []);
+    } catch (e) {
+      $('memList').innerHTML = '<div class="mem-empty">Could not load her memories right now.</div>';
+    }
+  }
+
+  $('memoryBtn').addEventListener('click', openMemorySheet);
+  $('memForgetAll').addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    if (!btn.dataset.armed) {
+      btn.dataset.armed = '1';
+      btn.textContent = 'Tap again \u2014 erases her memories AND your chat history with her';
+      setTimeout(() => { btn.dataset.armed = ''; btn.textContent = 'Forget everything'; }, 3500);
+      return;
+    }
+    btn.disabled = true;
+    try {
+      await memFetch('/api/v1/memory/delete', { character_id: currentGirl.id });
+      renderMemories([]);
+    } catch (e) {}
+    btn.disabled = false;
+    btn.dataset.armed = '';
+    btn.textContent = 'Forget everything';
+  });
   $('refCopyBtn').addEventListener('click', () => {
     $('refLinkInput').select();
     document.execCommand('copy');

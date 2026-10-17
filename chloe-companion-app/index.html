@@ -171,6 +171,7 @@
 
           </div>
           <div class="header-icons">
+            <button id="memoryBtn" aria-label="What she remembers about you">🧠</button>
             <button id="videoCallBtn" aria-label="Video call">📹</button>
             <button id="phoneCallBtn" aria-label="Voice call">📞</button>
           </div>
@@ -376,6 +377,15 @@
       </div>
     </div>
 
+    <div id="memorySheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>What <span id="memGirlName">she</span> remembers</h2><button class="sheet-close" data-close="memorySheet">✕</button></div>
+        <p class="sheet-sub">Everything she has saved about you from your chats — so she can pick up right where you left off. Remove anything you don't want her to keep.</p>
+        <div id="memList" class="mem-list"></div>
+        <button id="memForgetAll" class="btn-ghost mem-forget hidden">Forget everything</button>
+      </div>
+    </div>
   </div>
 </div>
 
