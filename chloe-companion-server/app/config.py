@@ -227,6 +227,19 @@ SOGNI_IMAGE_MODEL = os.environ.get(
 # Prompt-only image renders (no reference picture to edit) cannot use
 # the edit model above — Sogni refuses them outright (error 4007:
 # "For a prompt-only render, choose a non-edit model"). This non-edit
+
+# ---------------------------------------------------------------------------
+# Proactive messaging settings (2026-10-16, feat/proactive-live).
+# ---------------------------------------------------------------------------
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+PROACTIVE_MORNING_HOUR = int(os.environ.get("PROACTIVE_MORNING_HOUR", "8"))
+PROACTIVE_NUDGE_HOURS = int(os.environ.get("PROACTIVE_NUDGE_HOURS", "24"))
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_MAILTO = os.environ.get("VAPID_MAILTO", "mailto:hello@lockeddoor.ai")
+# Flip the scheduler to live by default (was dry-run).
+SCHEDULER_DRY_RUN = os.environ.get("CHLOE_SCHEDULER_DRY_RUN", "0") == "1"
+
 # sibling is used whenever a plan image render carries no reference.
 SOGNI_IMAGE_TEXT_MODEL = os.environ.get(
     "SOGNI_IMAGE_TEXT_MODEL", "qwen_image_2512_fp8")
