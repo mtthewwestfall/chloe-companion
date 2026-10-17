@@ -111,7 +111,7 @@ Efficiency model (fail-fast + background prober):
 
 Model fallback (2026-10-17): the chat model is an ordered chain, not a
 single name. GEMINI_MODEL_CHAIN (comma-separated, default
-"gemini-3.1-flash-lite,gemini-2.5-flash-lite") lists the chain primary-
+"gemini-3.1-flash-lite,gemini-3.5-flash-lite") lists the chain primary-
 first; model_chain() parses it and current_model() returns the model
 currently serving traffic. post_json rewrites the primary model segment
 of the caller's URL to current_model() before every attempt phase, so
@@ -207,8 +207,12 @@ _BELIEF_TTL_S = 600.0
 # --- Model fallback chain (2026-10-17) --------------------------------------
 # The chat model is an ordered chain (primary first), not a single name.
 # GEMINI_MODEL_CHAIN overrides the default
-# "gemini-3.1-flash-lite,gemini-2.5-flash-lite".
-_MODEL_CHAIN_DEFAULT = "gemini-3.1-flash-lite,gemini-2.5-flash-lite"
+# "gemini-3.1-flash-lite,gemini-3.5-flash-lite".
+# (gemini-2.5-flash-lite was the original fallback; Google retired it
+# for these projects — a 404 "no longer available to new users" — on
+# 2026-10-17, which is why the fallback is now 3.5-flash-lite, the
+# replacement named in Google's own 404 message.)
+_MODEL_CHAIN_DEFAULT = "gemini-3.1-flash-lite,gemini-3.5-flash-lite"
 _GEMINI_API_BASE = ("https://generativelanguage.googleapis.com"
                     "/v1beta/models")
 _MODEL_IN_URL_RE = re.compile(r"/models/([^/:?]+)")
@@ -329,7 +333,7 @@ def _probe_interval_s() -> float:
 def model_chain() -> list[str]:
     """Ordered model fallback chain, primary first. Configurable via
     the GEMINI_MODEL_CHAIN env var (comma-separated); defaults to
-    "gemini-3.1-flash-lite,gemini-2.5-flash-lite"."""
+    "gemini-3.1-flash-lite,gemini-3.5-flash-lite"."""
     raw = (os.environ.get("GEMINI_MODEL_CHAIN", "") or "").strip()
     if not raw:
         raw = _MODEL_CHAIN_DEFAULT
@@ -385,6 +389,25 @@ def _is_model_overload(body: str | None) -> bool:
     than a problem with the key or the request."""
     text = (body or "").lower()
     return any(h in text for h in _OVERLOAD_BODY_HINTS)
+
+
+def _is_model_not_found(body: str | None, model: str | None) -> bool:
+    """True when a 404 body says the MODEL itself does not exist for
+    the project — retired or never provisioned ("This model
+    models/<name> is no longer available to new users...", status
+    NOT_FOUND). Every key would get the same 404, so this is a
+    model-level outage like overload, never a bad request: classing
+    it 'request' would fatally abort the walk on the first key tried
+    and block every fallback, including the paid key (the
+    2026-10-17 outage, when the chain's fallback model was retired
+    by Google while the primary was overloaded)."""
+    if not model:
+        return False
+    text = (body or "").lower()
+    if model.lower() not in text:
+        return False
+    return ("no longer available" in text or "not found" in text
+            or "not_found" in text)
 
 
 def _note_model_overload_locked(model: str, key_id: int) -> None:
@@ -625,6 +648,11 @@ def _seed_belief_locked(conn) -> None:
     except Exception:
         return
     for r in rows:
+        if r["id"] in _belief:
+            # Live evidence (an attempt/probe outcome recorded before
+            # this lazy first seed ran) is fresher than the persisted
+            # columns; never stomp it with older state.
+            continue
         ts = _parse_ts(r["last_success_at"])
         ok = ts is not None and (r["consecutive_failures"] or 0) == 0
         _belief[r["id"]] = {"ok": bool(ok), "at": ts or 0.0, "lat": None}
@@ -1282,6 +1310,18 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
             error_type = "model"
             with _lock:
                 _note_model_overload_locked(model, key_id)
+        elif e.code == 404 and model is not None \
+                and model in model_chain() \
+                and _is_model_not_found(_err_body, model):
+            # The chain model itself is gone for these projects
+            # (retired / not provisioned): same model-level handling
+            # as overload. Without this, the 404 lands in the
+            # 'request' class — "the call itself was bad" — which is
+            # fatal to the walk, so one dead chain entry takes down
+            # every caller even with a healthy pool behind it.
+            error_type = "model"
+            with _lock:
+                _note_model_overload_locked(model, key_id)
         logger.warning(
             "gemini_keys attempt failed: source=%s key_id=%s http=%s "
             "class=%s %s",
@@ -1310,35 +1350,48 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
     and time budget hold globally. A 'request'-class failure (the call
     itself was bad) sets state["fatal"] and stops the walk: no other
     key can fix a bad request."""
-    for key_id, key_value in candidates:
-        if key_id in tried:
-            continue
-        if state["n"] >= state.get("max_n", _max_attempts()) or time.monotonic() >= state["deadline"]:
-            break
-        tried.add(key_id)
-        state["n"] += 1
-        ok, data, _seconds, error_type = _attempt(
-            key_id, key_value, url, payload, timeout, source)
-        if ok:
-            return data
-        if error_type == "quota":
-            state["quota_failures"] = state.get("quota_failures", 0) + 1
-        if error_type == "model":
-            # The model went hot mid-walk: reroute the rest of this
-            # walk to the model now serving traffic. The failures so
-            # far blamed the model, not the keys, so the tried set is
-            # cleared — the same keys may serve fine on the next model.
-            rerouted = _route_url(url)
-            if rerouted != url:
-                logger.info(
-                    "gemini_keys: model overloaded mid-call, failing "
-                    "over to %s", _model_from_url(rerouted))
-                url = rerouted
-                tried.clear()
-        if error_type == "request":
-            state["fatal"] = "request"
-            break
-    return None
+    while True:
+        rerouted = None
+        for key_id, key_value in candidates:
+            if key_id in tried:
+                continue
+            if state["n"] >= state.get("max_n", _max_attempts()) or time.monotonic() >= state["deadline"]:
+                break
+            tried.add(key_id)
+            state["n"] += 1
+            ok, data, _seconds, error_type = _attempt(
+                key_id, key_value, url, payload, timeout, source)
+            if ok:
+                return data
+            if error_type == "quota":
+                state["quota_failures"] = state.get("quota_failures", 0) + 1
+            if error_type == "model":
+                # The model went hot mid-walk: reroute the rest of this
+                # walk to the model now serving traffic. The failures so
+                # far blamed the model, not the keys, so the tried set is
+                # cleared — the same keys may serve fine on the next model.
+                candidate_url = _route_url(url)
+                if candidate_url != url:
+                    rerouted = candidate_url
+                    break
+            if error_type == "request":
+                state["fatal"] = "request"
+                break
+        if rerouted is None:
+            return None
+        # Restart the pass over the full candidate list on the new
+        # model. (The pre-2026-10-17 code only swapped the URL and
+        # cleared `tried`, but the for-loop had already consumed the
+        # candidates, so when the hot-marking failure was the last
+        # candidate the fallback model was never attempted in this
+        # phase.) The shared attempt cap and deadline still bound the
+        # total work, and _route_url only rewrites the chain primary,
+        # so a second reroute cannot ping-pong between two models.
+        logger.info(
+            "gemini_keys: model overloaded mid-call, failing "
+            "over to %s", _model_from_url(rerouted))
+        url = rerouted
+        tried.clear()
 
 
 def _try_hedged(candidates, url, payload, timeout, source, tried,

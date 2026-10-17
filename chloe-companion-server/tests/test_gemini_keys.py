@@ -535,7 +535,7 @@ class TestHealthInfo(GeminiKeysTestBase):
         self.assertIn("models", info)
         models = {m["model"]: m for m in info["models"]}
         self.assertIn("gemini-3.1-flash-lite", models)
-        self.assertIn("gemini-2.5-flash-lite", models)
+        self.assertIn("gemini-3.5-flash-lite", models)
         primary = models["gemini-3.1-flash-lite"]
         self.assertTrue(primary["primary"])
         self.assertTrue(primary["serving"])
@@ -763,7 +763,7 @@ class TestLeanProber(GeminiKeysTestBase):
                                side_effect=fake):
             sent = gemini_keys._probe_cycle()
         self.assertEqual(sent, 1)
-        self.assertEqual(probed_models, ["gemini-2.5-flash-lite"])
+        self.assertEqual(probed_models, ["gemini-3.5-flash-lite"])
 
     def test_prober_reconfirms_after_confirm_window(self):
         # At 500s (> confirm window, < belief TTL) the primary IS due
@@ -815,7 +815,7 @@ class TestModelFallback(GeminiKeysTestBase):
 
     def test_chain_defaults(self):
         self.assertEqual(gemini_keys.model_chain(),
-                         ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"])
+                         ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"])
         self.assertEqual(gemini_keys.current_model(),
                          "gemini-3.1-flash-lite")
         self.assertIn("gemini-3.1-flash-lite:generateContent",
@@ -843,12 +843,12 @@ class TestModelFallback(GeminiKeysTestBase):
         self.assertIsNotNone(result)
         models_hit = [m for m, _ in calls]
         self.assertIn("gemini-3.1-flash-lite", models_hit)
-        self.assertIn("gemini-2.5-flash-lite", models_hit)
+        self.assertIn("gemini-3.5-flash-lite", models_hit)
         # Primary is hot now: the next call goes straight to fallback.
         calls2 = self._patch_http(lambda url, kv: {"ok": True})
         gemini_keys.post_json(
             gemini_keys.model_url("gemini-3.1-flash-lite"), {"x": 1})
-        self.assertTrue(all(m == "gemini-2.5-flash-lite"
+        self.assertTrue(all(m == "gemini-3.5-flash-lite"
                             for m, _ in calls2))
 
     def test_overload_blames_no_key(self):
@@ -860,6 +860,38 @@ class TestModelFallback(GeminiKeysTestBase):
         self.assertEqual(row["total_failures"], 0)
         self.assertIsNone(row["quota_exhausted_until"])
         self.assertEqual(row["total_requests"], 1)
+
+    def _not_found_error(self, model):
+        # Real Gemini retired-model shape (2026-10-17): 404 with the
+        # model named in the message and status NOT_FOUND.
+        body = ('{"error": {"code": 404, "message": "This model '
+                'models/%s is no longer available to new users. '
+                'Please update your code.", "status": "NOT_FOUND"}}'
+                % model).encode()
+        return urllib.error.HTTPError("https://example.test/gen", 404,
+                                      "err", None, io.BytesIO(body))
+
+    def test_retired_model_404_is_model_class_not_fatal(self):
+        # A chain model Google retired returns 404 on every key. That
+        # must classify as 'model' (no key blame, no fatal abort), so
+        # the walk still tries the remaining keys — under the old
+        # 'request' classification the first 404 killed the whole call
+        # and blocked every fallback, including the paid key.
+        self._add("ok1", "a", False)
+        self._add("ok2", "b", False)
+        fallback = gemini_keys.model_chain()[1]
+
+        def behavior(url, key_value):
+            raise self._not_found_error(fallback)
+
+        calls = self._patch_http(behavior)
+        result = gemini_keys.post_json(
+            gemini_keys.model_url(fallback), {"x": 1})
+        self.assertIsNone(result)
+        self.assertEqual(len(calls), 2)  # both keys tried: no fatal abort
+        for row in gemini_keys.list_keys():
+            self.assertEqual(row["consecutive_failures"], 0)
+            self.assertEqual(row["total_failures"], 0)
 
     def test_explicit_pin_passes_through(self):
         # A URL naming a non-primary model is never rewritten.
