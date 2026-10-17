@@ -1,0 +1,74 @@
+/* PWA: Add-to-Home-Screen banner styles.
+   Kept in its own file so the install UI can evolve without touching
+   app.css. Uses the app's pink/purple theme (--pink/--purple with
+   hex fallbacks). */
+
+.pwa-install-banner {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(20, 12, 26, 0.97);
+  border: 1px solid rgba(255, 45, 120, 0.35);
+  box-shadow: 0 8px 32px rgba(255, 45, 120, 0.25);
+  color: #fff;
+  font-size: 13px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: pwa-banner-in 0.35s ease-out;
+}
+
+@keyframes pwa-banner-in {
+  from { transform: translateY(16px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.pwa-install-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.pwa-install-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pwa-install-text b {
+  font-size: 13px;
+}
+
+.pwa-install-text span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+}
+
+.pwa-install-cta {
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--pink, #ff2d78), var(--purple, #a855f7));
+  border: none;
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pwa-install-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 6px;
+}
