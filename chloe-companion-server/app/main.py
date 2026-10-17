@@ -918,6 +918,88 @@ def auth_telegram(body: dict):
     finally:
         conn.close()
 
+def _ensure_link_codes(conn) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS link_codes (
+               code TEXT PRIMARY KEY,
+               user_id TEXT NOT NULL,
+               expires_at TEXT NOT NULL,
+               used INTEGER NOT NULL DEFAULT 0)""")
+
+
+@app.post("/api/v1/auth/telegram-link")
+def auth_telegram_link(body: dict):
+    """Mint a one-time, 10-minute app-login code for a Telegram user.
+
+    The bot sends lockeddoor.ai/?link=<code> as a button in the user's
+    private chat. Redeeming it (auth_redeem_link) creates a web session
+    for the SAME tg_ account — same balance, memories, and streaks.
+    The code is the secret: single-use, short-lived, and only ever
+    delivered inside that user's Telegram chat.
+    """
+    import secrets as _secrets
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    tid = str(body.get("telegram_id", ""))
+    name = body.get("name", "Telegram User")
+    if not tid:
+        raise HTTPException(status_code=400, detail="telegram_id required")
+    conn = _conn()
+    try:
+        user_id = f"tg_{tid}"
+        existing = conn.execute(
+            "SELECT user_id FROM users WHERE user_id = ?",
+            (user_id,)).fetchone()
+        user = store.get_or_create_user(conn, user_id)
+        if not existing:
+            conn.execute(
+                "UPDATE users SET messages_remaining = 50 WHERE user_id = ?",
+                (user_id,))
+            conn.commit()
+        _ensure_link_codes(conn)
+        code = _secrets.token_urlsafe(9)
+        expires = (_dt.now(_tz.utc) + _td(minutes=10)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO link_codes (code, user_id, expires_at) "
+            "VALUES (?, ?, ?)", (code, user_id, expires))
+        conn.commit()
+        return {"ok": True, "code": code, "user_id": user_id, "name": name}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/auth/redeem-link")
+def auth_redeem_link(body: dict):
+    """Exchange a one-time Telegram app-link code for a web session."""
+    import secrets as _secrets
+    from datetime import datetime as _dt, timezone as _tz
+    code = str(body.get("code", "")).strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code required")
+    conn = _conn()
+    try:
+        _ensure_link_codes(conn)
+        row = conn.execute(
+            "SELECT user_id, expires_at, used FROM link_codes "
+            "WHERE code = ?", (code,)).fetchone()
+        now = _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        if (not row or int(row["used"]) == 1
+                or str(row["expires_at"]) < now):
+            raise HTTPException(status_code=400,
+                                detail="invalid_or_expired_code")
+        conn.execute("UPDATE link_codes SET used = 1 WHERE code = ?",
+                     (code,))
+        conn.commit()
+        user_id = row["user_id"]
+        user = store.get_or_create_user(conn, user_id)
+        token = _secrets.token_urlsafe(32)
+        store.create_session(conn, user_id, token)
+        return {"ok": True, "token": token, "user_id": user_id,
+                "name": user.get("name") or ""}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/chat/attachments")
 async def upload_chat_attachment(request: Request,
                                  character_id: str = Form("hannah"),
