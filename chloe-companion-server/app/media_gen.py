@@ -21,7 +21,7 @@ import traceback
 import urllib.request
 from typing import Any
 
-from . import config, db, store
+from . import config, db, gemini_keys, store
 
 _WS_PATCHED = False
 
@@ -258,6 +258,117 @@ async def _generate_async(request_id: int, girl: dict[str, Any], media: str,
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Face-match gate (2026-10-17): a generated photo is only delivered when
+# it actually looks like the character. The avatar is the reference (the
+# same one used as the generation face-lock). An explicit "no" from the
+# vision check retries the generation once; a second "no" fails the
+# request and refunds the pool unit instead of delivering a stranger.
+# "uncertain"/unavailable (no reference, vision down) never blocks —
+# availability beats perfection.
+# ---------------------------------------------------------------------------
+_FACE_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-3.1-flash-lite:generateContent"
+)
+_FACE_CHECK_PROMPT = (
+    "You are verifying identity between two photos. The FIRST image is "
+    "the reference portrait of a woman. The SECOND image is a newly "
+    "generated photo that should depict the SAME woman. Compare facial "
+    "features, face shape, eyes, nose, lips and hair — ignore clothing, "
+    "background, lighting and pose. Respond with ONLY this JSON: "
+    "{\"same_person\": \"yes\"} if it is clearly the same person, "
+    "{\"same_person\": \"no\"} if it is clearly a different person, or "
+    "{\"same_person\": \"uncertain\"} if the second image has no "
+    "clearly visible face."
+)
+_FACE_MAX_BYTES = 4_000_000
+
+
+def _reference_bytes(avatar_url: str) -> tuple[bytes, str] | None:
+    """(bytes, mime) for the girl's avatar — http(s), app-relative, or
+    data URI (Brittany's avatar is a data URI, which _fetch_reference
+    cannot use for generation but the check can read directly)."""
+    url = (avatar_url or "").strip()
+    if not url:
+        return None
+    try:
+        if url.startswith("data:image/"):
+            head, _, b64 = url.partition(",")
+            mime = head[5:].split(";")[0] or "image/jpeg"
+            import base64 as _b64
+            raw = _b64.b64decode(b64)
+            return (raw, mime) if 0 < len(raw) <= _FACE_MAX_BYTES else None
+        if url.startswith("/"):
+            path = _local_media_file(url)
+            if not path:
+                return None
+            with open(path, "rb") as f:
+                raw = f.read(_FACE_MAX_BYTES + 1)
+            if not raw or len(raw) > _FACE_MAX_BYTES:
+                return None
+            ext = os.path.splitext(path)[1].lower()
+            mime = {".png": "image/png", ".webp": "image/webp"}.get(
+                ext, "image/jpeg")
+            return raw, mime
+        if url.startswith("http://") or url.startswith("https://"):
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "chloe-companion/facecheck"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read(_FACE_MAX_BYTES + 1)
+                mime = resp.headers.get_content_type() or "image/jpeg"
+            if not raw or len(raw) > _FACE_MAX_BYTES:
+                return None
+            return raw, mime
+    except Exception as e:  # noqa: BLE001
+        print(f"[media_gen] reference read failed: {e.__class__.__name__}",
+              flush=True)
+    return None
+
+
+def _face_verdict(girl: dict[str, Any], result_url: str) -> str:
+    """'yes' | 'no' | 'uncertain' | 'unavailable'. Never raises."""
+    try:
+        ref = _reference_bytes(girl.get("avatar_url") or "")
+        if not ref:
+            return "unavailable"
+        gen_path = _local_media_file(result_url)
+        if not gen_path:
+            return "unavailable"
+        with open(gen_path, "rb") as f:
+            gen_raw = f.read(_FACE_MAX_BYTES + 1)
+        if not gen_raw or len(gen_raw) > _FACE_MAX_BYTES:
+            return "unavailable"
+        import base64 as _b64
+        parts = [
+            {"text": _FACE_CHECK_PROMPT},
+            {"inline_data": {"mime_type": ref[1],
+                             "data": _b64.b64encode(ref[0]).decode()}},
+            {"inline_data": {"mime_type": "image/jpeg",
+                             "data": _b64.b64encode(gen_raw).decode()}},
+        ]
+        data = gemini_keys.post_json(
+            _FACE_GEMINI_URL,
+            {"contents": [{"role": "user", "parts": parts}],
+             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 100}},
+            timeout=45, source="whispr-facecheck")
+        if not data:
+            return "unavailable"
+        text = "".join(p.get("text", "") for p in
+                       data["candidates"][0]["content"]["parts"]).strip()
+        if text.startswith("```"):
+            import re as _re
+            text = _re.sub(r"^```\w*\n?", "", text)
+            text = _re.sub(r"\n?```$", "", text)
+        import json as _json
+        verdict = str(_json.loads(text).get("same_person", "")).lower()
+        return verdict if verdict in ("yes", "no", "uncertain") else "unavailable"
+    except Exception as e:  # noqa: BLE001
+        print(f"[media_gen] face check unavailable: {e.__class__.__name__}",
+              flush=True)
+        return "unavailable"
+
+
 def run_generation(request_id: int) -> None:
     """Thread entry: fulfill one regular request, or fail + refund it."""
     conn = db.connect()
@@ -281,6 +392,29 @@ def run_generation(request_id: int) -> None:
             store.set_media_request_status(conn, request_id, "failed")
             store.refund_request(conn, req["user_id"], req["pool_source"])
             return
+        if req["media"] == "image":
+            verdict = _face_verdict(girl, url)
+            print(f"[media_gen] request {request_id} face check: {verdict}",
+                  flush=True)
+            if verdict == "no":
+                # One retry with a fresh generation; a second clear
+                # mismatch fails + refunds rather than delivering a
+                # photo of the wrong woman.
+                try:
+                    url, cost = asyncio.run(_generate_async(
+                        request_id, girl, req["media"], req["prompt"]))
+                    verdict = _face_verdict(girl, url)
+                    print(f"[media_gen] request {request_id} face check "
+                          f"(retry): {verdict}", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[media_gen] request {request_id} retry failed: "
+                          f"{e}", flush=True)
+                    verdict = "no"
+                if verdict == "no":
+                    store.set_media_request_status(conn, request_id, "failed")
+                    store.refund_request(conn, req["user_id"],
+                                         req["pool_source"])
+                    return
         store.set_media_request_status(conn, request_id, "ready",
                                        result_url=url, cost_usd=cost)
         print(f"[media_gen] request {request_id} ready: {url} "
