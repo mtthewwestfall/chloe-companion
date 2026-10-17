@@ -199,6 +199,10 @@
         <button class="filter-btn" onclick="setGiveGenFilter('approved')">Approved</button>
         <button class="filter-btn" onclick="setGiveGenFilter('deleted')">Deleted</button>
       </div>
+      <div id="giveGenViewTabs" style="margin-bottom:12px;display:none;gap:8px;flex-wrap:wrap;">
+        <button class="filter-btn" id="giveGenViewReady" onclick="setGiveGenView('ready')">Ready to Review</button>
+        <button class="filter-btn" id="giveGenViewGenerating" onclick="setGiveGenView('generating')">Generating</button>
+      </div>
       <div id="giveGenList"></div>
     </div>
   </div>
@@ -425,6 +429,12 @@ async function processPendingCustomVideos() {
 }
 
 let giveGenFilter = 'pending';
+let giveGenView = 'ready';
+
+function setGiveGenView(v) {
+  giveGenView = v;
+  loadGiveGenerations();
+}
 
 async function setGiveGenFilter(f) {
   giveGenFilter = f;
@@ -522,8 +532,26 @@ async function loadGiveGenerations() {
   const q = giveGenFilter ? `?status=${encodeURIComponent(giveGenFilter)}` : '';
   const data = await api('GET', '/api/v1/admin/give-generations' + q);
   const gens = data.generations || [];
-  if (!gens.length) { box.innerHTML = '<div class="sub">No give generations found.</div>'; return; }
-  box.innerHTML = gens.map(g => {
+  const viewTabs = document.getElementById('giveGenViewTabs');
+  let visible = gens;
+  if (giveGenFilter === 'pending') {
+    const ready = gens.filter(g => !!g.url);
+    const waiting = gens.filter(g => !g.url);
+    if (giveGenView === 'ready' && !ready.length && waiting.length) giveGenView = 'generating';
+    if (giveGenView === 'generating' && !waiting.length && ready.length) giveGenView = 'ready';
+    if (viewTabs) {
+      viewTabs.style.display = 'flex';
+      const rb = document.getElementById('giveGenViewReady');
+      const gb = document.getElementById('giveGenViewGenerating');
+      if (rb) { rb.textContent = 'Ready to Review (' + ready.length + ')'; rb.classList.toggle('active', giveGenView === 'ready'); }
+      if (gb) { gb.textContent = 'Generating (' + waiting.length + ')'; gb.classList.toggle('active', giveGenView === 'generating'); }
+    }
+    visible = giveGenView === 'ready' ? ready : waiting;
+  } else if (viewTabs) {
+    viewTabs.style.display = 'none';
+  }
+  if (!visible.length) { box.innerHTML = '<div class="sub">' + (giveGenFilter === 'pending' ? (giveGenView === 'ready' ? 'Nothing ready to review yet.' : 'No generations in progress.') : 'No give generations found.') + '</div>'; return; }
+  box.innerHTML = visible.map(g => {
     const canBulkApprove = (g.status === 'pending' || g.status === 'failed') && !!g.url; const badge = g.status === 'approved' ? '✅ Approved' : g.status === 'deleted' ? '❌ Deleted' : g.status === 'generating' ? '⏳ Generating' : g.status === 'failed' ? '⚠️ Failed' : '🕐 Pending';
     const video = g.url ? `<video class="media-preview" src="${g.url}" controls playsinline preload="metadata"></video>` : '';
     const errorText = g.error ? `<div style="color:#ff6b6b;font-size:12px;margin-top:4px;">Error: ${escapeHtml(g.error)}</div>` : '';
