@@ -790,6 +790,7 @@ let presetSheetGirl = null;
     if (res.sogni_login_box) addSogniLoginButton();
   }
       setMessagesRemaining(res.messages_remaining);
+      maybePeakPaywall(res, text);
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
@@ -1287,7 +1288,27 @@ let presetSheetGirl = null;
     }
   });
 
-  /* ---------- message counter + paywall (2026-10-16) ---------- */let messagesRemaining=null,paywallPlansLoaded=false;function setPaywallCopy(out){$('paywallTitle').textContent=out?"You're out of messages!":'Running low on messages';$('paywallSub').textContent=out?"She's waiting — top up to keep the conversation going.":'Top up now so the conversation never stops.';$('paywallClose').classList.toggle('hidden',out)}function showPaywall(out){setPaywallCopy(out);if(!paywallPlansLoaded)loadPaywallPlans();$('paywallModal').classList.remove('hidden')}function hidePaywall(){$('paywallModal').classList.add('hidden')}function setMessagesRemaining(n){if(typeof n!=='number'||!isFinite(n))return;messagesRemaining=n;const s=$('statMsgs');if(s)s.textContent=n;const c=$('msgCounterNum');if(c)c.textContent=n;const p=$('msgCounter');if(p)p.classList.toggle('low',n<=5);const b=$('lowMsgBanner');if(n<=0){if(b)b.classList.add('hidden');msgInput.disabled=true;$('sendBtn').disabled=true;showPaywall(true)}else{msgInput.disabled=false;$('sendBtn').disabled=false;hidePaywall();if(b){if(n<=5){$('lowMsgText').textContent='Only '+n+' message'+(n===1?'':'s')+' left';b.classList.remove('hidden')}else b.classList.add('hidden')}}}async function loadPaywallPlans(){const plans={trial:null,basic:null};let uid='';try{const mr=await fetch(CONFIG.API_BASE_URL+'/api/v1/auth/me',{headers:{'Authorization':'Bearer '+(localStorage.getItem('whispr_token')||'')}});if(mr.ok){const md=await mr.json();uid=md.user_id||''}}catch(e){}try{const r=await fetch(CONFIG.API_BASE_URL+'/api/v1/tiers');const d=await r.json();(d.plans||[]).forEach(pl=>{if(pl.key==='trial')plans.trial=pl;else if(pl.key==='basic')plans.basic=pl})}catch(e){}paywallPlansLoaded=true;document.querySelectorAll('.paywall-cta').forEach(btn=>{const pl=plans[btn.dataset.plan];let url=(pl&&pl.checkout_url)||(btn.dataset.plan==='basic'?'https://buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c':'https://buy.stripe.com/3cI14ggTpfVtbdJ4bDdjO0f');if(uid)url+=(url.includes('?')?'&':'?')+'client_reference_id='+encodeURIComponent(uid);btn.onclick=()=>window.open(url,'_blank','noopener')})}loadPaywallPlans();$('lowMsgCta').addEventListener('click',()=>showPaywall(false));$('paywallClose').addEventListener('click',hidePaywall);async function updateBalance() {
+  /* ---------- message counter + paywall (2026-10-16) ---------- */let messagesRemaining=null,paywallPlansLoaded=false;function setPaywallCopy(out){$('paywallTitle').textContent=out?"You're out of messages!":'Running low on messages';$('paywallSub').textContent=out?"She's waiting — top up to keep the conversation going.":'Top up now so the conversation never stops.';$('paywallClose').classList.toggle('hidden',out)}function showPaywall(out){setPaywallCopy(out);if(!paywallPlansLoaded)loadPaywallPlans();$('paywallModal').classList.remove('hidden')}function hidePaywall(){$('paywallModal').classList.add('hidden')}function setMessagesRemaining(n){if(typeof n!=='number'||!isFinite(n))return;messagesRemaining=n;const s=$('statMsgs');if(s)s.textContent=n;const c=$('msgCounterNum');if(c)c.textContent=n;const p=$('msgCounter');if(p)p.classList.toggle('low',n<=5);const b=$('lowMsgBanner');if(n<=0){if(b)b.classList.add('hidden');msgInput.disabled=true;$('sendBtn').disabled=true;showPaywall(true)}else{msgInput.disabled=false;$('sendBtn').disabled=false;hidePaywall();if(b){if(n<=5){$('lowMsgText').textContent='Only '+n+' message'+(n===1?'':'s')+' left';b.classList.remove('hidden')}else b.classList.add('hidden')}}}async function loadPaywallPlans(){const plans={trial:null,basic:null};let uid='';try{const mr=await fetch(CONFIG.API_BASE_URL+'/api/v1/auth/me',{headers:{'Authorization':'Bearer '+(localStorage.getItem('whispr_token')||'')}});if(mr.ok){const md=await mr.json();uid=md.user_id||''}}catch(e){}try{const r=await fetch(CONFIG.API_BASE_URL+'/api/v1/tiers');const d=await r.json();(d.plans||[]).forEach(pl=>{if(pl.key==='trial')plans.trial=pl;else if(pl.key==='basic')plans.basic=pl})}catch(e){}paywallPlansLoaded=true;document.querySelectorAll('.paywall-cta').forEach(btn=>{const pl=plans[btn.dataset.plan];let url=(pl&&pl.checkout_url)||(btn.dataset.plan==='basic'?'https://buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c':'https://buy.stripe.com/3cI14ggTpfVtbdJ4bDdjO0f');if(uid)url+=(url.includes('?')?'&':'?')+'client_reference_id='+encodeURIComponent(uid);btn.onclick=()=>window.open(url,'_blank','noopener')})}loadPaywallPlans();$('lowMsgCta').addEventListener('click',()=>showPaywall(false));$('paywallClose').addEventListener('click',hidePaywall);function maybePeakPaywall(res, userText) {
+  // Value-moment paywall (2026-10-17): the counter alone converts
+  // frustration; a peak converts desire. After she sends a voice note
+  // or a photo, or a roleplay scene starts, and the bank is getting
+  // low (1-20 left), show the SOFT paywall once per peak type per day.
+  // The hard wall at 0 is unchanged.
+  const left = res && res.messages_remaining;
+  if (typeof left !== 'number' || left <= 0 || left > 20) return;
+  let peak = '';
+  if (res.voice_note_url) peak = 'voice';
+  else if (res.photo_url || res.image_url) peak = 'photo';
+  else if (userText && /(role ?play|pretend|imagine)/i.test(userText)) peak = 'scene';
+  if (!peak) return;
+  const dayKey = 'peakPaywall_' + peak + '_' + new Date().toISOString().slice(0, 10);
+  try {
+    if (localStorage.getItem(dayKey)) return;
+    localStorage.setItem(dayKey, '1');
+  } catch (e) {}
+  setTimeout(() => { if (messagesRemaining > 0) showPaywall(false); }, 1200);
+}
+async function updateBalance() {
     try {
       const me = await ApiClient.me();
       setMessagesRemaining(me.messages_remaining);
