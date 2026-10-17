@@ -1610,6 +1610,34 @@ let presetSheetGirl = null;
       }
     }
 
+    function askAboutPost(p) {
+      const girl = CHARACTERS.find(c => c.id === (p.girl_id || '').toLowerCase());
+      const gid = girl ? girl.id : CHARACTERS[1].id;
+      const gname = girl ? girl.name : 'her';
+      openChat(gid);
+      const cap = (p.caption || '').trim();
+      const short = cap.length > 80 ? cap.slice(0, 80) + '...' : cap;
+      const esc = short.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      const old = document.getElementById('postTopicChip');
+      if (old) old.remove();
+      const chip = document.createElement('div');
+      chip.id = 'postTopicChip';
+      chip.className = 'post-topic-chip';
+      const label = document.createElement('span');
+      label.innerHTML = 'Talking about ' + gname + "'s post" + (esc ? ': &ldquo;' + esc + '&rdquo;' : '');
+      chip.appendChild(label);
+      const x = document.createElement('button');
+      x.className = 'post-topic-x';
+      x.textContent = '\u2715';
+      x.setAttribute('aria-label', 'Clear topic');
+      x.addEventListener('click', () => { chip.remove(); msgInput.value = ''; msgInput.focus(); });
+      chip.appendChild(x);
+      const composer = document.querySelector('#chatView .composer');
+      if (composer && composer.parentNode) composer.parentNode.insertBefore(chip, composer);
+      msgInput.value = 'Tell me more about your post' + (short ? ' \u2014 "' + short + '"' : '') + ' \uD83D\uDCAC';
+      setTimeout(() => msgInput.focus(), 60);
+    }
+
     function renderFeed() {
       const wrap = $('herdayFeed');
       if (!wrap) return;
@@ -1730,10 +1758,8 @@ let presetSheetGirl = null;
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
           <span>Chat</span>`;
-        chatBtn.addEventListener('click', () => {
-          const girl = CHARACTERS.find(c => c.id === (p.girl_id || '').toLowerCase());
-          openChat(girl ? girl.id : CHARACTERS[1].id);
-        });
+        chatBtn.addEventListener('click', () => askAboutPost(p));
+        commentBtn.addEventListener('click', () => askAboutPost(p));
 
         const bookmarkBtn = document.createElement('button');
         bookmarkBtn.className = 'feed-action-icon feed-bookmark-btn';
