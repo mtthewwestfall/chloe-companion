@@ -1,8 +1,9 @@
 /* Service worker: cache-first app shell. All assets are local, so the app
-   works offline-ish once installed. Version the cache name on changes. */
-const CACHE = 'chloe-companion-v21';
+   works offline-ish once installed. Version the cache name on changes.
+   2026-10-16, feat/proactive-live: CACHE v22, proactive.js precached,
+   Web Push handlers for proactive messages. */
+const CACHE = 'chloe-companion-v22';
 const SHELL = [
-  './',
   './index.html',
   './manifest.json',
   './css/app.css',
@@ -10,14 +11,16 @@ const SHELL = [
   './js/mock.js',
   './js/api.js',
   './js/app.js',
+  './js/proactive.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/apple-touch-icon.png'
+  './icons/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())
+    caches.open(CACHE).then((cache) => cache.addAll(SHELL))
+      .then(() => self.skipWaiting())
   );
 });
 
@@ -38,16 +41,50 @@ self.addEventListener('fetch', (event) => {
       if (cached) return cached;
       return fetch(event.request).then((resp) => {
         // Cache same-origin GETs for offline use.
-        if (resp && resp.ok && new URL(event.request.url).origin === self.location.origin) {
+        if (resp && resp.ok &&
+            new URL(event.request.url).origin === self.location.origin) {
           const copy = resp.clone();
           caches.open(CACHE).then((cache) => cache.put(event.request, copy));
         }
         return resp;
       }).catch(() => {
         // Offline fallback for navigations.
-        if (event.request.mode === 'navigate') return caches.match('./index.html');
+        if (event.request.mode === 'navigate')
+          return caches.match('./index.html');
         throw new Error('offline');
       });
     })
   );
+});
+
+// Web Push: proactive messages (2026-10-16, feat/proactive-live).
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (e) {}
+  const title = data.title || 'Chloe';
+  const body = data.body || 'You have a new message.';
+  const url = data.url || './';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: body,
+      icon: './icons/icon-192.png',
+      badge: './icons/icon-192.png',
+      data: { url: url },
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url =
+    (event.notification.data && event.notification.data.url) || './';
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({
+      type: 'window', includeUncontrolled: true,
+    });
+    for (const w of wins) {
+      if ('focus' in w) { await w.focus(); return; }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(url);
+  })());
 });
