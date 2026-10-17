@@ -87,7 +87,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://lockeddoor.ai", "https://lockdoor.ai"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-Admin-Token"],
 )
 
