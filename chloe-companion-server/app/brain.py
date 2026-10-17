@@ -1285,6 +1285,11 @@ _SCENE_SIGNAL_RE = re.compile(
     r"|right there|faster|harder|slower|pretend (we|you|i))\b",
     re.IGNORECASE)
 _ASTERISK_ACTION_RE = re.compile(r"\*[^*\n]{3,}\*")
+_SCENE_START_RE = re.compile(
+    r"let'?s pretend|\bpretend\s+(we|you|i)\b|\bimagine\s+(we|you)\b"
+    r"|\bact\s+like\s+you'?re\b|\byou\s+play\s+the\b|\brole[\s-]?play\b",
+    re.IGNORECASE)
+_YOURE_A_ROLE_RE = re.compile(r"\byou'?re a \w+|\byou are a \w+", re.IGNORECASE)
 
 # Narration bounces: replies whose whole substance is handing the
 # scene back to him. Matched only on SHORT replies — a long reply
@@ -1748,7 +1753,7 @@ def _set_roleplay_locked(conn: sqlite3.Connection, character_id: str,
 
 
 # ---------------------------------------------------------------------------
-# ROLEPLAY START FLOW (2026-10-14, owner accounts only) — a per-character
+# ROLEPLAY START FLOW (2026-10-14; all users since 2026-10-17) — a per-character
 # scene layer on top of the lock machinery. He says "role play" (whole
 # message) and she asks for the casting; his next message is the brief,
 # stored VERBATIM and injected into her prompt every turn while the
@@ -1777,6 +1782,36 @@ def _is_roleplay_trigger(user_text: str | None) -> bool:
     t = (user_text or "").strip().lower().strip(".!?,~").strip()
     t = re.sub(r"\s+", " ", t)
     return t in _ROLEPLAY_TRIGGER_FORMS
+
+
+_SCENE_ESCAPE_FORMS = {
+    "end roleplay", "end role play", "stop roleplay", "stop role play",
+    "end scene", "stop the scene", "scene over", "back to normal",
+    "out of character",
+}
+
+
+def _is_scene_escape(user_text: str | None) -> bool:
+    """Whole message is a plain-language scene end ("end scene",
+    "back to normal", ...) — same matching style as the trigger:
+    any case, optional trailing punctuation. The phrase inside a
+    sentence never ends a scene."""
+    t = (user_text or "").strip().lower().strip(".!?,~").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t in _SCENE_ESCAPE_FORMS
+
+
+def _is_hand_started_scene(user_text: str | None) -> bool:
+    """True when his message starts a scene by hand — pretend/imagine
+    framing, a casting line ("you're a ..."), a roleplay mention
+    with setup content, or an asterisk action — as opposed to
+    merely continuing one."""
+    t = (user_text or "").strip()
+    if not t:
+        return False
+    if _SCENE_START_RE.search(t) or _ASTERISK_ACTION_RE.search(t):
+        return True
+    return bool(_YOURE_A_ROLE_RE.search(t)) and len(t.split()) > 3
 
 
 def _owner_ids() -> set[str]:
@@ -1849,23 +1884,30 @@ def _advance_scene_state(
     """Run one turn of the start-flow state machine. Returns
     (scene_state, scene_brief, scene_opening, scene_just_ended).
 
-    Transitions (owner accounts only; for anyone else this is inert
-    and writes nothing):
+    Transitions apply to all users — scene rows are keyed per
+    (user_id, character_id), so each user's scenes stay isolated:
       none     --"role play"-->  awaiting   (her reply is the ask)
       awaiting --his brief-->    active     (brief stored verbatim;
                                              this turn opens the scene)
       awaiting --"role play"-->  awaiting   (she asks again)
       active   --any message-->  active     (brief re-injected)
+      none     --hand-started--> active     (his scene-setting message
+                                             becomes the brief)
+      awaiting --escape phrase--> none      (plain-language end)
+      active   --escape phrase--> none      (plain-language end)
       any      --"pickles"-->    none       (scene ends; Brooklyn's
                                              lock release runs in the
                                              lock flip above)
     """
-    if not _is_owner(user_id):
-        return (None, "", False, False)
     row = get_scene_state(conn, user_id, character_id)
     state = row["state"] if row else None
     brief = row["brief"] if row else ""
     if _is_roleplay_release(user_text):
+        if row:
+            _clear_scene_state(conn, user_id, character_id)
+            return (None, "", False, True)
+        return (None, "", False, False)
+    if _is_scene_escape(user_text):
         if row:
             _clear_scene_state(conn, user_id, character_id)
             return (None, "", False, True)
@@ -1881,6 +1923,9 @@ def _advance_scene_state(
     if _is_roleplay_trigger(user_text):
         _set_scene_state(conn, user_id, character_id, "awaiting", "")
         return ("awaiting", "", False, False)
+    if _is_hand_started_scene(user_text):
+        _set_scene_state(conn, user_id, character_id, "active", user_text)
+        return ("active", user_text, True, False)
     return (None, "", False, False)
 
 
