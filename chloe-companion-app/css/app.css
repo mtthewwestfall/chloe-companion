@@ -737,5 +737,6 @@ body {
 .mem-empty{color:#b8b2c0;font-size:14px;line-height:1.45;padding:8px 2px}
 .mem-forget{margin-top:4px;color:#ff9db4}
 
-/* Streak chip in the chat header (2026-10-17) */
-.streak-chip{display:inline-block;margin-left:8px;font-size:11px;font-weight:600;color:#b3541e;background:#fff3e2;border:1px solid #ffd9ae;padding:1px 7px;border-radius:999px;vertical-align:middle}
+/* In-character referral ask card (2026-10-17) */
+.ref-ask-card{display:flex;justify-content:flex-start;margin:2px 0 8px 44px}
+.ref-ask-btn{font-size:13px;padding:8px 14px}
