@@ -9,7 +9,7 @@ Guards:
 
 Delivery is a STUB interface (DeliveryTransport). By default the scheduler
 runs in dry-run mode and writes the queue to proactive_queue.json — no push
-delivery. A real transport (APNs/FCM/app socket) plugs in later.
+delivery. Web Push (app/push.py: WebPushTransport) is the real transport.
 """
 from __future__ import annotations
 
@@ -98,11 +98,11 @@ def mark_checkin_done(conn, user_id: str, memory_id: int) -> None:
 
 
 class DeliveryTransport:
-    """STUB transport. Replace with the real push/app delivery in Phase 3."""
+    """Web Push transport (Phase 3): delivers the proactive queue via app/push.py."""
 
     def deliver(self, queue: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        # No actual delivery — log and report as queued.
-        return [{"to": m["user_id"], "type": m["type"], "status": "queued_stub"} for m in queue]
+        # Phase 3: real delivery over Web Push (lazy import keeps pywebpush optional).
+        from .push import WebPushTransport; return WebPushTransport().deliver(queue)
 
 
 def _user_local_now(timezone: str, now: datetime | None = None) -> datetime:
