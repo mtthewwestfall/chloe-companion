@@ -25,8 +25,8 @@ jobs:
                   sys.exit(1)
               src = src.replace(old, new, 1)
               print(f'OK {name}')
-          rep("/* ---------- message bubbles ---------- */\nfunction addMsg(who, html, opts = {}) {",
-              "/* ---------- message bubbles ---------- */\n/* Pin a caption to the character who sent it. Callers pass the speaker name\n   explicitly so a reply that arrives after a character switch is still\n   captioned with the right name (see sendMessage / sendPresetVideo). */\nfunction herCaption(speakerName) {\n  return (speakerName || currentGirl.name) + ' \u00b7 ' + timeNow();\n}\nfunction addMsg(who, html, opts = {}) {",
+          rep("function addMsg(who, html, opts = {}) {",
+              "/* Pin a caption to the character who sent it. Callers pass the speaker name\n   explicitly so a reply that arrives after a character switch is still\n   captioned with the right name (see sendMessage / sendPresetVideo). */\nfunction herCaption(speakerName) {\n  return (speakerName || currentGirl.name) + ' \u00b7 ' + timeNow();\n}\nfunction addMsg(who, html, opts = {}) {",
               "helper")
           rep("  wrap.appendChild(b);\n  if (opts.caption) {",
               "  wrap.appendChild(b);\n  // opts.speakerName pins the caption to the character who sent the message,\n  // even if currentGirl changed while the reply was in flight.\n  const caption = opts.caption || (opts.speakerName ? herCaption(opts.speakerName) : '');\n  if (caption) {",
