@@ -30,8 +30,13 @@ Health model per key:
     consequence at all (not even a failure count), and post_json stops
     trying further keys for that call — a different key cannot fix a
     bad request.
+  - MODEL (2026-10-17): the model itself is overloaded for every key
+    (error body names overload — "overloaded"/"UNAVAILABLE", the shape
+    of a real Gemini 503). Not the key's fault: no pause, no counters,
+    no belief change — only counted in total_requests. Feeds the
+    per-model tracker below instead of key health.
   Every usage row records its error class (quota / payment /
-  transient / request) so failure rates can be reported by class.
+  transient / request / model) so failure rates can be reported by class.
 
 Pacing (efficiency pass, 2026-10-15): each key tracks its own daily
 request count (day_requests / day_stamp, UTC). Candidate ordering —
@@ -103,6 +108,33 @@ Efficiency model (fail-fast + background prober):
   every attempt/probe writes its outcome back through the same
   report_success/report_failure path, so a restart doesn't cold-start
   into probing on live traffic.
+
+Model fallback (2026-10-17): the chat model is an ordered chain, not a
+single name. GEMINI_MODEL_CHAIN (comma-separated, default
+"gemini-3.1-flash-lite,gemini-2.5-flash-lite") lists the chain primary-
+first; model_chain() parses it and current_model() returns the model
+currently serving traffic. post_json rewrites the primary model segment
+of the caller's URL to current_model() before every attempt phase, so
+every existing caller (brain, sims, creator, submit, the proxy) rides
+the failover with no signature change.
+
+Overload detection: an attempt whose error body names model overload
+("overloaded"/"UNAVAILABLE" — the shape of a real Gemini 503) against a
+chain model is classified as the 'model' error class: it is NOT recorded
+against the key (no pause, no counters, no belief change — the key did
+nothing wrong) and is only counted in total_requests. Each such failure
+feeds the per-model tracker; when overload evidence spans multiple keys
+(>= 2 distinct keys, or >= 3 failures inside the evidence window) the
+model is marked "hot" for GEMINI_MODEL_COOLDOWN_S (default 120 s) and
+subsequent post_json calls route to the next chain model. The background
+prober checks every chain model (primary key-health logic unchanged) so
+fallback readiness is known before live traffic needs it, and a
+successful probe lifts a model's cooldown early. degradation_info()
+exposes per-model status under "models".
+
+When the primary is healthy the rewrite is a no-op and no tracker state
+is touched: key rotation, quotas, and the paid/free reserve logic behave
+exactly as before.
 """
 from __future__ import annotations
 
@@ -110,6 +142,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -171,6 +204,33 @@ _UNKNOWN_LATENCY_S = 2.0
 # (real traffic and the prober refresh it well before it lapses).
 _BELIEF_TTL_S = 600.0
 
+# --- Model fallback chain (2026-10-17) --------------------------------------
+# The chat model is an ordered chain (primary first), not a single name.
+# GEMINI_MODEL_CHAIN overrides the default
+# "gemini-3.1-flash-lite,gemini-2.5-flash-lite".
+_MODEL_CHAIN_DEFAULT = "gemini-3.1-flash-lite,gemini-2.5-flash-lite"
+_GEMINI_API_BASE = ("https://generativelanguage.googleapis.com"
+                    "/v1beta/models")
+_MODEL_IN_URL_RE = re.compile(r"/models/([^/:?]+)")
+
+# Per-model overload evidence: how far back overload failures count,
+# how many distinct keys (or total failures) mark a model hot, and the
+# default hot-cooldown window (overridable via GEMINI_MODEL_COOLDOWN_S).
+_MODEL_OVERLOAD_WINDOW_S = 300.0
+_MODEL_OVERLOAD_MIN_KEYS = 2
+_MODEL_OVERLOAD_MIN_EVENTS = 3
+_MODEL_COOLDOWN_DEFAULT_S = 120.0
+
+# Error-body hints that an upstream failure is a MODEL-level outage
+# (the shape of a real Gemini overload 503: "The model is overloaded.
+# Please try again later.", status "UNAVAILABLE") rather than a key or
+# request problem.
+_OVERLOAD_BODY_HINTS = ("overloaded", "unavailable")
+
+# How often the background prober re-checks each non-primary chain
+# model (fallback readiness), at most.
+_PROBE_MODEL_INTERVAL_S = 120.0
+
 # --- Background prober ------------------------------------------------------
 # Lean settings (efficiency pass, 2026-10-15): the prober used to
 # generate the overwhelming majority of usage-log rows (455 of the last
@@ -179,8 +239,6 @@ _BELIEF_TTL_S = 600.0
 # _PROBE_MAX_PER_CYCLE probes (recovery checks first), re-confirms an
 # idle healthy key only after _PROBE_CONFIRM_S, and never probes the
 # same key more often than _PROBE_MIN_INTERVAL_S.
-_PROBE_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
-              "gemini-3.1-flash-lite:generateContent")
 _PROBE_INTERVAL_DEFAULT_S = 30.0   # prober wake-up cadence
 _PROBE_CONFIRM_S = 420.0           # re-confirm an idle healthy key (< TTL)
 _PROBE_MIN_INTERVAL_S = 120.0      # never probe the same key more often
@@ -215,6 +273,14 @@ _probes_ok = 0
 # process restart simply restarts every streak at the ladder's foot,
 # which is the forgiving direction.
 _transient_streaks: dict[int, tuple[int, float]] = {}
+
+# Per-model transient health (model fallback, 2026-10-17), guarded by
+# _lock. In-memory only: a restart forgets hot flags, which is the
+# forgiving direction (traffic retries the primary once).
+_model_hot_until: dict[str, float] = {}      # model -> monotonic expiry
+_model_overload_events: dict[str, list] = {}  # model -> [(mono_ts, key_id)]
+_model_probe_at: dict[str, float] = {}        # model -> mono of last probe
+_model_belief: dict[str, dict] = {}           # model -> {"ok","at","key_id"}
 
 
 def _env_float(name: str, default: float) -> float:
@@ -258,6 +324,169 @@ def _hedge_after_s() -> float:
 def _probe_interval_s() -> float:
     return max(5.0, _env_float("GEMINI_PROBE_INTERVAL_S",
                                _PROBE_INTERVAL_DEFAULT_S))
+
+
+def model_chain() -> list[str]:
+    """Ordered model fallback chain, primary first. Configurable via
+    the GEMINI_MODEL_CHAIN env var (comma-separated); defaults to
+    "gemini-3.1-flash-lite,gemini-2.5-flash-lite"."""
+    raw = (os.environ.get("GEMINI_MODEL_CHAIN", "") or "").strip()
+    if not raw:
+        raw = _MODEL_CHAIN_DEFAULT
+    chain: list[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if name and name not in chain:
+            chain.append(name)
+    return chain or _MODEL_CHAIN_DEFAULT.split(",")
+
+
+def model_url(model: str) -> str:
+    """generateContent endpoint URL for a chain model."""
+    return f"{_GEMINI_API_BASE}/{model}:generateContent"
+
+
+def _model_cooldown_s() -> float:
+    """How long an overloaded model stays hot (seconds)."""
+    return max(1.0, _env_float("GEMINI_MODEL_COOLDOWN_S",
+                               _MODEL_COOLDOWN_DEFAULT_S))
+
+
+def _model_from_url(url: str) -> str | None:
+    """The model named by a Gemini generateContent URL, or None for
+    non-Gemini URLs."""
+    m = _MODEL_IN_URL_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def _current_model_locked() -> str:
+    """Model currently serving traffic: the first chain model not in
+    its overload cooldown. Caller must hold _lock."""
+    chain = model_chain()
+    now = time.monotonic()
+    for model in chain:
+        if _model_hot_until.get(model, 0.0) <= now:
+            return model
+    return chain[0]
+
+
+def current_model() -> str:
+    """Model currently serving traffic: the chain primary while it is
+    healthy, the next chain model while the primary is hot (model-level
+    overload cooldown). Falls back to the primary when every model is
+    hot — the key pool's own fail-fast still bounds the attempts."""
+    with _lock:
+        return _current_model_locked()
+
+
+def _is_model_overload(body: str | None) -> bool:
+    """True when an upstream error body says the MODEL is overloaded or
+    unavailable — a model-level outage every key would hit — rather
+    than a problem with the key or the request."""
+    text = (body or "").lower()
+    return any(h in text for h in _OVERLOAD_BODY_HINTS)
+
+
+def _note_model_overload_locked(model: str, key_id: int) -> None:
+    """Feed the per-model overload tracker. Caller must hold _lock.
+
+    When overload evidence against `model` spans multiple keys (>=
+    _MODEL_OVERLOAD_MIN_KEYS distinct keys, or >=
+    _MODEL_OVERLOAD_MIN_EVENTS failures inside the evidence window),
+    the model is marked hot for the cooldown window and subsequent
+    post_json calls route to the next chain model."""
+    now = time.monotonic()
+    events = _model_overload_events.setdefault(model, [])
+    events.append((now, key_id))
+    cutoff = now - _MODEL_OVERLOAD_WINDOW_S
+    events[:] = [(ts, kid) for ts, kid in events if ts > cutoff]
+    if _model_hot_until.get(model, 0.0) > now:
+        return  # already hot; the cooldown is not extended
+    distinct = {kid for _ts, kid in events}
+    if len(distinct) >= _MODEL_OVERLOAD_MIN_KEYS \
+            or len(events) >= _MODEL_OVERLOAD_MIN_EVENTS:
+        cooldown = _model_cooldown_s()
+        _model_hot_until[model] = now + cooldown
+        logger.warning(
+            "gemini_keys: model %s overloaded (%d failures across %d "
+            "keys) - hot for %.0fs, failing over down the chain",
+            model, len(events), len(distinct), cooldown)
+
+
+def _route_url(url: str) -> str:
+    """Route a Gemini URL through the model fallback chain.
+
+    When the URL names the chain's primary model, its model segment is
+    rewritten to the model currently serving traffic — the primary
+    itself while healthy (a no-op), the next chain model while the
+    primary is hot. URLs naming any other model (explicit pins, e.g.
+    the proxy's {model} path) pass through untouched, as do
+    non-Gemini URLs."""
+    model = _model_from_url(url)
+    chain = model_chain()
+    if not model or not chain or model != chain[0]:
+        return url
+    target = current_model()
+    if target == model:
+        return url
+    return url.replace(f"/models/{model}:", f"/models/{target}:", 1)
+
+
+def _model_health_info() -> list[dict]:
+    """Per-model fallback-chain status, for degradation_info()."""
+    chain = model_chain()
+    with _lock:
+        serving = _current_model_locked()
+        now_mono = time.monotonic()
+        out = []
+        for i, model in enumerate(chain):
+            hot_until = _model_hot_until.get(model, 0.0)
+            hot = hot_until > now_mono
+            belief = _model_belief.get(model)
+            out.append({
+                "model": model,
+                "primary": i == 0,
+                "serving": model == serving,
+                "hot": hot,
+                "hot_until": (
+                    datetime.fromtimestamp(
+                        time.time() + (hot_until - now_mono),
+                        tz=timezone.utc).isoformat()
+                    if hot else None),
+                "probe_ok": belief.get("ok") if belief else None,
+                "probe_at": (
+                    datetime.fromtimestamp(
+                        belief["at"], tz=timezone.utc).isoformat()
+                    if belief and belief.get("at") else None),
+            })
+    return out
+
+
+def _pick_model_probe_row_locked(rows) -> dict | None:
+    """A key to probe a fallback model with: the believed-healthiest
+    eligible row that is NOT inside a backoff window, has no fresh real
+    traffic (probes must never starve real traffic), and was not
+    probed recently. Caller must hold _lock. None when no row is
+    eligible — the model simply waits for the next idle cycle."""
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    best = None
+    for r in rows:
+        until = _parse_ts(r["quota_exhausted_until"])
+        if until is not None and until > now_wall:
+            continue  # inside a backoff window: never probe
+        if now_mono - _last_probe_mono.get(r["id"], 0.0) \
+                < _PROBE_MIN_INTERVAL_S:
+            continue
+        dq = _dispatch_times.get(r["id"])
+        if dq and (now_mono - dq[-1]) < _PROBE_QUIET_S:
+            continue
+        b = _belief.get(r["id"])
+        if b and b.get("ok"):
+            return r  # believed healthy beats every other signal
+        if best is None:
+            best = r
+    return best
 
 
 def _parse_ts(value) -> float | None:
@@ -465,6 +694,9 @@ def degradation_info() -> dict:
                 "probes_total": _probes_total,
                 "probes_ok": _probes_ok,
             }
+        # Per-model fallback-chain status (outside the lock above:
+        # _model_health_info takes it itself).
+        info["models"] = _model_health_info()
     except Exception:
         pass  # health reporting must never break the caller
     return info
@@ -531,7 +763,7 @@ def _ensure_table(conn) -> None:
         conn.commit()
     if ucols and "error_class" not in ucols:
         # Failure classification per usage row (quota / payment /
-        # transient / request; NULL on success and on pre-migration
+        # transient / request / model; NULL on success and on pre-migration
         # rows) so failure rates can be reported by class.
         conn.execute("ALTER TABLE gemini_key_usage ADD COLUMN error_class TEXT")
         conn.commit()
@@ -849,6 +1081,13 @@ def report_failure(key_id: int, error_type: str) -> None:
     - 'request' (other 4xx — the call itself was bad): the request is
       counted, nothing else. No failure count, no pause, no belief
       change; the key did nothing wrong.
+    - 'model' (2026-10-17; the model is overloaded for every key —
+      detected from the error body, see _is_model_overload): NOT the
+      key's fault, so nothing is recorded against the key at all: no
+      pause, no failure counters, no belief change. The request is
+      counted and the usage row carries the 'model' class; failover is
+      owned by the per-model tracker (fed by _attempt), which marks
+      the model hot once overload evidence spans multiple keys.
     """
     if error_type == "other":
         error_type = "transient"
@@ -867,8 +1106,23 @@ def report_failure(key_id: int, error_type: str) -> None:
                 conn.execute(
                     """UPDATE gemini_keys
                        SET total_requests = total_requests + 1,
-                           """ + _DAY_BUMP_SQL + """
-                           last_used_at = ?
+                       """ + _DAY_BUMP_SQL + """
+                       last_used_at = ?
+                       WHERE id = ?""",
+                    (_now_str(), key_id),
+                )
+                conn.commit()
+                return
+            if error_type == "model":
+                # Model-level outage: not the key's fault. Count the
+                # request; touch nothing else — no pause, no failure
+                # counters, no belief change. Failover is owned by the
+                # per-model tracker (see _note_model_overload_locked).
+                conn.execute(
+                    """UPDATE gemini_keys
+                       SET total_requests = total_requests + 1,
+                       """ + _DAY_BUMP_SQL + """
+                       last_used_at = ?
                        WHERE id = ?""",
                     (_now_str(), key_id),
                 )
@@ -1004,8 +1258,8 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
     """One attempt against one key. Records the dispatch, latency, health
     outcome and usage row. Returns (ok, data, seconds_taken,
     error_class) where error_class is None on success and one of
-    'quota' / 'payment' / 'transient' / 'request' on failure. All
-    failure semantics live in report_failure — an attempt never
+    'quota' / 'payment' / 'transient' / 'request' / 'model' on failure.
+    All failure semantics live in report_failure — an attempt never
     sleeps."""
     with _lock:
         _record_dispatch_locked(key_id)
@@ -1019,6 +1273,15 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
             _err_body = e.read().decode("utf-8", errors="replace")[:300]
         except Exception:
             _err_body = ""
+        model = _model_from_url(url)
+        if model is not None and model in model_chain() \
+                and _is_model_overload(_err_body):
+            # Model-level outage, not a key problem: the 'model' class
+            # carries no key-health consequences, and the failure feeds
+            # the per-model tracker (which may mark the model hot).
+            error_type = "model"
+            with _lock:
+                _note_model_overload_locked(model, key_id)
         logger.warning(
             "gemini_keys attempt failed: source=%s key_id=%s http=%s "
             "class=%s %s",
@@ -1060,6 +1323,18 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
             return data
         if error_type == "quota":
             state["quota_failures"] = state.get("quota_failures", 0) + 1
+        if error_type == "model":
+            # The model went hot mid-walk: reroute the rest of this
+            # walk to the model now serving traffic. The failures so
+            # far blamed the model, not the keys, so the tried set is
+            # cleared — the same keys may serve fine on the next model.
+            rerouted = _route_url(url)
+            if rerouted != url:
+                logger.info(
+                    "gemini_keys: model overloaded mid-call, failing "
+                    "over to %s", _model_from_url(rerouted))
+                url = rerouted
+                tried.clear()
         if error_type == "request":
             state["fatal"] = "request"
             break
@@ -1115,6 +1390,13 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                 if error_type == "quota":
                     state["quota_failures"] = \
                         state.get("quota_failures", 0) + 1
+                if error_type == "model":
+                    # The model went hot mid-race: subsequently launched
+                    # attempts target the model now serving traffic.
+                    # (Hedged mode does not re-try already-tried keys on
+                    # the new model within this call; the next post_json
+                    # call routes fresh.)
+                    url = _route_url(url)
                 if error_type == "request":
                     # The call itself was bad; racing more keys at it
                     # cannot help.
@@ -1147,6 +1429,17 @@ def post_json(url: str, payload: dict, timeout: int = 30,
        one bounded pass over eligible RESERVE keys (their backoff
        windows still respected), per the reserve pool's own rule.
     There is no ignore-backoff all-keys sweep.
+
+    Model fallback (2026-10-17): when the URL names the chain's primary
+    model, its model segment is rewritten to current_model() before
+    each attempt phase — the primary itself while healthy (a no-op),
+    the next GEMINI_MODEL_CHAIN model while the primary is hot
+    (model-level overload cooldown, GEMINI_MODEL_COOLDOWN_S, default
+    120 s). A failure whose error body names model overload
+    ("overloaded"/"UNAVAILABLE") is the 'model' error class: it never
+    touches key health, and once such failures span multiple keys the
+    model goes hot. When the primary is healthy the rewrite is a no-op
+    and behavior is unchanged.
 
     Every failure records health (by error class — see report_failure)
     and the next key is tried immediately. Attempts per call are
@@ -1205,6 +1498,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
 
     fast = _only_free(_fast_candidates())
     if fast:
+        url = _route_url(url)
         if _hedge_after_s() > 0 and len(fast) >= 2:
             data = _try_hedged(fast, url, payload, attempt_timeout, source,
                                tried, state)
@@ -1227,6 +1521,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
             "gemini_keys: pool down (no believed-healthy or eligible "
             "keys), failing fast for source=%s", source)
         return None
+    url = _route_url(url)
     data = _try_candidates(sweep, url, payload,
                            caller_timeout, source, tried, state)
     if data is not None:
@@ -1268,6 +1563,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                 and state.get("quota_failures", 0) >= state["n"]:
             state["max_n"] = max(state["max_n"], state["n"] + min(
                 len(fallback), _RESERVE_FALLBACK_MAX_EXTRA))
+        url = _route_url(url)
         return _try_candidates(fallback, url, payload,
                                caller_timeout, source, tried, state)
     return None
@@ -1288,9 +1584,10 @@ def _probe_payload() -> dict:
 
 
 def _probe_cycle() -> int:
-    """One prober pass (lean version, 2026-10-15). Sends a 1-token probe
-    to at most _PROBE_MAX_PER_CYCLE keys whose true state is stale or
-    unknown, most valuable first:
+    """One prober pass (lean version, 2026-10-15; model-chain aware,
+    2026-10-17). Sends 1-token probes for at most _PROBE_MAX_PER_CYCLE
+    keys per cycle against the primary chain model, most valuable
+    first:
 
     - priority 0: backoff expired or expiring within one cycle
       (recovery check — prompt, not next-request),
@@ -1299,18 +1596,27 @@ def _probe_cycle() -> int:
     - priority 2: believed healthy but idle past the confirm window
       (re-confirm before belief lapses).
 
-    Never probes needs_attention or disabled keys, never deep inside a
-    backoff window (only near expiry — probing a key hours from
-    recovery teaches nothing and spends its quota), never the same key
-    more often than _PROBE_MIN_INTERVAL_S, and never when real traffic
-    touched the key within _PROBE_QUIET_S (real evidence beats a
-    probe, and probes must never starve real traffic — each probe
-    counts toward the per-key dispatch window like any other
-    dispatch). Returns probes sent."""
+    Key selection keeps the existing rules: never needs_attention or
+    disabled keys, never deep inside a backoff window (only at/near
+    expiry), never the same key more often than _PROBE_MIN_INTERVAL_S,
+    and never when real traffic touched the key within _PROBE_QUIET_S
+    (real evidence beats a probe, and probes must never starve real
+    traffic — each probe counts toward the per-key dispatch window like
+    any other dispatch).
+
+    Fallback readiness: on a cycle with no due primary-model probes,
+    each non-primary chain model that is itself due (at most every
+    _PROBE_MODEL_INTERVAL_S) gets one probe with an eligible key, so a
+    fallback model is known-good before live traffic needs it. A
+    successful probe of a hot model lifts its overload cooldown early.
+    Model probes share the per-cycle cap, so a long chain cannot turn
+    one cycle into a quota burn. Returns probes sent."""
     global _prober_last_cycle_at, _probes_total, _probes_ok
     now_wall = time.time()
     now_mono = time.monotonic()
     interval = _probe_interval_s()
+    chain = model_chain()
+    primary = chain[0]
     with _lock:
         conn = db.connect()
         try:
@@ -1345,17 +1651,43 @@ def _probe_cycle() -> int:
                 due.append((1, r))  # unknown state: find out off-path
         due.sort(key=lambda d: d[0])
         due = [r for _prio, r in due[:_PROBE_MAX_PER_CYCLE]]
+        # One probe task per due key against the primary model, plus —
+        # only on cycles with nothing due — one readiness probe per
+        # due non-primary chain model.
+        tasks: list = [(r, primary) for r in due]
+        if not due and rows:
+            room = _PROBE_MAX_PER_CYCLE - len(tasks)
+            for model in chain[1:]:
+                if room <= 0:
+                    break
+                if now_mono - _model_probe_at.get(model, 0.0) \
+                        < _PROBE_MODEL_INTERVAL_S:
+                    continue
+                probe_row = _pick_model_probe_row_locked(rows)
+                if probe_row is None:
+                    continue
+                _model_probe_at[model] = now_mono
+                tasks.append((probe_row, model))
+                room -= 1
     sent = 0
-    for r in due:
+    for r, model in tasks:
         _last_probe_mono[r["id"]] = time.monotonic()
         ok, _data, _seconds, _err = _attempt(
-            r["id"], r["key_value"], _PROBE_URL, _probe_payload(),
+            r["id"], r["key_value"], model_url(model), _probe_payload(),
             _PROBE_TIMEOUT_S, "prober")
         sent += 1
         with _lock:
             _probes_total += 1
             if ok:
                 _probes_ok += 1
+            _model_belief[model] = {"ok": ok, "at": time.time(),
+                                    "key_id": r["id"]}
+            if ok and _model_hot_until.pop(model, None) is not None:
+                # Recovery discovered off the request path: the model is
+                # serving again, so lift its overload cooldown early
+                # instead of waiting it out.
+                logger.info("gemini_keys: model %s recovered (prober) - "
+                            "cooldown lifted", model)
     _prober_last_cycle_at = time.time()
     return sent
 
@@ -1592,9 +1924,6 @@ def set_active(key_id: int, is_active: bool) -> dict | None:
             conn.close()
 
 
-_TEST_URL = _PROBE_URL
-
-
 def test_key(key_id: int) -> dict | None:
     """Minimal live call against one key. Returns health, never the key."""
     with _lock:
@@ -1614,7 +1943,10 @@ def test_key(key_id: int) -> dict | None:
         "generationConfig": {"temperature": 0, "maxOutputTokens": 5},
     }
     try:
-        data = _http_post(_TEST_URL, payload, row["key_value"], 20)
+        # Tests the model currently serving traffic (the primary while
+        # healthy, the fallback while the primary is hot).
+        data = _http_post(model_url(current_model()), payload,
+                          row["key_value"], 20)
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(p.get("text", "") for p in parts if p.get("text"))
         report_success(key_id)
