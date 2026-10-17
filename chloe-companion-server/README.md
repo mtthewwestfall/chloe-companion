@@ -71,8 +71,8 @@ Chat behavior:
   interface. The real LLM plugs into `Mouth.generate()`; the slower
   reasoning auditor plugs into `audit_reply()` in `app/brain.py` (currently
   a pass-through, always in the pipeline).
-- **Liora voice notes (xAI TTS)**: DISABLED. Returns `null` unless
-  `CHLOE_XAI_API_KEY` is set AND `CHLOE_VOICE_ENABLED=1`. Even then, Phase 2
+- **Liora voice notes (ElevenLabs TTS)**: DISABLED. Returns `null` unless
+  `ELEVENLABS_API_KEY` is set AND `CHLOE_VOICE_ENABLED=1`. Even then, Phase 2
   makes **no network calls** — paid TTS needs the user's explicit approval
   before any real use.
 - **Stripe**: product/price IDs in `app/config.py` are **test-mode
@@ -88,7 +88,7 @@ app/
   db.py          SQLite schema (users / memories / conversation)
   store.py       per-user memory + bank store (isolation enforced here)
   brain.py       character system prompt, Mouth stub, auditor hook
-  voice.py       xAI TTS stub (disabled by default)
+  voice.py       ElevenLabs TTS stub (disabled by default)
   photos.py      photo-drop manifest + tier-gated serving hook
   shows.py       shows.json reader
   scheduler.py   proactive scheduler (dry-run queue, caps, quiet hours)
