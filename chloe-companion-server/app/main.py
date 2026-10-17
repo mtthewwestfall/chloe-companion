@@ -988,6 +988,22 @@ def chat(body: ChatIn, request: Request):
             "What do you see in this?" if attachment_records else "")
         turn_id = store.log_turn(conn, user_id, "user", message_text, cid,
                                  attachments=public_attachments)
+        # Daily streak for this (user, character) pair — consecutive
+        # local days with a user turn (2026-10-17).
+        streak_now = 0
+        try:
+            from datetime import datetime as _sdt, timedelta as _std
+            from zoneinfo import ZoneInfo as _SZI
+            try:
+                _stz = _SZI(user.get("timezone") or "America/New_York")
+            except Exception:
+                _stz = _SZI("America/New_York")
+            _snow = _sdt.now(_stz)
+            streak_now = store.touch_streak(
+                conn, user_id, cid, _snow.strftime("%Y-%m-%d"),
+                (_snow - _std(days=1)).strftime("%Y-%m-%d"))
+        except Exception:
+            streak_now = 0
         if attachment_records:
             assist.mark_chat_attachments_used(
                 conn, [record["id"] for record in attachment_records],
@@ -1164,6 +1180,7 @@ def chat(body: ChatIn, request: Request):
             "messages_remaining": user["messages_remaining"],
             "character_id": cid,
             "attachments": public_attachments,
+            "streak_current": streak_now,
         }
         # Email drafts are composed server-side but created on the user's
         # device (Gmail API from the browser) — the token never reaches us.
@@ -3620,7 +3637,21 @@ def auth_me(request: Request):
     conn = _conn()
     try:
         user = store.get_or_create_user(conn, user_id)
-        return _user_summary(user)
+        summary = _user_summary(user)
+        try:
+            from datetime import datetime as _mdt, timedelta as _mtd
+            from zoneinfo import ZoneInfo as _MZI
+            try:
+                _mtz = _MZI(user.get("timezone") or "America/New_York")
+            except Exception:
+                _mtz = _MZI("America/New_York")
+            _mnow = _mdt.now(_mtz)
+            summary["streaks"] = store.get_streaks_display(
+                conn, user_id, _mnow.strftime("%Y-%m-%d"),
+                (_mnow - _mtd(days=1)).strftime("%Y-%m-%d"))
+        except Exception:
+            summary["streaks"] = {}
+        return summary
     finally:
         conn.close()
 
