@@ -158,6 +158,10 @@ def _maybe_hook(draft: str, user_text: str, character_id: str,
                 context: dict[str, Any], brain: Any) -> str:
     """Swap an early 'greet' draft for her own hook line — at most once per
     conversation, never repeating a hook she already used."""
+    # 2026-10-17: never inject a hook line while a roleplay scene is
+    # active or the roleplay lock is on -- return the draft unchanged.
+    if context.get("scene_state") == "active" or context.get("roleplay_locked"):
+        return draft
     if brain._detect_intent(user_text or "") != "greet":
         return draft
     if not _early_conversation(context):
