@@ -462,6 +462,18 @@ def export_memories(conn: sqlite3.Connection, user_id: str,
     return recall_memories(conn, user_id, limit=100000, character_id=character_id)
 
 
+def delete_memory(conn: sqlite3.Connection, user_id: str,
+                  character_id: str, memory_id: int) -> int:
+    """Delete ONE memory, scoped to its owner + character (2026-10-17,
+    for the 'What she remembers' page). Returns rows removed."""
+    cur = conn.execute(
+        "DELETE FROM memories WHERE id = ? AND user_id = ? AND character_id = ?",
+        (memory_id, user_id, character_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def delete_all_memories(conn: sqlite3.Connection, user_id: str,
                         character_id: str = "chloe") -> int:
     cur = conn.execute(
