@@ -4,6 +4,7 @@ pydantic>=2
 python-multipart>=0.0.9
 pypdf>=5.0
 python-docx>=1.1
+# Video
 # Video attachments (2026-10-09): bundles a static ffmpeg binary so
 # Hannah can sample frames from clips in the Nixpacks image (no
 # system ffmpeg there).
@@ -13,3 +14,5 @@ imageio-ffmpeg>=0.5
 # her-day images, and Hannah's plan-billed videos (session auth).
 sogni-client>=5.56
 websockets>=14
+# Proactive Web Push (2026-10-16, feat/proactive-live).
+pywebpush>=1.14
