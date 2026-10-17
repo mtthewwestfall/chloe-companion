@@ -1405,6 +1405,22 @@ async function updateBalance() {
     } catch (e) {}
   }
 
+  /* ---------- $500 drawing counter ---------- */
+  async function loadDrawing() {
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/drawing');
+      const d = await res.json();
+      const banner = $('drawingBanner');
+      if (!banner || typeof d.entered !== 'number') return;
+      banner.hidden = false;
+      $('drawingFill').style.width = Math.min(100, (d.entered / (d.goal || 100)) * 100) + '%';
+      $('drawingText').textContent = d.full
+        ? 'All 100 spots are claimed — the winner is announced in the feed soon 🎉'
+        : d.entered + ' of the next ' + (d.goal || 100) + ' subscriber spots claimed — ' + d.remaining + ' left. Subscribe and you\'re in.';
+    } catch (e) {}
+  }
+  loadDrawing();
+
   /* ---------- referral on landing ---------- */
 
   async function loadLandingReferral() {

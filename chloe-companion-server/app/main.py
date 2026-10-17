@@ -2188,6 +2188,16 @@ def get_public_her_day():
         conn.close()
 
 
+@app.get("/api/v1/drawing")
+def drawing_public():
+    """Public $500-drawing progress: {entered, goal, remaining, full}."""
+    conn = _conn()
+    try:
+        return store.drawing_status(conn)
+    finally:
+        conn.close()
+
+
 @app.get("/p/{slug}")
 def public_post_page(slug: str):
     """Shareable permalink for one Her Day moment (2026-10-17):
@@ -2778,6 +2788,10 @@ async def admin_grant_month(body: GrantMonthIn, request: Request):
             (body.tier, new_exp.isoformat(),
              tier_msgs[body.tier], tier_voice[body.tier], body.user_id))
         conn.commit()
+        try:
+            store.record_drawing_entry(conn, body.user_id, "grant_month")
+        except Exception:
+            pass
         return {"ok": True, "tier": body.tier,
                 "vip_expires_at": new_exp.isoformat()}
     finally:
@@ -3477,6 +3491,11 @@ def admin_grant_messages(body: GrantMessagesIn, request: Request):
         row = conn.execute(
             "SELECT messages_remaining FROM users WHERE user_id = ?",
             (uid,)).fetchone()
+        if row:
+            try:
+                store.record_drawing_entry(conn, uid, "grant")
+            except Exception:
+                pass
         return {"ok": True, "user_id": uid,
                 "messages_remaining": row["messages_remaining"] if row else 0}
     finally:
@@ -4045,6 +4064,10 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
         # Initial top-up; the first invoice.paid (subscription_create) grants
         # the monthly Keyhole show via the same grant key scheme.
         store.set_tier(conn, ref, tier)
+        try:
+            store.record_drawing_entry(conn, ref, "stripe_sub")
+        except Exception:
+            pass
         return {"ok": True, "user_id": ref, "tier": tier, "action": "subscribed"}
     if mode == "payment":
         # One-time $0.99 trial -> 100 messages, one per customer (no tier change).
@@ -4052,6 +4075,11 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
             if not ref:
                 return {"ok": True, "ignored": "trial link but buyer unresolved"}
             granted = store.grant_trial_messages(conn, ref, config.TRIAL_MESSAGES)
+            if granted:
+                try:
+                    store.record_drawing_entry(conn, ref, "stripe_trial")
+                except Exception:
+                    pass
             return {"ok": True, "user_id": ref,
                     "action": "trial_granted" if granted else "trial_already_used"}
         return {"ok": True, "ignored": "unknown one-time link"}
