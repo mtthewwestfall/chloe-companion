@@ -1,1 +1,31 @@
-{"background_color":"#0a1128","description":"Chloe — AI Companion. She stays. She remembers.","display":"standalone","icons":[{"purpose":"any","sizes":"192x192","src":"./icons/icon-192.png","type":"image/png"},{"purpose":"any","sizes":"512x512","src":"./icons/icon-512.png","type":"image/png"},{"purpose":"maskable","sizes":"512x512","src":"./icons/icon-512.png","type":"image/png"}],"name":"Chloe — AI Companion","orientation":"portrait","scope":".","short_name":"Chloe","start_url":".","theme_color":"#0a1128"}
+{
+  "name": "Whispr AI — Private AI Companions",
+  "short_name": "Whispr",
+  "description": "Whispr AI — your private connection, always a message away.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0a12",
+  "theme_color": "#0a0a12",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

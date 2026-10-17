@@ -14,7 +14,7 @@
 <meta name="apple-mobile-web-app-title" content="AiMessage">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 
-<link rel="stylesheet" href="./css/app.css">
+<link rel="stylesheet" href="./css/app.css"> <link rel="stylesheet" href="./css/pwa.css">
 </head>
 <body>
 
@@ -224,7 +224,7 @@
           <input type="checkbox" id="proactiveToggle" checked>
           <span class="toggle"></span>
         </label>
-        <div class="about-box">
+        <label class="toggle-row"> <span>Push notifications <small>she can reach you anytime</small></span> <input type="checkbox" id="pushToggle"> <span class="toggle"></span> </label> <div class="about-box">
           <div class="about-title">About this preview</div>
           <p id="demoBlurb"><span class="demo-pill" id="modePill">Demo mode</span> — <span id="modeBlurb">connect the companion server for real memory.</span></p>
           <p class="conn-line">Server: <span id="connStatus">checking…</span></p>
@@ -382,6 +382,7 @@
 <script src="./js/config.js"></script>
 <script src="./js/mock.js"></script>
 <script src="./js/api.js"></script>
+<script src="./js/app.js"></script> <script src="./js/pwa.js"></script>
 <script src="./js/app.js"></script>     <script src="./js/proactive.js"></script>
 <script>
   if ('serviceWorker' in navigator) {

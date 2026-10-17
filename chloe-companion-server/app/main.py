@@ -75,6 +75,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import push_routes, sims_saves
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, onboarding, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import assist, auth, brain, characters, character_trust, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import sims_saves
@@ -2417,7 +2420,7 @@ def admin_her_day_set_media(body: HerDaySetMediaIn, request: Request):
 
 
 # ---------------------------------------------------------------------------
-her_day_delete.register_her_day_delete(app, _require_admin, _conn)
+her_day_delete.register_her_day_delete(app, _require_admin, _conn); push_routes.register(app, _current_user_id)
 
 # Admin: girl media library (2026-10-06)
 # Manage gives, mains, typing mains, activities per character.
