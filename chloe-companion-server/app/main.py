@@ -1107,7 +1107,7 @@ def chat(body: ChatIn, request: Request):
                 pass
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
-      reply_text = brain.compose_reply(effective_message, context, cid)
+        reply_text = brain.compose_reply(effective_message, context, cid)
 
 
         # Rocky claim gate, part 2: the deterministic claim screen.
