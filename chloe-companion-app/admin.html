@@ -91,6 +91,10 @@
     <button class="tab" onclick="showTab('custom')">Custom Videos</button>
     <button class="tab" onclick="showTab('give-gens')">Give Generations</button>
   </div>
+  <div style="margin:10px 0">
+    <button onclick="backfillHerDay(this)">Repair today's Her Day images</button>
+    <span id="backfillMsg" style="margin-left:8px;color:#555"></span>
+  </div>
 
   <div id="tab-media">
     <div class="filter-bar" style="flex-wrap:wrap;">
@@ -249,8 +253,28 @@ async function api(method, path, body) {
     headers: { 'Content-Type': 'application/json', 'X-Admin-Token': token },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 403) { alert('Invalid admin token'); localStorage.removeItem('whispr_admin_token'); location.reload(); }
+  if (res.status === 403 || res.status === 401) { alert('Invalid admin token'); localStorage.removeItem('whispr_admin_token'); location.reload(); }
   return res.json();
+}
+
+async function backfillHerDay(btn) {
+  btn.disabled = true;
+  const msg = document.getElementById('backfillMsg');
+  msg.textContent = 'Starting repair...';
+  try {
+    const r = await api('POST', '/api/v1/admin/her-day/backfill-media');
+    msg.textContent = 'Repair started: ' + JSON.stringify(r);
+    setTimeout(async () => {
+      try {
+        const s = await api('GET', '/api/v1/admin/her-day/backfill-media/status');
+        msg.textContent = 'Repair status: ' + JSON.stringify((s && s.report) || s);
+      } catch (e) { msg.textContent = 'Repair status check failed'; }
+      btn.disabled = false;
+    }, 20000);
+  } catch (e) {
+    msg.textContent = 'Repair failed to start';
+    btn.disabled = false;
+  }
 }
 
 let mediaFilter = 'untagged';
