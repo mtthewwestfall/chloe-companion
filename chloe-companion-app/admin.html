@@ -379,7 +379,7 @@ async function loadGirls() {
     '<div class="girl-card"><div class="girl-name">' + (g.name || g.id) + '</div>' +
     '<div style="color:#888;font-size:13px;">ID: ' + g.id + '</div>' +
     '<div style="margin-top:8px;"><button onclick="editGirl(\'' + g.id + '\')">Edit</button> ' +
-    '<button onclick="deleteGirl(\'' + g.id + '\')" style="color:#b00020;">Delete</button></div></div>'
+    '<button onclick="deleteGirl(\'' + g.id + '\', this)" style="color:#b00020;">Delete</button></div></div>'
   ).join('');
 }
 
@@ -433,8 +433,14 @@ async function saveGirl() {
   } catch (e) { msg.textContent = 'Save failed'; }
 }
 
-async function deleteGirl(id) {
-  if (!confirm('Delete character "' + id + '"? This cannot be undone.')) return;
+async function deleteGirl(id, btn) {
+  if (btn && !btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    const orig = btn.textContent;
+    btn.textContent = 'Confirm delete?';
+    setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.textContent = orig; } }, 3500);
+    return;
+  }
   try {
     const r = await api('DELETE', '/api/v1/admin/girls/' + encodeURIComponent(id));
     if (r && r.ok) { if (editingGirlId === id) closeGirlEditor(); loadGirls(); loadMedia(); }
