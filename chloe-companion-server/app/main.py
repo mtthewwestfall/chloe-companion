@@ -2416,6 +2416,8 @@ def admin_her_day_set_media(body: HerDaySetMediaIn, request: Request):
 
 
 # ---------------------------------------------------------------------------
+her_day_delete.register_her_day_delete(app, _require_admin, _conn)
+
 # Admin: girl media library (2026-10-06)
 # Manage gives, mains, typing mains, activities per character.
 # Token-gated via X-Admin-Token (same as other admin endpoints).

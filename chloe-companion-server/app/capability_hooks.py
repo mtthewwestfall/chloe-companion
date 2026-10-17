@@ -43,6 +43,10 @@ _HOOK_LINES = {
         "a little scenario, i'm so in.",
         "hey you. sweet or spicy, your call — i do both.",
     ],
+     "brittany": [
+              "hey {n}. i'm sweet but not shy - want to act out a scenario? i'm in.",
+              "hey you i love to play. just say the word.",
+     ],
 }
 
 _HOOK_LINES_DEFAULT = [
@@ -70,7 +74,8 @@ _CAPABILITY_HOOK_RULES = {
     ),
     "regan": (
         "mischievous and teasing; e.g. \"i've got a wicked imagination if you "
-        "ever wanna play\" or \"sweet or spicy, your call — i do both\"."
+      
+     "ever wanna play\" or \"sweet or spicy, your call — i do both\"."
     ),
 }
 
@@ -182,3 +187,5 @@ def generic_mouth_with_hook(user_text: str, context: dict[str, Any],
     if cid == "rocky" or _brain.is_male_character(cid, char):
         return draft
     return _maybe_hook(draft, user_text, cid, context, _brain)
+
+
