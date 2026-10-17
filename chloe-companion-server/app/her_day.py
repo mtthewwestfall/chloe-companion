@@ -549,7 +549,7 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                 try:
                     from . import voice as _voice
                     voice_url = (_voice.maybe_generate_voice_note(
-                        caption, user_id) or "")
+                        caption, user_id, character_id=gid) or "")
                     if not voice_url:
                         # Voice notes are an owner-approved paid-TTS
                         # feature (app/voice.py is stubbed until then);

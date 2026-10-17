@@ -52,6 +52,30 @@ _BUILTIN_VOICE_IDS = {
     "rex": "pNInz6obpgDQGcFmaJgB",  # Adam (male)
 }
 
+# Per-character stock voices (2026-10-17): until now every girl resolved
+# to liora/Rachel, so all voice notes sounded like Chloe. Each roster
+# character gets her OWN ElevenLabs stock voice so a voice note sounds
+# like the character who sent it. Env overrides still win:
+# ELEVENLABS_VOICE_ID_<VOICE_NAME> first, then
+# ELEVENLABS_VOICE_ID_<CHARACTER_ID> (e.g. ELEVENLABS_VOICE_ID_MARA).
+_CHARACTER_VOICE_IDS = {
+    "chloe": "21m00Tcm4TlvDq8ikWAM",     # Rachel - Chloe's established voice
+    "mara": "EXAVITQu4vr4xnSDxMaL",      # Bella
+    "isabella": "XB0fDUnXU5powFXDhCwa",  # Charlotte
+    "regan": "Xb7hH8MSUJpSbSDYk0k2",     # Alice
+    "brittany": "pFZP5JQG7iQjIQuC4Bku",  # Lily
+    "brooklyn": "GBv7mTt0atIp3Br8iCZE",  # Grace
+    "mia": "MF3mGyEYCl7XYWbV9V6O",       # Elli
+    "hannah": "ThT5KcBeYPX3keUQqHPh",    # Dorothy
+    "jordan": "9BWtsMINqrJLrRacOk9x",    # Aria
+    "bailey": "EXAVITQu4vr4xnSDxMaL",    # Bella (minor roster member)
+    "rina": "jBpfuIE2acCO8z3wKNLl",      # Gigi
+    "sabrina": "XrExE9yKIg1WjnnlVkGX",   # Matilda
+    "jake": "TxGEqnHWrfWFTfGW9XjX",      # Josh
+    "eli": "VR6AewLTigWG4xSOukaG",       # Arnold
+    "rocky": "pNInz6obpgDQGcFmaJgB",     # Adam (rex)
+}
+
 EST_COST_PER_NOTE_USD = 0.05
 
 # Billing/latency guard: chat only asks for <= 280 chars, but other
@@ -64,18 +88,29 @@ def _log(msg: str) -> None:
     print(f"[voice] {msg}", flush=True)
 
 
-def _voice_id_for(voice_name: str) -> str:
-    """Resolve a character voice name to an ElevenLabs voice ID.
+def _voice_id_for(voice_name: str, character_id: str = "") -> str:
+    """Resolve a character's voice to an ElevenLabs voice ID.
 
     Precedence: ELEVENLABS_VOICE_ID_<NAME> (e.g.
-    ELEVENLABS_VOICE_ID_LIORA), then ELEVENLABS_VOICE_ID, then the
-    built-in stock-voice mapping above.
+    ELEVENLABS_VOICE_ID_LIORA), then ELEVENLABS_VOICE_ID_<CHARACTER_ID>,
+    then the per-character stock map, then ELEVENLABS_VOICE_ID, then the
+    built-in name map. The character map sits above the global default so
+    a single ELEVENLABS_VOICE_ID can no longer flatten every girl back
+    to one voice.
     """
     name = (voice_name or "").strip().lower() or LIORA_VOICE
+    cid = (character_id or "").strip().lower()
     per_name = os.environ.get(
         f"ELEVENLABS_VOICE_ID_{name.upper()}", "").strip()
     if per_name:
         return per_name
+    if cid:
+        per_char = os.environ.get(
+            f"ELEVENLABS_VOICE_ID_{cid.upper()}", "").strip()
+        if per_char:
+            return per_char
+        if cid in _CHARACTER_VOICE_IDS:
+            return _CHARACTER_VOICE_IDS[cid]
     default = os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
     if default:
         return default
@@ -155,7 +190,8 @@ def _save_mp3(audio: bytes, user_id: str) -> str:
 
 
 def maybe_generate_voice_note(text: str, user_id: str, voice_name: str = "liora",
-                              quota: bool = True, consume=None) -> str | None:
+                              quota: bool = True, consume=None,
+                              character_id: str = "") -> str | None:
     """Generate a voice note with ElevenLabs TTS, returning its URL.
 
     Returns None (never raises) when voice is unavailable: quota=False,
@@ -178,7 +214,7 @@ def maybe_generate_voice_note(text: str, user_id: str, voice_name: str = "liora"
         return None
     if len(clean) > MAX_TTS_CHARS:
         clean = clean[:MAX_TTS_CHARS]
-    vid = _voice_id_for(voice_name)
+    vid = _voice_id_for(voice_name, character_id)
     try:
         audio = _synthesize(clean, vid, config.ELEVENLABS_API_KEY)
     except Exception as e:  # noqa: BLE001 — any TTS failure is a soft None
