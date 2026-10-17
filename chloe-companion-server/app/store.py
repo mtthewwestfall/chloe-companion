@@ -1589,6 +1589,41 @@ def find_public_post_by_slug(conn: "sqlite3.Connection",
     return None
 
 
+# ---------------------------------------------------------------------------
+# $500 subscriber drawing (2026-10-17): one entry per paying user, from
+# the moment a payment actually credits (Stripe webhook or Stars/admin
+# grant). Powers the public counter on the landing page.
+# ---------------------------------------------------------------------------
+DRAWING_GOAL = 100
+
+
+def _ensure_drawing(conn: "sqlite3.Connection") -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS drawing_entries (
+               user_id TEXT PRIMARY KEY,
+               source TEXT NOT NULL DEFAULT '',
+               created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+
+
+def record_drawing_entry(conn: "sqlite3.Connection", user_id: str,
+                         source: str) -> None:
+    if not user_id:
+        return
+    _ensure_drawing(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO drawing_entries (user_id, source) "
+        "VALUES (?, ?)", (user_id, source))
+    conn.commit()
+
+
+def drawing_status(conn: "sqlite3.Connection") -> dict[str, Any]:
+    _ensure_drawing(conn)
+    n = int(conn.execute(
+        "SELECT COUNT(*) AS c FROM drawing_entries").fetchone()["c"])
+    return {"entered": n, "goal": DRAWING_GOAL,
+            "remaining": max(0, DRAWING_GOAL - n), "full": n >= DRAWING_GOAL}
+
+
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
                          girl_id: str) -> bool:
     """Check if a girl already has Her Day posts generated today for a user."""

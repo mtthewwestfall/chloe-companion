@@ -740,3 +740,10 @@ body {
 /* In-character referral ask card (2026-10-17) */
 .ref-ask-card{display:flex;justify-content:flex-start;margin:2px 0 8px 44px}
 .ref-ask-btn{font-size:13px;padding:8px 14px}
+
+/* $500 drawing banner (2026-10-17) */
+.drawing-banner{margin:12px 0;padding:14px 16px;background:linear-gradient(135deg,#2a1f3d,#1d2a1a);border:1px solid #d4af37;border-radius:14px;text-align:center}
+.drawing-title{font-size:18px;font-weight:800;color:#ffd968}
+.drawing-sub{font-size:13px;color:#e8e2f2;margin:5px 0 10px;line-height:1.4}
+.drawing-bar{height:10px;background:rgba(255,255,255,.12);border-radius:999px;overflow:hidden}
+.drawing-fill{height:100%;width:0;background:linear-gradient(90deg,#d4af37,#ffd968);border-radius:999px;transition:width .6s ease}
