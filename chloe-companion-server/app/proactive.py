@@ -315,6 +315,28 @@ def should_send_nudge(conn: sqlite3.Connection, user_id: str,
 # Generation (brain.py) + delivery
 # ---------------------------------------------------------------------------
 
+def _moment_for(conn: sqlite3.Connection, user_id: str,
+                character_id: str) -> dict[str, Any] | None:
+    """Her latest visible Her Day post for this user, if any — the
+    'scene' a proactive opener can hook into (2026-10-17)."""
+    try:
+        posts = store.get_her_day_posts(conn, user_id, character_id)
+        if posts:
+            return posts[0]
+    except Exception:
+        pass
+    return None
+
+
+def _abs_media(media_url: str) -> str:
+    url = (media_url or "").strip()
+    if not url:
+        return ""
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return config.PUBLIC_APP_URL + "/" + url.lstrip("/")
+
+
 def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
                                character_id: str, message_type: str) -> str:
     """Generate one opener in character via brain.py's live Gemini
@@ -329,11 +351,23 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
         seed = "good morning" if mtype == "morning" else "it's been a while"
         ctx = brain.build_brain_context(conn, user_id, user, seed, character)
         if mtype == "morning":
-            prompt = (
-                "Write a brief, warm morning greeting to him, in your voice, "
-                "as if you're texting him first thing. 1-2 short sentences. "
-                "Do not mention being an AI."
-            )
+            moment = _moment_for(conn, user_id, character_id)
+            mcap = ((moment or {}).get("caption") or "").strip()
+            if mcap:
+                prompt = (
+                    "Write a brief, warm morning greeting to him, in your "
+                    "voice, as if you're texting him first thing. Today you "
+                    "posted this: \"" + mcap[:160] + "\" Open with a playful "
+                    "hook about it and invite him into your day, like you "
+                    "want him there with you. 2-3 short sentences. "
+                    "Do not mention being an AI."
+                )
+            else:
+                prompt = (
+                    "Write a brief, warm morning greeting to him, in your voice, "
+                    "as if you're texting him first thing. 1-2 short sentences. "
+                    "Do not mention being an AI."
+                )
         else:
             prompt = (
                 "Write a brief, warm check-in to him — it's been a while since "
@@ -398,8 +432,31 @@ def send_telegram_message(chat_id: str, text: str) -> bool:
         return False
 
 
+def send_telegram_photo(chat_id: str, photo_url: str, caption: str) -> bool:
+    """Send a photo with caption through the Whispr bot's Bot API
+    (morning scene delivery: her today's-post photo + the opener)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token or not photo_url:
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    payload = json.dumps({"chat_id": chat_id, "photo": photo_url,
+                          "caption": (caption or "")[:1000]}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json",
+                 "User-Agent": "chloe-companion/proactive"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            return bool(data.get("ok"))
+    except Exception as e:
+        print(f"[proactive] telegram photo send failed: {e.__class__.__name__}",
+              flush=True)
+        return False
+
+
 def send_web_push(conn: sqlite3.Connection, user_id: str, title: str,
-                  body: str, url: str = "") -> int:
+                  body: str, url: str = "", image: str = "") -> int:
     """Web Push to all of the user's subscriptions. Returns the number
     accepted. Gone (404/410) subscriptions are pruned. Never raises;
     returns 0 when pywebpush or the VAPID keys are missing."""
@@ -420,9 +477,11 @@ def send_web_push(conn: sqlite3.Connection, user_id: str, title: str,
         sub_info = {"endpoint": s["endpoint"],
                     "keys": {"p256dh": s["p256dh"], "auth": s["auth"]}}
         try:
+            payload = {"title": title, "body": body, "url": url}
+            if image:
+                payload["image"] = image
             webpush(subscription_info=sub_info,
-                    data=json.dumps({"title": title, "body": body,
-                                     "url": url}),
+                    data=json.dumps(payload),
                     vapid_private_key=config.VAPID_PRIVATE_KEY,
                     vapid_claims={"sub": config.VAPID_MAILTO})
             sent += 1
@@ -531,7 +590,16 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
     char_name = character.get("name") or "Chloe"
 
     if channel == "telegram":
-        ok = send_telegram_message(user_id[3:], text)
+        ok = False
+        if mtype == "morning":
+            moment = _moment_for(conn, user_id, character_id)
+            if (moment and moment.get("post_type") == "image"
+                    and moment.get("media_url")):
+                ok = send_telegram_photo(user_id[3:],
+                                         _abs_media(moment["media_url"]),
+                                         text)
+        if not ok:
+            ok = send_telegram_message(user_id[3:], text)
         conn.execute(
             "UPDATE proactive_outbox SET status = ?, sent_at = datetime('now') "
             "WHERE id = ?", ("sent" if ok else "failed", msg["id"]))
@@ -543,8 +611,17 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
         # Website: stays 'pending' until the PWA polls + acks it (the ack
         # writes the turn into history). Best-effort push right now.
         try:
+            push_url = config.PUBLIC_APP_URL + "/"
+            push_image = ""
+            if mtype == "morning":
+                push_url = (config.PUBLIC_APP_URL + "/?character="
+                            + character_id + "&moment=1")
+                moment = _moment_for(conn, user_id, character_id)
+                if (moment and moment.get("post_type") == "image"
+                        and moment.get("media_url")):
+                    push_image = _abs_media(moment["media_url"])
             send_web_push(conn, user_id, char_name, text,
-                          url=config.PUBLIC_APP_URL + "/")
+                          url=push_url, image=push_image)
         except Exception:
             pass
         conn.execute(

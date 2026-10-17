@@ -367,7 +367,7 @@
     const cid = (params.get('character') || '').toLowerCase();
     if (cid) {
       const girl = CHARACTERS.find((c) => c.id === cid);
-      if (girl) { showApp(); openChat(girl.id); }
+      if (girl) { showApp(); openChat(girl.id); if (params.get('moment') === '1') showMorningChip(girl.name); }
       return;
     }
     if (params.get('create') === '1') {
@@ -375,6 +375,28 @@
       const btn = $('createCompanionBtn');
       if (btn) btn.click();
     }
+  }
+
+  function showMorningChip(gname) {
+    setTimeout(() => {
+      const old = document.getElementById('postTopicChip');
+      if (old) old.remove();
+      const chip = document.createElement('div');
+      chip.id = 'postTopicChip';
+      chip.className = 'post-topic-chip';
+      const label = document.createElement('span');
+      label.textContent = '\uD83D\uDC8C ' + gname + ' messaged you first this morning';
+      chip.appendChild(label);
+      const x = document.createElement('button');
+      x.className = 'post-topic-x';
+      x.textContent = '\u2715';
+      x.setAttribute('aria-label', 'Dismiss');
+      x.addEventListener('click', () => chip.remove());
+      chip.appendChild(x);
+      const composer = document.querySelector('#chatView .composer');
+      if (composer && composer.parentNode) composer.parentNode.insertBefore(chip, composer);
+      if (msgInput) msgInput.focus();
+    }, 350);
   }
 
   function showListView() {
