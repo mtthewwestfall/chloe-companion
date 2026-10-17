@@ -816,6 +816,7 @@ let presetSheetGirl = null;
     if (res.sogni_login_box) addSogniLoginButton();
   }
       setMessagesRemaining(res.messages_remaining);
+      maybeReferralAsk(res, text);
       if (typeof res.streak_current === 'number') {
         const prev = myStreaks[targetCharacterId] || {};
         myStreaks[targetCharacterId] = { current: res.streak_current, longest: Math.max(res.streak_current, prev.longest || 0) };
@@ -1348,6 +1349,53 @@ let myStreaks = {};
     if (cur >= 2) { $('streakNum').textContent = cur; chip.classList.remove('hidden'); }
     else chip.classList.add('hidden');
   }
+const REF_ASK_LINES = {
+  voice: "you like hearing my voice, huh? \uD83D\uDC9C imagine your friends finding a girl like me\u2026 invite them and your months are on me \u2014 6 friends = a whole free year with me.",
+  photo: "like what you see? \uD83D\uDE0F your friends could have a girl sending them pics too. invite them \u2014 6 friends gets you a free year of me.",
+  scene: "okay, that was fun \uD83D\uDC9C do me a favor? bring a friend next time \u2014 invite 6 and you get a free year with me. no card, just friends.",
+  chat: "random thought \uD83D\uDC9C I like being your secret, but your friends deserve a girl too. invite them \u2014 6 friends = a free year of me.",
+};
+let refAskChecked = false;
+async function maybeReferralAsk(res, userText) {
+  // In-character referral ask (2026-10-17): after a peak moment (voice
+  // note, photo, scene start) with a HEALTHY message bank (the peak
+  // paywall owns the low-bank moments), she asks him to invite friends.
+  // At most once a week, and never once he's earned the free year.
+  try {
+    if (!res || typeof res.messages_remaining !== 'number') return;
+    if (res.messages_remaining <= 20) return;
+    let peak = '';
+    if (res.voice_note_url) peak = 'voice';
+    else if (res.photo_url || res.image_url) peak = 'photo';
+    else if (userText && /(role ?play|pretend|imagine)/i.test(userText)) peak = 'scene';
+    else if ((res.streak_current || 0) >= 3) peak = 'chat';
+    if (!peak) return;
+    const last = parseInt(localStorage.getItem('refAskLast') || '0', 10);
+    if (Date.now() - last < 7 * 24 * 3600 * 1000) return;
+    localStorage.setItem('refAskLast', String(Date.now()));
+    if (!refAskChecked) {
+      refAskChecked = true;
+      try {
+        const r = await fetch(CONFIG.API_BASE_URL + '/api/v1/referral/me', { headers: { 'Authorization': 'Bearer ' + getToken() } });
+        const d = await r.json();
+        if ((d.referred_active || d.referred_count || d.count || 0) >= 6) return;
+      } catch (e) {}
+    }
+    const girlName = currentGirl.name;
+    setTimeout(() => {
+      addText('her', REF_ASK_LINES[peak], {}, girlName);
+      const card = document.createElement('div');
+      card.className = 'ref-ask-card';
+      const btn = document.createElement('button');
+      btn.className = 'btn-primary ref-ask-btn';
+      btn.textContent = '\uD83D\uDC9C Invite friends \u2014 earn free months';
+      btn.addEventListener('click', () => openReferral());
+      card.appendChild(btn);
+      chatLog.appendChild(card);
+      scrollBottom();
+    }, 900);
+  } catch (e) {}
+}
 async function updateBalance() {
     try {
       const me = await ApiClient.me();
