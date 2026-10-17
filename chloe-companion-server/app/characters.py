@@ -53,7 +53,7 @@ _cache: dict[str, Any] = {"ts": 0.0, "chars": []}
 _MALE_CHARACTER_IDS = frozenset({"jake", "eli", "rocky"})
 _FEMALE_CHARACTER_IDS = frozenset({
     "chloe", "mara", "isabella", "regan", "brooklyn", "hannah", "mia",
-    "jordan",
+    "jordan", "brittany",
 })
 _MALE_PERSONA_RE = re.compile(
     r"\b(?:you are\s+[^.!?\n]{0,80}?\ba man\b|a male companion|"

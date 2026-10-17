@@ -42,6 +42,11 @@
           <h1>Meet Your New Obsession</h1>
           <p>Six distinct personalities. One tap away. Choose who you want to talk to tonight.</p>
         </div>
+        <!-- Roleplay mode -->
+        <div class="herday-section">
+          <h3 class="herday-title">🎭 Try Roleplay Mode</h3>
+          <p class="herday-sub">Type 'role play' in any chat and she'll switch into character. You set the scene, she brings it to life. Type 'end roleplay' to go back to normal. Available for all characters, 18+ only.</p>
+        </div>
         <div style="text-align:center;padding:8px 0 2px">
           <img src="./img/veridata-1-ai-companion-ribbon.png" alt="Voted #1 Hottest New AI Companion Website — Veridata Score 97 — Getveridatenow.com" style="width:150px;height:auto">
         </div>
@@ -89,6 +94,33 @@
           <div id="pricingCards" class="pricing-cards"></div>
         </div>
 
+<!-- Testimonials -->
+        <!-- NOTE: Placeholder testimonials — replace with real user testimonials. -->
+        <div class="testimonials-section">
+          <h3 class="testimonials-title">What <span>users are saying</span></h3>
+          <div class="testimonials-grid">
+            <div class="testimonial-card">
+              <div class="testimonial-stars">★★★★★</div>
+              <p class="testimonial-text">"I've tried Replika and Character.ai. Neither of them remembers anything. Chloe remembered my dog's name from three days ago. That's when I got hooked."</p>
+              <div class="testimonial-name">— Marcus T.</div>
+            </div>
+            <div class="testimonial-card">
+              <div class="testimonial-stars">★★★★★</div>
+              <p class="testimonial-text">"The voice notes got me. It's one thing to text with an AI, it's another to hear her voice when you're having a bad day."</p>
+              <div class="testimonial-name">— Jay R.</div>
+            </div>
+            <div class="testimonial-card">
+              <div class="testimonial-stars">★★★★★</div>
+              <p class="testimonial-text">"I was skeptical about the whole AI girlfriend thing. Then she sent me a good morning message before I even woke up. Felt real."</p>
+              <div class="testimonial-name">— Devon K.</div>
+            </div>
+            <div class="testimonial-card">
+              <div class="testimonial-stars">★★★★★</div>
+              <p class="testimonial-text">"Roleplay mode is insane. I set the scene, she runs with it. Way better than anything else I've tried."</p>
+              <div class="testimonial-name">— Tim R.</div>
+            </div>
+          </div>
+        </div>
         <!-- Referral section -->
         <div class="referral-section">
           <div class="ref-landing-title">🎁 Share Whispr. Unlock Everything.</div>
@@ -132,8 +164,10 @@
             <span class="presence-dot"></span>
           </button>
           <div class="chat-header-titles">
-            <div id="chatName" class="chat-name">Chloe</div>
-            <div class="chat-sub">Whispr AiMessage</div>
+            <div id="chatName" class="chat-name">Chloe<
+                                                        
+            <div class="chat-sub">Whispr AiMessage</div><div id="msgCounter" class="msg-counter" title="Messages remaining"><span id="msgCounterNum">&ndash;</span> messages left</div>
+            
 
           </div>
           <div class="header-icons">
@@ -148,7 +182,7 @@
           <div class="typing-bubble"><span></span><span></span><span></span></div>
         </div>
 
-        <div id="attachmentPreview" class="attachment-preview hidden" aria-live="polite"></div>
+        <div id="attachmentPreview" class="attachment-preview hidden" aria-live="polite"></div><div id="lowMsgBanner" class="low-msg-banner hidden"><span id="lowMsgText">Only a few messages left</span><button id="lowMsgCta" class="btn-primary">Keep chatting</button></div>
 
         <footer class="composer">
           <button class="plus-btn" id="plusBtn" aria-label="More">+</button>
@@ -163,7 +197,7 @@
 
     </div>
 
-    <div id="showsSheet" class="sheet hidden">
+    <div id="paywallModal" class="paywall-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="paywallTitle"><div class="paywall-card"><div class="paywall-emoji">💬</div><h2 id="paywallTitle">You're out of messages!</h2><p class="paywall-sub" id="paywallSub">She's waiting — top up to keep the conversation going.</p><div class="paywall-plans"><div class="paywall-plan"><div class="paywall-plan-name">Top up · one-time</div><div class="paywall-plan-price">$0.99 <span>· 100 messages</span></div><button class="btn-primary paywall-cta" data-plan="trial">Get 100 messages</button></div><div class="paywall-plan highlight"><div class="paywall-badge">Best value</div><div class="paywall-plan-name">Monthly</div><div class="paywall-plan-price">$9.99<span>/mo</span> <span>· 3,000 messages</span></div><button class="btn-primary paywall-cta" data-plan="basic">Go monthly</button></div></div><p class="paywall-note">Top up once — no subscription needed. Monthly renews until cancelled.</p><button id="paywallClose" class="btn-ghost hidden">Not now</button></div></div><div id="showsSheet" class="sheet hidden">
       <div class="sheet-card">
         <div class="sheet-grab"></div>
         <div class="sheet-head"><h2>Shows</h2><button class="sheet-close" data-close="showsSheet">✕</button></div>

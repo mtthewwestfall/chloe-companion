@@ -300,7 +300,7 @@
     paintCharacterStatus();
     clearPendingAttachments();
     // Owner media attachments work in every character thread.
-    $('attachBtn').classList.remove('hidden');
+    $('attachBtn').classList.remove('hidden'); updateBalance();
     startAvatarCycle();
     // day divider + encryption note
     chatLog.innerHTML = '';
@@ -723,7 +723,7 @@
       showToast('Remove the failed upload before sending', 3200);
       return;
     }
-    if (!text && !readyAttachments.length) return;
+    if (!text && !readyAttachments.length) return; if (messagesRemaining !== null && messagesRemaining <= 0) { showPaywall(true); showToast("You're out of messages — top up to keep chatting", 3200); return; }
     sending = true;
     const targetCharacterId = currentGirl.id;
     const requestedUpdateDelay = parseUpdateDelay(text);
@@ -752,7 +752,7 @@
       if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '');
       if (res.image_url) addGeneratedImage(res.image_url);
       if (res.sogni_login_box) addSogniLoginButton();
-      if (typeof res.messages_remaining === 'number') $('statMsgs').textContent = res.messages_remaining;
+      setMessagesRemaining(res.messages_remaining);
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
       typingRow.classList.add('hidden');
@@ -1161,10 +1161,10 @@
     }
   });
 
-  async function updateBalance() {
+  /* ---------- message counter + paywall (2026-10-16) ---------- */let messagesRemaining=null,paywallPlansLoaded=false;function setPaywallCopy(out){$('paywallTitle').textContent=out?"You're out of messages!":'Running low on messages';$('paywallSub').textContent=out?"She's waiting — top up to keep the conversation going.":'Top up now so the conversation never stops.';$('paywallClose').classList.toggle('hidden',out)}function showPaywall(out){setPaywallCopy(out);if(!paywallPlansLoaded)loadPaywallPlans();$('paywallModal').classList.remove('hidden')}function hidePaywall(){$('paywallModal').classList.add('hidden')}function setMessagesRemaining(n){if(typeof n!=='number'||!isFinite(n))return;messagesRemaining=n;const s=$('statMsgs');if(s)s.textContent=n;const c=$('msgCounterNum');if(c)c.textContent=n;const p=$('msgCounter');if(p)p.classList.toggle('low',n<=5);const b=$('lowMsgBanner');if(n<=0){if(b)b.classList.add('hidden');msgInput.disabled=true;$('sendBtn').disabled=true;showPaywall(true)}else{msgInput.disabled=false;$('sendBtn').disabled=false;hidePaywall();if(b){if(n<=5){$('lowMsgText').textContent='Only '+n+' message'+(n===1?'':'s')+' left';b.classList.remove('hidden')}else b.classList.add('hidden')}}}async function loadPaywallPlans(){const plans={trial:null,basic:null};try{const r=await fetch(CONFIG.API_BASE_URL+'/api/v1/tiers');const d=await r.json();(d.plans||[]).forEach(pl=>{if(pl.key==='trial')plans.trial=pl;else if(pl.key==='basic')plans.basic=pl})}catch(e){}paywallPlansLoaded=true;document.querySelectorAll('.paywall-cta').forEach(btn=>{const pl=plans[btn.dataset.plan];const url=(pl&&pl.checkout_url)||(CONFIG.API_BASE_URL+'/api/v1/tiers');btn.onclick=()=>window.open(url,'_blank','noopener')})}$('lowMsgCta').addEventListener('click',()=>showPaywall(false));$('paywallClose').addEventListener('click',hidePaywall);async function updateBalance() {
     try {
       const me = await ApiClient.me();
-      if (typeof me.messages_remaining === 'number') $('statMsgs').textContent = me.messages_remaining;
+      setMessagesRemaining(me.messages_remaining);
       if (typeof me.voice_notes_remaining === 'number') $('statVoice').textContent = me.voice_notes_remaining;
     } catch (e) {}
   }
@@ -1404,7 +1404,7 @@
     openSheet('profileSheet');
     const me = await ApiClient.me();
     $('profileName').textContent = me.name || localStorage.getItem('chloe_name') || 'You';
-    $('statMsgs').textContent = me.messages_remaining;
+    setMessagesRemaining(me.messages_remaining);
     $('statVoice').textContent = me.voice_notes_remaining;
     // Tier card + mode pill reflect the real connection state, not the demo fallback.
     const live = ApiClient.isConnected();

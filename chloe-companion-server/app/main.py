@@ -76,6 +76,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
@@ -1125,14 +1126,14 @@ def chat(body: ChatIn, request: Request):
         # and refresh the rolling digest. Runs after the reply is sent.
         brain.learn_from_turn(conn, user_id, effective_message, cid)
 
-        # Voice note: stubbed/disabled by default -> null. Uses the
-        # character's xAI voice (Chloe: liora).
+        # Voice note: xAI TTS, gated on CHLOE_XAI_API_KEY + CHLOE_VOICE_ENABLED=1.
+        # Credit is consumed ONLY after a note is actually generated (never on failure).
         voice_note_url = None
         tier_cfg = config.TIERS[user["tier"]]
         if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
-            if is_owner or store.consume_voice_note(conn, user_id):
-                voice_note_url = voice.maybe_generate_voice_note(
-                    reply_text, user_id, character.get("companion_voice") or "liora")
+            has_quota = is_owner or (user.get("voice_notes_remaining") or 0) > 0
+            voice_note_url = voice.maybe_generate_voice_note(
+            reply_text, user_id, character.get("companion_voice") or "liora", quota=has_quota, consume=(lambda: store.consume_voice_note(conn, user_id)) if not is_owner else None)
 
         # Photo drop: tier-gated serving hook. Chloe's curated drops only —
         # other characters get no photos (never Chloe's photos on them).
