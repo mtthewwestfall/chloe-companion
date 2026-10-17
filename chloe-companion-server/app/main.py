@@ -75,8 +75,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
-from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, character_trust, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
@@ -1016,7 +1015,7 @@ def chat(body: ChatIn, request: Request):
         # Trust posture: advance the stage clock (at most one stage per
         # check). This NEVER gates warmth — only how much of herself she
         # has volunteered so far.
-        trust.maybe_advance(conn, user_id)
+        character_trust.maybe_advance(conn, user_id, cid)
 
         # Brain context: 3-layer memory stack (recent turns -> rolling
         # digest -> pinned facts + relevant memories) + trust posture line.
