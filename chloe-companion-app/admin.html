@@ -504,10 +504,25 @@ async function loadAccounts() {
       <td>${a.email_verified_at ? '<span class="verified">✓</span>' : '<span class="unverified">✗</span>'}</td>
       <td>
         <button class="grant-btn" onclick="grantMonth('${a.user_id}','basic')">Grant month</button>
+        <button class="grant-btn" onclick="grantTrial(this,'${a.user_id}')">Grant 100</button>
       </td>
     </tr>`;
   }).join('');
   document.getElementById('acctBody').innerHTML = rows || '<tr><td colspan="5" style="color:#888;">No accounts yet</td></tr>';
+}
+
+async function grantTrial(btn, userId) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    const old = btn.textContent;
+    btn.textContent = 'Sure?';
+    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = old; }, 3000);
+    return;
+  }
+  btn.disabled = true;
+  const res = await api('POST', '/api/v1/admin/grant-messages', { user_id: userId, count: 100 });
+  if (res && res.ok) { alert('Granted 100 messages. New balance: ' + res.messages_remaining); loadAccounts(); }
+  else { alert('Grant failed: ' + ((res && res.detail) || 'unknown error')); btn.disabled = false; }
 }
 
 async function grantMonth(userId, tier) {
