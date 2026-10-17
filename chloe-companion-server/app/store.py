@@ -1380,8 +1380,31 @@ def get_her_day_posts(conn: "sqlite3.Connection", user_id: str,
         params.append(girl_id.strip().lower())
     if not include_expired:
         query += " AND expires_at > datetime('now')"
+        # Staggered publishing: a post is invisible until its
+        # created_at slot arrives.
+        query += " AND created_at <= datetime('now')"
     query += " ORDER BY created_at DESC"
     return [dict(r) for r in conn.execute(query, params).fetchall()]
+
+
+def set_her_day_post_times(conn: "sqlite3.Connection", post_id: int,
+                           created_at: str, expires_at: str) -> dict | None:
+    """Set a Her Day post's publish slot (staggered daily posting).
+
+    created_at doubles as the go-live time: readers only see posts whose
+    created_at has arrived. expires_at moves with it so a slotted post
+    still lives a full 24h from publication.
+    """
+    conn.execute(
+        "UPDATE her_day_posts SET created_at = ?, expires_at = ?"
+        " WHERE id = ?",
+        (created_at, expires_at, post_id),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM her_day_posts WHERE id = ?", (post_id,)
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def mark_her_day_viewed(conn: "sqlite3.Connection", post_id: int,
@@ -1448,6 +1471,7 @@ def get_public_her_day_posts(conn: "sqlite3.Connection",
         "SELECT girl_id, post_type, media_url, voice_url, caption,"
         " created_at FROM her_day_posts"
         " WHERE expires_at > datetime('now')"
+        " AND created_at <= datetime('now')"
         " ORDER BY created_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
