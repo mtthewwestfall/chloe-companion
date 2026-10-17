@@ -2156,6 +2156,9 @@ def get_unified_feed(request: Request):
             g = girl_map.get(p.get("girl_id"), {})
             p["girl_name"] = g.get("name", p.get("girl_id", ""))
             p["girl_avatar_url"] = g.get("avatar_url", "")
+            p["slug"] = store.post_slug(p.get("girl_id", ""),
+                                        p.get("created_at", ""),
+                                        p.get("caption", ""))
         return {"posts": posts}
     finally:
         conn.close()
@@ -2177,7 +2180,34 @@ def get_public_her_day():
             g = girl_map.get(p.get("girl_id"), {})
             p["girl_name"] = g.get("name", p.get("girl_id", ""))
             p["girl_avatar_url"] = g.get("avatar_url", "")
+            p["slug"] = store.post_slug(p.get("girl_id", ""),
+                                        p.get("created_at", ""),
+                                        p.get("caption", ""))
         return {"posts": posts}
+    finally:
+        conn.close()
+
+
+@app.get("/p/{slug}")
+def public_post_page(slug: str):
+    """Shareable permalink for one Her Day moment (2026-10-17):
+    server-rendered with Open Graph tags so shares unfurl with her
+    photo and caption; the page funnels into her chat."""
+    from fastapi.responses import HTMLResponse
+
+    from . import post_page
+    conn = _conn()
+    try:
+        post = store.find_public_post_by_slug(conn, slug)
+        girl = None
+        if post:
+            girl = next((g for g in characters.public_list()
+                         if g["id"] == post.get("girl_id")), None)
+            if girl is None:
+                girl = {"id": post.get("girl_id"),
+                        "name": post.get("girl_id", "Her"),
+                        "avatar_url": ""}
+        return HTMLResponse(post_page.render_post_page(post, girl, slug))
     finally:
         conn.close()
 
