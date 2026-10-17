@@ -298,6 +298,7 @@
     currentGirl = girl;
     $('chatName').textContent = girl.name;
     paintCharacterStatus();
+    paintStreak();
     clearPendingAttachments();
     // Owner media attachments work in every character thread.
     $('attachBtn').classList.remove('hidden'); updateBalance();
@@ -790,6 +791,11 @@ let presetSheetGirl = null;
     if (res.sogni_login_box) addSogniLoginButton();
   }
       setMessagesRemaining(res.messages_remaining);
+      if (typeof res.streak_current === 'number') {
+        const prev = myStreaks[targetCharacterId] || {};
+        myStreaks[targetCharacterId] = { current: res.streak_current, longest: Math.max(res.streak_current, prev.longest || 0) };
+        paintStreak();
+      }
       maybePeakPaywall(res, text);
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
@@ -1308,9 +1314,19 @@ let presetSheetGirl = null;
   } catch (e) {}
   setTimeout(() => { if (messagesRemaining > 0) showPaywall(false); }, 1200);
 }
+let myStreaks = {};
+  function paintStreak() {
+    const chip = $('streakChip');
+    if (!chip) return;
+    const entry = myStreaks[currentGirl.id];
+    const cur = entry ? (entry.current || 0) : 0;
+    if (cur >= 2) { $('streakNum').textContent = cur; chip.classList.remove('hidden'); }
+    else chip.classList.add('hidden');
+  }
 async function updateBalance() {
     try {
       const me = await ApiClient.me();
+      if (me.streaks) { myStreaks = me.streaks; paintStreak(); }
       setMessagesRemaining(me.messages_remaining);
       if (typeof me.voice_notes_remaining === 'number') $('statVoice').textContent = me.voice_notes_remaining;
     } catch (e) {}

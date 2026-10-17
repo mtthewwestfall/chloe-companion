@@ -462,6 +462,70 @@ def export_memories(conn: sqlite3.Connection, user_id: str,
     return recall_memories(conn, user_id, limit=100000, character_id=character_id)
 
 
+# ---------------------------------------------------------------------------
+# Daily streaks (2026-10-17): consecutive LOCAL days with at least one
+# user turn, per (user, character). Dates arrive pre-computed in the
+# user's timezone from the caller, keeping this module tz-free.
+# ---------------------------------------------------------------------------
+def _ensure_streaks(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_streaks (
+               user_id TEXT NOT NULL,
+               character_id TEXT NOT NULL,
+               current_streak INTEGER NOT NULL DEFAULT 0,
+               longest_streak INTEGER NOT NULL DEFAULT 0,
+               last_active_date TEXT NOT NULL DEFAULT '',
+               PRIMARY KEY (user_id, character_id))""")
+
+
+def touch_streak(conn: sqlite3.Connection, user_id: str, character_id: str,
+                 today: str, yesterday: str) -> int:
+    """Record activity today; returns the current streak length."""
+    _ensure_streaks(conn)
+    row = conn.execute(
+        "SELECT current_streak, longest_streak, last_active_date "
+        "FROM user_streaks WHERE user_id = ? AND character_id = ?",
+        (user_id, character_id)).fetchone()
+    if row and row["last_active_date"] == today:
+        return int(row["current_streak"])
+    cur = (int(row["current_streak"]) + 1) if (
+        row and row["last_active_date"] == yesterday) else 1
+    longest = max(cur, int(row["longest_streak"]) if row else 0)
+    conn.execute(
+        "INSERT INTO user_streaks (user_id, character_id, current_streak, "
+        "longest_streak, last_active_date) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, character_id) DO UPDATE SET "
+        "current_streak = excluded.current_streak, "
+        "longest_streak = excluded.longest_streak, "
+        "last_active_date = excluded.last_active_date",
+        (user_id, character_id, cur, longest, today))
+    conn.commit()
+    return cur
+
+
+def get_streaks_display(conn: sqlite3.Connection, user_id: str,
+                        today: str, yesterday: str) -> dict[str, Any]:
+    """{character_id: {current, longest}} with stale streaks shown as 0
+    (a streak whose last active day is before yesterday is broken)."""
+    _ensure_streaks(conn)
+    out: dict[str, Any] = {}
+    for r in conn.execute(
+            "SELECT character_id, current_streak, longest_streak, "
+            "last_active_date FROM user_streaks WHERE user_id = ?",
+            (user_id,)).fetchall():
+        cur = int(r["current_streak"]) if (
+            r["last_active_date"] in (today, yesterday)) else 0
+        out[r["character_id"]] = {"current": cur,
+                                  "longest": int(r["longest_streak"])}
+    return out
+
+
+def get_streak(conn: sqlite3.Connection, user_id: str, character_id: str,
+               today: str, yesterday: str) -> int:
+    d = get_streaks_display(conn, user_id, today, yesterday).get(character_id)
+    return int(d["current"]) if d else 0
+
+
 def delete_memory(conn: sqlite3.Connection, user_id: str,
                   character_id: str, memory_id: int) -> int:
     """Delete ONE memory, scoped to its owner + character (2026-10-17,
