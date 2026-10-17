@@ -188,71 +188,86 @@ def validate_her_day_media_url(conn, url: str) -> str | None:
 
 def _plan_day(girl_id: str, date_str: str,
               all_girls: list[dict[str, Any]]) -> list[tuple]:
-    """Deterministic daily content plan for one girl.
+    """One moment per girl per day (owner direction, 2026-10-17).
 
-    Returns [(moment_key, is_group, partner_ids, partner_names)].
+    Returns a single [(moment_key, is_group, partner_ids, partner_names)].
     Seeded by girl_id + date: reproducible, different per girl, different
-    per day. Mixes solo and group moments.
+    per day. Mix: mostly solo visual moments, some group moments, the
+    occasional voice rant or text thought.
     """
     seed = int(hashlib.md5(
-        f"{girl_id}|{date_str}|herday-v2".encode()).hexdigest()[:8], 16)
+        f"{girl_id}|{date_str}|herday-v3".encode()).hexdigest()[:8], 16)
     rng = random.Random(seed)
     others = [g for g in all_girls if g["id"] != girl_id]
 
-    plan: list[tuple] = []
-    # Bookend: morning coffee (solo)
-    plan.append(("morning_coffee", False, [], []))
-
-    # Middle: 1-3 moments, mix solo + group
-    solo_pool = ["gym", "cooking", "out_and_about", "getting_ready"]
-    group_pool = list(GROUP_MOMENTS.keys())
-    for _ in range(rng.randint(1, 3)):
-        if others and rng.random() < 0.45:
-            mkey = rng.choice(group_pool)
-            n_partners = 1 if rng.random() < 0.7 else min(2, len(others))
-            partners = rng.sample(others, n_partners)
-            plan.append((mkey, True,
-                         [p["id"] for p in partners],
-                         [p["name"] for p in partners]))
-        else:
-            plan.append((rng.choice(solo_pool), False, [], []))
-
-    # Bookend: bedtime (solo)
-    plan.append(("bedtime", False, [], []))
-
-    # Voice note most days
-    if rng.random() < 0.7:
-        plan.insert(-1, ("voice_rant", False, [], []))
-    # Sometimes a text moment
-    if rng.random() < 0.4:
-        plan.insert(-1, (rng.choice(["shower_thought", "craving"]),
-                         False, [], []))
-    return plan
+    roll = rng.random()
+    if others and roll < 0.20:
+        mkey = rng.choice(list(GROUP_MOMENTS.keys()))
+        n_partners = 1 if rng.random() < 0.7 else min(2, len(others))
+        partners = rng.sample(others, n_partners)
+        return [(mkey, True,
+                 [p["id"] for p in partners],
+                 [p["name"] for p in partners])]
+    if roll < 0.30:
+        return [("voice_rant", False, [], [])]
+    if roll < 0.40:
+        return [(rng.choice(["shower_thought", "craving"]), False, [], [])]
+    solo_pool = ["morning_coffee", "gym", "cooking", "out_and_about",
+                 "getting_ready", "bedtime"]
+    return [(rng.choice(solo_pool), False, [], [])]
 
 
 def _build_all_plans(all_girls: list[dict[str, Any]],
                      date_str: str) -> dict[str, list[tuple]]:
-    """Build plans for all girls, making group moments symmetric.
+    """Build the day's one-moment plans, making group moments symmetric
+    WITHOUT giving anyone a second post.
 
-    If A's plan has a group moment with B, it also appears in B's feed
-    (same image, B's own caption).
+    If A's one moment is a group moment with B, it becomes B's one post
+    too (same image, B's own caption) — unless B already kept a group
+    moment of her own or was already claimed by an earlier group moment.
     """
     plans = {g["id"]: _plan_day(g["id"], date_str, all_girls)
              for g in all_girls}
     girl_map = {g["id"]: g for g in all_girls}
-    for gid, plan in list(plans.items()):
-        for (mkey, is_group, pids, _pnames) in plan:
-            if not is_group:
+    claimed: set[str] = set()
+    for gid in sorted(plans):
+        plan = plans[gid]
+        if not plan:
+            continue
+        (mkey, is_group, pids, _pnames) = plan[0]
+        claimed.add(gid)
+        if not is_group:
+            continue
+        for pid in pids:
+            if pid in claimed or pid not in plans:
                 continue
-            for pid in pids:
-                if pid not in plans:
-                    continue
-                already = any(pm == mkey and gid in ppids
-                              for (pm, pig, ppids, _) in plans[pid])
-                if not already:
-                    plans[pid].insert(
-                        -1, (mkey, True, [gid], [girl_map[gid]["name"]]))
+            if plans[pid] and plans[pid][0][1]:
+                continue  # she keeps her own group moment
+            plans[pid] = [(mkey, True, [gid], [girl_map[gid]["name"]])]
+            claimed.add(pid)
     return plans
+
+
+def _slot_for(girl_id: str, date_str: str) -> str:
+    """This girl's publish slot for the day (UTC text, sqlite format).
+
+    Slots land 12:00-23:59 UTC (morning to evening US Eastern) and are
+    derived from girl + date, so the posting order rotates daily instead
+    of every post appearing at once in the morning batch. A slot already
+    past at generation time simply means the post is live immediately.
+    """
+    h = int(hashlib.md5(
+        f"{girl_id}|{date_str}|slot".encode()).hexdigest()[:8], 16)
+    hour = 12 + (h % 12)
+    minute = (h >> 8) % 60
+    return f"{date_str} {hour:02d}:{minute:02d}:00"
+
+
+def _slot_expiry(slot: str) -> str:
+    """expires_at for a slotted post: 24h after its slot."""
+    dt = datetime.strptime(slot, "%Y-%m-%d %H:%M:%S")
+    from datetime import timedelta
+    return (dt + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _plan_session() -> dict | None:
@@ -550,6 +565,15 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                 conn, user_id, gid,
                 post_type=post_type, media_url=media_url,
                 voice_url=voice_url, caption=caption)
+            # Stagger: the post goes live at this girl's slot today,
+            # not all at once with the morning batch.
+            try:
+                slot = _slot_for(gid, date_str)
+                store.set_her_day_post_times(
+                    conn, post["id"], slot, _slot_expiry(slot))
+            except Exception as e:  # noqa: BLE001
+                print(f"[her_day] slot scheduling failed: {e}",
+                      flush=True)
             posts.append(post)
         return posts
     finally:
