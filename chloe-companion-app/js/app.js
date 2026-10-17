@@ -365,6 +365,12 @@
     deepLinkHandled = true;
     let params;
     try { params = new URLSearchParams(location.search); } catch (e) { return; }
+    const linkCode = params.get('link');
+    if (linkCode) {
+      try { history.replaceState(null, '', location.pathname); } catch (e) {}
+      redeemAppLink(linkCode);
+      return;
+    }
     const cid = (params.get('character') || '').toLowerCase();
     if (cid) {
       const girl = CHARACTERS.find((c) => c.id === cid);
@@ -398,6 +404,25 @@
       if (composer && composer.parentNode) composer.parentNode.insertBefore(chip, composer);
       if (msgInput) msgInput.focus();
     }, 350);
+  }
+
+  async function redeemAppLink(code) {
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/auth/redeem-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code }),
+      });
+      const d = await res.json();
+      if (d && d.ok && d.token) {
+        setToken(d.token);
+        if (d.name) localStorage.setItem('chloe_name', d.name);
+        showApp();
+        bootChat(false);
+        updateBalance();
+        showToast('Welcome \u2014 same account, same girl \uD83D\uDC9C', 3200);
+      }
+    } catch (e) {}
   }
 
   function showListView() {
