@@ -13,3 +13,5 @@ imageio-ffmpeg>=0.5
 # her-day images, and Hannah's plan-billed videos (session auth).
 sogni-client>=5.56
 websockets>=14
+# Web Push (VAPID) for PWA push notifications (2026-10-16).
+pywebpush>=2.1
