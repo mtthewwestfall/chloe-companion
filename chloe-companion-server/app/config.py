@@ -136,9 +136,9 @@ STRIPE_TEST_PLACEHOLDERS = {
 # ---------------------------------------------------------------------------
 # Feature flags — everything paid/external is OFF by default.
 # ---------------------------------------------------------------------------
-# xAI TTS (Liora voice notes). Disabled until the user explicitly approves
+# ElevenLabs TTS (Liora voice notes). Disabled until the user explicitly approves
 # paid TTS use AND supplies a key. No network calls without both.
-XAI_API_KEY = os.environ.get("CHLOE_XAI_API_KEY", "")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 VOICE_NOTES_ENABLED = os.environ.get("CHLOE_VOICE_ENABLED", "0") == "1"
 
 # Gemini (real AI chat). Set GEMINI_API_KEY as a Railway env var on the

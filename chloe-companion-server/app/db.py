@@ -7,14 +7,14 @@ without a user_id filter — see tests/test_memory_isolation.py.
 
 Character namespacing (2026-09-29): memory, conversation, and digest rows
 also carry character_id (default 'chloe'), so each character remembers him
-separately. Banks and trust state stay per-user (shared across characters).
+separately. Trust posture went per-character on 2026-10-16 (each girl has her own relationship clock). Banks stay per-user (shared across characters).
 """
 from __future__ import annotations
 
 import os
 import sqlite3
 
-from . import config
+from . import config, trust_migration
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS user_give_seen (
     PRIMARY KEY (user_id, girl_id, media_id)
 );
 
--- Trust posture: per-user relationship stage. Starts at M5 ("Trusted") on
+-- Trust posture: per-(user, character) relationship stage. Starts at M5 ("Trusted") on
 -- first use; only gates how much of herself she volunteers, never warmth.
 CREATE TABLE IF NOT EXISTS local_characters (
     id               TEXT PRIMARY KEY,   -- slug, lowercase, e.g. 'nova'
@@ -691,7 +691,7 @@ def init_db(db_path: str | None = None) -> None:
         # the schema script's new indexes reference the column. On fresh
         # installs the tables don't exist yet and the schema script creates
         # them with the column directly.
-        _migrate_character_columns(conn)
+        _migrate_character_columns(conn); trust_migration.migrate(conn)
         _migrate_auth_columns(conn)
         _migrate_submission_columns(conn)
         _migrate_creator_columns(conn)
