@@ -1,7 +1,7 @@
 /* Service worker: cache-first app shell + Web Push notifications.
    All assets are local, so the app works offline-ish once installed.
    Version the cache name on changes. */
-const CACHE = 'whispr-pwa-v5-20261017';
+const CACHE = 'whispr-pwa-v6-20261017';
 const SHELL = [
   './index.html',
   './manifest.json',
@@ -68,6 +68,7 @@ self.addEventListener('push', (event) => {
     body: data.body || 'She sent you a message.',
     icon: './icons/icon-192.png',
     badge: './icons/icon-192.png',
+    image: data.image || undefined,
     data: { url: data.url || './' },
   };
   event.waitUntil(self.registration.showNotification(title, options));
@@ -79,7 +80,10 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
       for (const w of wins) {
-        if ('focus' in w) return w.focus();
+        if ('focus' in w) {
+          if (url && url !== './' && 'navigate' in w) { try { w.navigate(url); } catch (e) {} }
+          return w.focus();
+        }
       }
       if (clients.openWindow) return clients.openWindow(url);
     })
