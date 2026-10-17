@@ -404,17 +404,24 @@
 
   /* ---------- message bubbles ---------- */
 
-  function addMsg(who, html, opts = {}) {
+  /* Pin a caption to the character who sent it. */
+function herCaption(speakerName) {
+  return (speakerName || currentGirl.name) + ' · ' + timeNow();
+}
+function addMsg(who, html, opts = {}) {
     const wrap = document.createElement('div');
     wrap.className = 'msg ' + who;
     const b = document.createElement('div');
     b.className = opts.bubbleClass || 'bubble';
     b.innerHTML = html;
     wrap.appendChild(b);
-    if (opts.caption) {
+    // opts.speakerName pins the caption to the character who sent the message,
+    // even if currentGirl changed while the reply was in flight.
+    const caption = opts.caption || (opts.speakerName ? herCaption(opts.speakerName) : '');
+    if (caption) {
       const t = document.createElement('div');
       t.className = 'msg-time';
-      t.textContent = opts.caption;
+      t.textContent = caption;
       wrap.appendChild(t);
     }
     chatLog.appendChild(wrap);
@@ -424,8 +431,8 @@
 
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  function addText(who, text, opts = {}) {
-    addMsg(who, esc(text), { caption: who === 'her' ? currentGirl.name + ' · ' + timeNow() : timeNow() });
+  function addText(who, text, opts = {}, speakerName) {
+    addMsg(who, esc(text), { caption: who === 'her' ? herCaption(speakerName) : timeNow() });
   }
 
   function addVoiceNote(url, caption) {
@@ -471,8 +478,8 @@
     } catch (e) { showToast('Audio not available here'); }
   }
 
-  function addPhotoDrop(url, caption) {
-    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' · ' + timeNow() });
+  function addPhotoDrop(url, caption, speakerName) {
+    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: herCaption(speakerName) });
     const b = wrap.firstChild;
     const isDemo = url === 'demo:photo';
     // A photo drop shows the photo she actually sent (the URL the
@@ -483,15 +490,15 @@
     // placeholder drop (no photo behind it at all) looked like a
     // picture she had tried to send (2026-10-14).
     b.innerHTML = `
-      <div class="photo-scene" style="height:auto;min-height:200px;"><img src="${url}" style="width:100%;display:block;" alt="Photo ${currentGirl.name} sent you"></div>
+      <div class="photo-scene" style="height:auto;min-height:200px;"><img src="${url}" style="width:100%;display:block;" alt="Photo ${speakerName || currentGirl.name} sent you"></div>
       <div class="photo-caption">
         ${isDemo ? '<span class="demo-tag">DEMO PHOTO</span><br>' : ''}
         ${esc(caption || '')}
       </div>`;
   }
 
-  function addGeneratedImage(url) {
-    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: currentGirl.name + ' · ' + timeNow() });
+  function addGeneratedImage(url, speakerName) {
+    const wrap = addMsg('her', '', { bubbleClass: 'photo-bubble', caption: herCaption(speakerName) });
     const b = wrap.firstChild;
     b.innerHTML = `
       <div class="photo-scene" style="height:auto;min-height:200px;"><img src="${url}" style="width:100%;display:block;" alt="Image Hannah made"></div>
@@ -585,11 +592,11 @@
       </div>`;
   }
 
-  function addAttachments(who, attachments) {
+  function addAttachments(who, attachments, speakerName) {
     if (!Array.isArray(attachments) || !attachments.length) return;
     const wrap = addMsg(who, '', {
       bubbleClass: 'attachment-bubble',
-      caption: who === 'her' ? currentGirl.name + ' · ' + timeNow() : timeNow(),
+      caption: who === 'her' ? herCaption(speakerName) : timeNow(),
     });
     wrap.firstChild.innerHTML = attachments.map(attachmentCard).join('');
     scrollBottom();
@@ -708,6 +715,7 @@
   /* ---------- chat flow ---------- */
 
   let sending = false;
+let presetSheetGirl = null;
 
   async function sendMessage(text) {
     text = (text || '').trim();
@@ -726,6 +734,7 @@
     if (!text && !readyAttachments.length) return; if (messagesRemaining !== null && messagesRemaining <= 0) { showPaywall(true); showToast("You're out of messages — top up to keep chatting", 3200); return; }
     sending = true;
     const targetCharacterId = currentGirl.id;
+  const targetCharacterName = currentGirl.name;
     const requestedUpdateDelay = parseUpdateDelay(text);
     if (readyAttachments.length) addAttachments('him', readyAttachments);
     if (text) addText('him', text);
@@ -744,14 +753,20 @@
       setCharacterStatus(targetCharacterId, inferCharacterStatus(res.reply_text, text));
       if (requestedUpdateDelay) scheduleCharacterUpdate(targetCharacterId, requestedUpdateDelay);
       typingRow.classList.add('hidden');
-      if (res.voice_note_url) {
-        addVoiceNote(res.voice_note_url, res.reply_text);
-      } else {
-        addText('her', res.reply_text || '…');
-      }
-      if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '');
-      if (res.image_url) addGeneratedImage(res.image_url);
-      if (res.sogni_login_box) addSogniLoginButton();
+  if (currentGirl.id !== targetCharacterId) {
+    // She replied while another chat was open: don't paint her reply into
+    // the wrong thread. The reply is already saved in her own history.
+    showToast(targetCharacterName + ' replied in her chat', 3200);
+  } else {
+    if (res.voice_note_url) {
+      addVoiceNote(res.voice_note_url, res.reply_text);
+    } else {
+      addText('her', res.reply_text || '…', {}, targetCharacterName);
+    }
+    if (res.photo_url) addPhotoDrop(res.photo_url, res.photo_caption || '', targetCharacterName);
+    if (res.image_url) addGeneratedImage(res.image_url, targetCharacterName);
+    if (res.sogni_login_box) addSogniLoginButton();
+  }
       setMessagesRemaining(res.messages_remaining);
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
@@ -802,21 +817,22 @@
   };
 
   $('plusBtn').addEventListener('click', async () => {
-    const list = $('presetList');
+  presetSheetGirl = { id: currentGirl.id, name: currentGirl.name };
+  const list = $('presetList');
     list.innerHTML = '';
     let presets = [];
     try {
-      const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(currentGirl.id));
+      const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(presetSheetGirl.id));
       if (r.ok) {
         const d = await r.json();
         presets = d.presets || [];
       }
     } catch (e) { /* fall through to the bundled map */ }
     if (!presets.length) {
-      presets = PRESETS[currentGirl.id] || [];
+      presets = PRESETS[presetSheetGirl.id] || [];
     }
     if (!presets.length) {
-      list.innerHTML = '<div class="sheet-sub">No presets yet for ' + currentGirl.name + '.</div>';
+      list.innerHTML = '<div class="sheet-sub">No presets yet for ' + presetSheetGirl.name + '.</div>';
     }
     presets.forEach((p) => {
       const el = document.createElement('div');
@@ -907,21 +923,22 @@
     await new Promise((r) => setTimeout(r, 1200));
     typingRow.classList.add('hidden');
     try {
-      const res = await ApiClient.requestPreset(currentGirl.id, presetName);
+  const girl = presetSheetGirl || { id: currentGirl.id, name: currentGirl.name };
+  const res = await ApiClient.requestPreset(girl.id, presetName);
       if (res.video_url) {
-        addPresetMediaBubble(res.video_url, res.media_type || 'video', presetName);
+        addPresetMediaBubble(res.video_url, res.media_type || 'video', presetName, girl.name);
       } else {
-        addText('her', 'let me find that for you… one sec');
+        addText('her', 'let me find that for you… one sec', {}, girl.name);
       }
     } catch (e) {
-      addText('her', 'hmm, couldn\'t pull that one up. try again?');
+      addText('her', 'hmm, couldn\'t pull that one up. try again?', {}, girl.name);
     }
   }
 
-  function addPresetMediaBubble(url, mediaType, presetName) {
+  function addPresetMediaBubble(url, mediaType, presetName, speakerName) {
     const wrap = addMsg('her', '', {
       bubbleClass: 'photo-bubble',
-      caption: currentGirl.name + ' · ' + timeNow(),
+      caption: herCaption(speakerName),
     });
     const b = wrap.firstChild;
     const mediaHtml = mediaType === 'image'
