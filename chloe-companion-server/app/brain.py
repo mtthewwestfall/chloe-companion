@@ -944,8 +944,11 @@ class GenericMouth:
 # canned engine, so the app never 500s or goes silent because of this
 # path. The key value is never logged or printed.
 # ---------------------------------------------------------------------------
-_GEMINI_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
-               "gemini-3.1-flash-lite:generateContent")
+# The model segment is the head of the gemini_keys fallback chain
+# (GEMINI_MODEL_CHAIN): gemini_keys.post_json rewrites it to whichever
+# chain model is currently serving traffic, so chat rides out a primary
+# overload on the next model instead of burning every key against a wall.
+_GEMINI_URL = gemini_keys.model_url(gemini_keys.model_chain()[0])
 
 
 _ROCKY_CONTEXT_CACHE: dict[str, str | None] = {"text": None}
@@ -1189,8 +1192,10 @@ def gemini_generate(user_text: str, context: dict[str, Any],
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
         ],
     }
-    # Key rotation (app/gemini_keys.py): free keys first, paid fallback,
-    # transparent failover on 429/402/errors. None when pool is exhausted.
+    # Key rotation + model fallback (app/gemini_keys.py): free keys first,
+    # paid fallback, transparent failover on 429/402/errors and on model
+    # overload (the primary model segment above is rewritten to the chain
+    # model currently serving traffic). None when pool is exhausted.
     data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=30,
                                      source="whispr-chat")
     if not data:

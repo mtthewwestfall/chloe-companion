@@ -12,7 +12,13 @@ blame no key and stop the walk), daily-usage pacing in candidate
 ordering, the unconditional fail-fast (no all-keys last-resort
 sweep), the leaner prober (per-cycle cap, near-expiry probing only),
 and error_class recorded on usage rows.
+
+Model fallback (2026-10-17): per-model overload tracking ('model'
+error class, no key blame), GEMINI_MODEL_CHAIN-ordered failover
+inside post_json, idle-cycle prober coverage for every chain model,
+and per-model status in degradation_info()["models"].
 """
+import io
 import json
 import os
 import sqlite3
@@ -56,11 +62,17 @@ class GeminiKeysTestBase(unittest.TestCase):
         gemini_keys._probes_total = 0
         gemini_keys._probes_ok = 0
         gemini_keys._transient_streaks.clear()
+        # Reset per-model fallback state (2026-10-17).
+        gemini_keys._model_hot_until.clear()
+        gemini_keys._model_overload_events.clear()
+        gemini_keys._model_probe_at.clear()
+        gemini_keys._model_belief.clear()
         self._env = {}
         for name in ("GEMINI_MAX_ATTEMPTS", "GEMINI_FAST_TIMEOUT_S",
                      "GEMINI_ATTEMPT_BUDGET_S", "GEMINI_HEDGE_AFTER_S",
                      "GEMINI_PER_KEY_RPM", "GEMINI_RESERVE_COUNT",
-                     "GEMINI_PROBE_INTERVAL_S", "GEMINI_PROBER"):
+                     "GEMINI_PROBE_INTERVAL_S", "GEMINI_PROBER",
+                     "GEMINI_MODEL_CHAIN", "GEMINI_MODEL_COOLDOWN_S"):
             self._env[name] = os.environ.pop(name, None)
 
     def tearDown(self):
@@ -519,6 +531,15 @@ class TestHealthInfo(GeminiKeysTestBase):
         self.assertIn("pool", info)
         self.assertIn("prober", info)
         self.assertIn("running", info["prober"])
+        # Model fallback (2026-10-17): per-model status is exposed.
+        self.assertIn("models", info)
+        models = {m["model"]: m for m in info["models"]}
+        self.assertIn("gemini-3.1-flash-lite", models)
+        self.assertIn("gemini-2.5-flash-lite", models)
+        primary = models["gemini-3.1-flash-lite"]
+        self.assertTrue(primary["primary"])
+        self.assertTrue(primary["serving"])
+        self.assertFalse(primary["hot"])
 
 
 class TestMasking(GeminiKeysTestBase):
@@ -688,7 +709,7 @@ class TestFailFastEverywhere(GeminiKeysTestBase):
                                side_effect=fake):
             result = gemini_keys.post_json("https://example.com/gen",
                                            {"x": 1}, source="plain-app")
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
         self.assertEqual(calls, [])
 
 
@@ -723,18 +744,131 @@ class TestLeanProber(GeminiKeysTestBase):
         self.assertEqual(calls, [])
 
     def test_prober_confirm_window_is_lean(self):
+        # Model fallback (2026-10-17): the prober now also covers every
+        # model in GEMINI_MODEL_CHAIN. An idle cycle — no due primary
+        # probe — sends one probe per due non-primary chain model instead
+        # of staying fully quiet.
         k = self._add("idle-key", "i", False)
         gemini_keys.report_success(k["id"])
         # Belief is 300s old: fresher than the 420s confirm window, so
-        # no re-confirm probe (the old code re-probed at 120s).
+        # no primary re-confirm probe — but the fallback model is due.
         gemini_keys._belief[k["id"]]["at"] = time.time() - 300
-        calls = self._patch_http(lambda kv: {"ok": True})
-        gemini_keys._probe_cycle()
-        self.assertEqual(calls, [])
-        # At 500s (> confirm window, < belief TTL) it re-confirms.
+        probed_models = []
+
+        def fake(url, payload, key_value, timeout):
+            probed_models.append(gemini_keys._model_from_url(url))
+            return {"ok": True}
+
+        with mock.patch.object(gemini_keys, "_http_post",
+                               side_effect=fake):
+            sent = gemini_keys._probe_cycle()
+        self.assertEqual(sent, 1)
+        self.assertEqual(probed_models, ["gemini-2.5-flash-lite"])
+
+    def test_prober_reconfirms_after_confirm_window(self):
+        # At 500s (> confirm window, < belief TTL) the primary IS due
+        # for a re-confirm probe, so the cycle is not idle and no
+        # fallback-model probe fires on top of it.
+        k = self._add("idle-key", "i", False)
+        gemini_keys.report_success(k["id"])
         gemini_keys._belief[k["id"]]["at"] = time.time() - 500
-        gemini_keys._probe_cycle()
-        self.assertEqual(calls, ["idle-key"])
+        probed_models = []
+
+        def fake(url, payload, key_value, timeout):
+            probed_models.append(gemini_keys._model_from_url(url))
+            return {"ok": True}
+
+        with mock.patch.object(gemini_keys, "_http_post",
+                               side_effect=fake):
+            sent = gemini_keys._probe_cycle()
+        self.assertEqual(sent, 1)
+        self.assertEqual(probed_models, ["gemini-3.1-flash-lite"])
+
+
+class TestModelFallback(GeminiKeysTestBase):
+    """Model fallback (2026-10-17): when the primary chain model is
+    overloaded across keys, post_json routes to the next chain model;
+    overload is never blamed on keys."""
+
+    def _overload_error(self, code=503):
+        # Real Gemini overload shape: 503 + "overloaded"/"UNAVAILABLE"
+        # in the body, which _attempt reads via e.read().
+        body = (b'{"error": {"code": 503, "message": "The model is '
+                b'overloaded. Please try again later.", '
+                b'"status": "UNAVAILABLE"}}')
+        return urllib.error.HTTPError("https://example.test/gen", code,
+                                      "err", None, io.BytesIO(body))
+
+    def _patch_http(self, behavior):
+        """behavior: fn(url, key_value) -> dict (or raises)."""
+        calls = []
+
+        def fake(url, payload, key_value, timeout):
+            calls.append((gemini_keys._model_from_url(url), key_value))
+            return behavior(url, key_value)
+
+        patcher = mock.patch.object(gemini_keys, "_http_post",
+                                    side_effect=fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    def test_chain_defaults(self):
+        self.assertEqual(gemini_keys.model_chain(),
+                         ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite"])
+        self.assertEqual(gemini_keys.current_model(),
+                         "gemini-3.1-flash-lite")
+        self.assertIn("gemini-3.1-flash-lite:generateContent",
+                      gemini_keys.model_url("gemini-3.1-flash-lite"))
+
+    def test_chain_env_override(self):
+        os.environ["GEMINI_MODEL_CHAIN"] = "a-model,b-model"
+        self.assertEqual(gemini_keys.model_chain(), ["a-model", "b-model"])
+        self.assertEqual(gemini_keys.current_model(), "a-model")
+
+    def test_overload_marks_primary_hot_and_reroutes(self):
+        # Two keys both hit an overloaded primary: the primary goes hot
+        # and the walk reroutes to the fallback model mid-call.
+        self._add("ok1", "a", False)
+        self._add("ok2", "b", False)
+
+        def behavior(url, key_value):
+            if gemini_keys._model_from_url(url) == "gemini-3.1-flash-lite":
+                raise self._overload_error()
+            return {"ok": True}
+
+        calls = self._patch_http(behavior)
+        result = gemini_keys.post_json(
+            gemini_keys.model_url("gemini-3.1-flash-lite"), {"x": 1})
+        self.assertIsNotNone(result)
+        models_hit = [m for m, _ in calls]
+        self.assertIn("gemini-3.1-flash-lite", models_hit)
+        self.assertIn("gemini-2.5-flash-lite", models_hit)
+        # Primary is hot now: the next call goes straight to fallback.
+        calls2 = self._patch_http(lambda url, kv: {"ok": True})
+        gemini_keys.post_json(
+            gemini_keys.model_url("gemini-3.1-flash-lite"), {"x": 1})
+        self.assertTrue(all(m == "gemini-2.5-flash-lite"
+                            for m, _ in calls2))
+
+    def test_overload_blames_no_key(self):
+        # 'model'-class failures take no key-health consequences.
+        k = self._add("m-key", "m", False)
+        gemini_keys.report_failure(k["id"], "model")
+        row = {x["id"]: x for x in gemini_keys.list_keys()}[k["id"]]
+        self.assertEqual(row["consecutive_failures"], 0)
+        self.assertEqual(row["total_failures"], 0)
+        self.assertIsNone(row["quota_exhausted_until"])
+        self.assertEqual(row["total_requests"], 1)
+
+    def test_explicit_pin_passes_through(self):
+        # A URL naming a non-primary model is never rewritten.
+        self._add("pin-key", "p", False)
+        calls = self._patch_http(lambda url, kv: {"ok": True})
+        url = gemini_keys.model_url("gemini-2.5-flash-lite")
+        gemini_keys.post_json(url, {"x": 1})
+        self.assertEqual([m for m, _ in calls],
+                         ["gemini-2.5-flash-lite"])
 
 
 if __name__ == "__main__":
