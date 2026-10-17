@@ -29,8 +29,8 @@ jobs:
           rep("function addMsg(who, html, opts = {}) {",
               "/* Pin a caption to the character who sent it. Callers pass the speaker name" + N + "   explicitly so a reply that arrives after a character switch is still" + N + "   captioned with the right name (see sendMessage / sendPresetVideo). */" + N + "function herCaption(speakerName) {" + N + "  return (speakerName || currentGirl.name) + ' \u00b7 ' + timeNow();" + N + "}" + N + "function addMsg(who, html, opts = {}) {",
               "helper")
-          rep("  wrap.appendChild(b);" + N + "  if (opts.caption) {",
-              "  wrap.appendChild(b);" + N + "  // opts.speakerName pins the caption to the character who sent the message," + N + "  // even if currentGirl changed while the reply was in flight." + N + "  const caption = opts.caption || (opts.speakerName ? herCaption(opts.speakerName) : '');" + N + "  if (caption) {",
+          rep("    wrap.appendChild(b);" + N + "    if (opts.caption) {",
+              "    wrap.appendChild(b);" + N + "    // opts.speakerName pins the caption to the character who sent the message," + N + "    // even if currentGirl changed while the reply was in flight." + N + "    const caption = opts.caption || (opts.speakerName ? herCaption(opts.speakerName) : '');" + N + "    if (caption) {",
               "addMsg-caption")
           rep("    t.textContent = opts.caption;",
               "    t.textContent = caption;",
