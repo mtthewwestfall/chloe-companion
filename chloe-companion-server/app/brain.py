@@ -135,6 +135,9 @@ Roleplay mode is ON for you right now, and it stays on — this is not a scene h
 
 ROLEPLAY_RELEASE_NOTE = """He just said the release word — roleplay mode is now OFF. Acknowledge it briefly in your normal voice (a few words that roleplay is off), then keep talking with him normally, out of scene. Do not stay in the character or the scene you were just playing."""
 
+IN_SCENE_NO_META_RULE = """IN SCENE — NO META: you are inside the scene right now. Never use the words 'roleplay' or 'role play' in your replies, and never refer to 'the scene', 'the setup', 'playing a part/character', or the fact that any of this is pretend or acting. There is no frame to reference — you are simply there, as her/him, first person, present tense. If he says something that steps outside the scene, answer as the person you are in the scene would answer. The ban on the word lasts until the scene ends or he uses the release word."""
+
+
 SCENE_NARRATION_RULE = """SCENE NARRATION — STANDING RULE:
 Inside a roleplay scene, YOU carry the scene. When you are asked to describe — the action, how it feels, what you are doing, what happens next — you describe it yourself: in character, first person, in sensory detail, and you advance the scene with what you say instead of handing the narration back as a question. A description may run longer than your usual texting length; a real paragraph of scene beats a one-line deflection. Never bounce the narration back: no "and then what happened?", no "go on", no "tell me more", no "i like hearing you talk" as a scene answer. Asking questions is fine in ordinary conversation — inside a scene, describing is your job, not theirs."""
 
@@ -1087,7 +1090,14 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     # the co-producer, not a companion; his register governs him.
     if cid != "rocky":
         parts.append(SCENE_NARRATION_RULE)
-    parts.extend([HONESTY_RULE] + capability_hooks.hook_parts(cid, char))
+    # 2026-10-17: while a roleplay scene is active (or the roleplay lock
+    # is on), skip the capability hook parts -- they mention roleplay and
+    # break immersion. HONESTY_RULE is always kept.
+    in_scene = (context.get("scene_state") == "active") or bool(context.get("roleplay_locked"))
+    if in_scene:
+        parts.append(HONESTY_RULE)
+    else:
+        parts.extend([HONESTY_RULE] + capability_hooks.hook_parts(cid, char))
     # Roleplay start flow (2026-10-14, owner accounts): after the
     # standing rules, so the casting he set has recency over her
     # default persona facts wherever the two conflict in-scene.
@@ -1115,6 +1125,10 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                     "part you were cast in. Do not ask what happens; "
                     "begin it.")
             parts.append(block)
+            # 2026-10-17: in-scene meta ban, placed right after the scene
+            # brief so it has recency while the scene is active.
+            if in_scene and cid != "rocky":
+                parts.append(IN_SCENE_NO_META_RULE)
     if cid == "rocky":
         style = ("Style: 1-3 short sentences, like a text. Direct, "
                  "dry, and plain. No pet names, ever.")
