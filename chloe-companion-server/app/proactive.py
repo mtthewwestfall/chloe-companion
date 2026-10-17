@@ -9,9 +9,10 @@ conversation history:
             last 48h — lapsed users get nudges instead.
   nudge   — when he hasn't written to that character in 24h+.
 
-Generation goes through brain.compose_proactive_message (live Gemini
-when the key pool is healthy, her local voice engine otherwise), so
-every opener is in character.
+Generation goes through brain.gemini_generate (live Gemini with an
+initiation instruction, run through her normal audit pipeline), so
+every opener is in character. Falls back to a safe generic line when
+Gemini is unavailable — the scheduler never breaks on generation.
 
 Delivery:
   Telegram — user_ids shaped "tg_<chat_id>" (linked via
@@ -316,9 +317,10 @@ def should_send_nudge(conn: sqlite3.Connection, user_id: str,
 
 def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
                                character_id: str, message_type: str) -> str:
-    """Generate one opener in character via brain.py. Never raises —
-    falls back to a safe generic line so the scheduler never dies on
-    generation."""
+    """Generate one opener in character via brain.py's live Gemini
+    (initiation instruction, same audit pipeline as normal replies).
+    Never raises — falls back to a safe generic line so the scheduler
+    never dies on generation."""
     mtype = message_type if message_type in MESSAGE_TYPES else "nudge"
     try:
         user = store.get_or_create_user(conn, user_id)
@@ -326,9 +328,26 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
         cid = character.get("id") or "chloe"
         seed = "good morning" if mtype == "morning" else "it's been a while"
         ctx = brain.build_brain_context(conn, user_id, user, seed, character)
-        text = brain.compose_proactive_message(mtype, ctx, cid)
-        if text and text.strip():
-            return text.strip()
+        if mtype == "morning":
+            prompt = (
+                "Write a brief, warm morning greeting to him, in your voice, "
+                "as if you're texting him first thing. 1-2 short sentences. "
+                "Do not mention being an AI."
+            )
+        else:
+            prompt = (
+                "Write a brief, warm check-in to him — it's been a while since "
+                "he messaged you and you miss him. 1-2 short sentences, in your "
+                "voice, like a text. Do not mention being an AI."
+            )
+        draft = brain.gemini_generate(prompt, ctx, cid)
+        if draft and draft.strip():
+            if cid == "rocky":
+                draft = brain._sanitize_rocky_reply(draft)
+            if not brain._polices_his_speech(draft):
+                text = brain.audit_reply(draft.strip(), ctx)
+                if text and text.strip():
+                    return text.strip()
     except Exception as e:
         print(f"[proactive] generation failed for {user_id}/{character_id}: "
               f"{e.__class__.__name__}", flush=True)
