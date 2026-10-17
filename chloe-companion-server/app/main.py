@@ -3857,6 +3857,17 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
     mode = obj.get("mode")
     ref = ((obj.get("client_reference_id") or "").strip()
            or ((obj.get("metadata") or {}).get("user_id") or "").strip())
+    if not ref:
+        # Fallback (2026-10-17): the web app historically opened the bare
+        # payment links without client_reference_id, so paid checkouts
+        # arrived anonymous and were silently ignored. Resolve the buyer
+        # from the email entered at checkout instead of dropping the sale.
+        email = (((obj.get("customer_details") or {}).get("email") or "")
+                 or (obj.get("customer_email") or "")).strip().lower()
+        if email:
+            u = store.get_user_by_email(conn, email)
+            if u:
+                ref = (u.get("user_id") or "").strip()
     if obj.get("payment_status") != "paid":
         return {"ok": True, "ignored": "not paid yet"}
     if mode == "subscription":
@@ -3875,7 +3886,9 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "user_id": ref, "tier": tier, "action": "subscribed"}
     if mode == "payment":
         # One-time $0.99 trial -> 100 messages, one per customer (no tier change).
-        if (obj.get("payment_link") or "") == config.TRIAL_LINK_ID and ref:
+        if (obj.get("payment_link") or "") == config.TRIAL_LINK_ID:
+            if not ref:
+                return {"ok": True, "ignored": "trial link but buyer unresolved"}
             granted = store.grant_trial_messages(conn, ref, config.TRIAL_MESSAGES)
             return {"ok": True, "user_id": ref,
                     "action": "trial_granted" if granted else "trial_already_used"}
