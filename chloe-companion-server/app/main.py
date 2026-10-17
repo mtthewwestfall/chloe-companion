@@ -78,6 +78,9 @@ from pydantic import BaseModel
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import push_routes, sims_saves
+from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, onboarding, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, character_trust, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
 app.add_middleware(
@@ -1016,7 +1019,7 @@ def chat(body: ChatIn, request: Request):
         # Trust posture: advance the stage clock (at most one stage per
         # check). This NEVER gates warmth — only how much of herself she
         # has volunteered so far.
-        trust.maybe_advance(conn, user_id)
+        character_trust.maybe_advance(conn, user_id, cid)
 
         # Brain context: 3-layer memory stack (recent turns -> rolling
         # digest -> pinned facts + relevant memories) + trust posture line.
@@ -1107,7 +1110,8 @@ def chat(body: ChatIn, request: Request):
                 pass
 
         # Brain: mouth -> auditor (auditor is a pass-through stub in Phase 2).
-        reply_text = brain.compose_reply(effective_message, context, cid)
+      reply_text = brain.compose_reply(effective_message, context, cid)
+
 
         # Rocky claim gate, part 2: the deterministic claim screen.
         # A dev action/result assertion ships only when a real queue
@@ -1129,11 +1133,13 @@ def chat(body: ChatIn, request: Request):
         # Voice note: xAI TTS, gated on CHLOE_XAI_API_KEY + CHLOE_VOICE_ENABLED=1.
         # Credit is consumed ONLY after a note is actually generated (never on failure).
         voice_note_url = None
-        tier_cfg = config.TIERS[user["tier"]]
-        if tier_cfg["voice_notes_per_month"] > 0 and len(reply_text) <= 280:
+        tier_cfg = config.TIERS[user["tier"]]; _o=onboarding.stage(context)if cid!="rocky"else None; _vs=onboarding.voice_note_script(character)if _o==onboarding.STAGE_VOICE_NOTE else reply_text
+
+      
+        if tier_cfg["voice_notes_per_month"] > 0 and len(_vs) <= 280:
             has_quota = is_owner or (user.get("voice_notes_remaining") or 0) > 0
             voice_note_url = voice.maybe_generate_voice_note(
-            reply_text, user_id, character.get("companion_voice") or "liora", quota=has_quota, consume=(lambda: store.consume_voice_note(conn, user_id)) if not is_owner else None)
+            _vs, user_id, character.get("companion_voice") or "liora", quota=has_quota, consume=(lambda: store.consume_voice_note(conn, user_id)) if not is_owner else None)
 
         # Photo drop: tier-gated serving hook. Chloe's curated drops only —
         # other characters get no photos (never Chloe's photos on them).
@@ -1141,7 +1147,7 @@ def chat(body: ChatIn, request: Request):
         # here always has a real file; the drop carries its OWN caption
         # (the client used to caption the card with the reply text, which
         # printed her reply twice — bubble + card — 2026-10-14).
-        photo_url = None
+        reply_text=onboarding.with_voice_note_tease(reply_text,character)if _o==onboarding.STAGE_VOICE_NOTE and voice_note_url else(onboarding.with_roleplay_tease(reply_text,character)if _o==onboarding.STAGE_VOICE_NOTE else(onboarding.with_checkin_nudge(reply_text,character)if _o==onboarding.STAGE_CHECKIN and(config.TIERS.get(user["tier"])or{}).get("proactive")else reply_text)); photo_url = None
         photo_caption = None
         if cid == "chloe":
             drop = photos.maybe_drop_photo(user["tier"], user["messages_used_total"] + 1)
@@ -3455,7 +3461,7 @@ def auth_verify(token: str = ""):
         # Chloe opens with her line the moment the email is verified — it
         # lands as the first turn in his chat history when the app loads.
         if not store.recent_turns(conn, user_id, 1, "chloe"):
-            store.log_turn(conn, user_id, "chloe", WELCOME_LINE, "chloe")
+            store.log_turn(conn, user_id, "chloe", onboarding.greeting_line({"id": "chloe", "name": "Chloe"}), "chloe")
         # JVZoo affiliate channel (2026-09-30): attach any paid JVZoo
         # subscription bought under this email before the account existed.
         _user = store.get_or_create_user(conn, user_id)

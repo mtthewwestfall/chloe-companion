@@ -12,13 +12,15 @@ const SHELL = [
   './js/api.js',
   './js/app.js',
   './js/pwa.js',
+  './js/proactive.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/apple-touch-icon.png'
+  './icons/apple-touch-icon.png',
 ];
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())
+    caches.open(CACHE).then((cache) => cache.addAll(SHELL))
+      .then(() => self.skipWaiting())
   );
 });
 self.addEventListener('activate', (event) => {
@@ -37,14 +39,16 @@ self.addEventListener('fetch', (event) => {
       if (cached) return cached;
       return fetch(event.request).then((resp) => {
         // Cache same-origin GETs for offline use.
-        if (resp && resp.ok && new URL(event.request.url).origin === self.location.origin) {
+        if (resp && resp.ok &&
+            new URL(event.request.url).origin === self.location.origin) {
           const copy = resp.clone();
           caches.open(CACHE).then((cache) => cache.put(event.request, copy));
         }
         return resp;
       }).catch(() => {
         // Offline fallback for navigations.
-        if (event.request.mode === 'navigate') return caches.match('./index.html');
+        if (event.request.mode === 'navigate')
+          return caches.match('./index.html');
         throw new Error('offline');
       });
     })
