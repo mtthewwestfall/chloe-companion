@@ -2269,18 +2269,19 @@ class HerDayInjectIn(BaseModel):
     girl_id: str
     caption: str = ""
     video_b64: str = ""
+    image_b64: str = ""
     filename: str = ""
     user_id: str = ""  # empty = all users
 
 
 @app.post("/api/v1/admin/her-day/inject")
 def admin_her_day_inject(body: HerDayInjectIn, request: Request):
-    """Admin: inject a pre-made video as a Whispr Feed post for today.
+    """Admin: inject a pre-made video or image as a Whispr Feed post.
 
-    Body: girl_id, caption, video_b64 (base64 mp4), filename, user_id
-    (empty = all users). Saves the video under GENERATED_DIR and creates
-    one video post per target user. Used to load hand-made Whispr Feed
-    clips without going through Sogni generation.
+    Body: girl_id, caption, video_b64 (base64 mp4) OR image_b64 (base64
+    webp/jpg/png), filename, user_id (empty = all users). Saves the file
+    under GENERATED_DIR and creates one post per target user. Used to
+    load hand-made Whispr Feed moments without Sogni generation.
     """
     _require_admin(request)
     import base64 as _b64
@@ -2288,22 +2289,29 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
     gid = (body.girl_id or "").strip().lower()
     if not gid:
         raise HTTPException(status_code=400, detail="girl_id required")
-    if not body.video_b64:
-        raise HTTPException(status_code=400, detail="video_b64 required")
+    if body.video_b64:
+        kind, payload = "video", body.video_b64
+        exts, default_name = (".mp4",), "clip.mp4"
+    elif body.image_b64:
+        kind, payload = "image", body.image_b64
+        exts, default_name = (".webp", ".jpg", ".jpeg", ".png"), "image.webp"
+    else:
+        raise HTTPException(status_code=400,
+                            detail="video_b64 or image_b64 required")
     date_str = _dt.now().strftime("%Y-%m-%d")
-    safe = "".join(c for c in (body.filename or "clip.mp4")
-                   if c.isalnum() or c in "._-") or "clip.mp4"
-    if not safe.lower().endswith(".mp4"):
-        safe += ".mp4"
+    safe = "".join(c for c in (body.filename or default_name)
+                   if c.isalnum() or c in "._-") or default_name
+    if not safe.lower().endswith(exts):
+        safe += exts[0]
     fname = f"herday_inject_{gid}_{date_str}_{safe}"
     os.makedirs(config.GENERATED_DIR, exist_ok=True)
     dest = os.path.join(config.GENERATED_DIR, fname)
     try:
         with open(dest, "wb") as f:
-            f.write(_b64.b64decode(body.video_b64))
+            f.write(_b64.b64decode(payload))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400,
-                            detail=f"bad video_b64: {e}") from e
+                            detail=f"bad base64 payload: {e}") from e
     media_url = "/generated/" + fname
     conn = _conn()
     try:
@@ -2315,7 +2323,7 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
         created = 0
         for uid in user_ids:
             store.save_her_day_post(
-                conn, uid, gid, post_type="video",
+                conn, uid, gid, post_type=kind,
                 media_url=media_url, caption=body.caption or "")
             created += 1
         return {"ok": True, "created": created, "media_url": media_url,
@@ -3330,14 +3338,12 @@ def admin_grant_messages(body: GrantMessagesIn, request: Request):
         raise HTTPException(status_code=400, detail="user_id required")
     conn = _conn()
     try:
-        cur = conn.execute(
+        conn.execute(
             """UPDATE users SET messages_remaining = messages_remaining + ?,
                                  updated_at = datetime('now')
                WHERE user_id = ?""",
             (n, uid),
         )
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="user not found")
         conn.commit()
         row = conn.execute(
             "SELECT messages_remaining FROM users WHERE user_id = ?",
