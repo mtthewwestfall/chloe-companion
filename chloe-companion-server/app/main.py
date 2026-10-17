@@ -3330,12 +3330,14 @@ def admin_grant_messages(body: GrantMessagesIn, request: Request):
         raise HTTPException(status_code=400, detail="user_id required")
     conn = _conn()
     try:
-        conn.execute(
+        cur = conn.execute(
             """UPDATE users SET messages_remaining = messages_remaining + ?,
                                  updated_at = datetime('now')
                WHERE user_id = ?""",
             (n, uid),
         )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="user not found")
         conn.commit()
         row = conn.execute(
             "SELECT messages_remaining FROM users WHERE user_id = ?",
