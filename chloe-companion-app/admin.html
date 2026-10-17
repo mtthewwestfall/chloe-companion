@@ -95,6 +95,16 @@
     <button onclick="backfillHerDay(this)">Repair today's Her Day images</button>
     <span id="backfillMsg" style="margin-left:8px;color:#555"></span>
   </div>
+  <div style="margin:10px 0;border:1px solid #ddd;border-radius:8px;padding:10px">
+    <div style="font-weight:600;margin-bottom:6px">Post a Feed Moment (Her Day)</div>
+    <input id="fmGirl" placeholder="girl id (chloe)" style="width:130px">
+    <input id="fmUser" value="cm_ZexuDeKs7WrpRKCi" title="user_id - blank posts to ALL users" style="width:210px">
+    <input id="fmCaption" placeholder="Caption" style="width:320px">
+    <input id="fmFile" type="file" accept="image/*,video/mp4">
+    <button onclick="postFeedMoment(this)">Post moment</button>
+    <span id="fmMsg" style="margin-left:8px;color:#555"></span>
+    <div style="color:#888;font-size:12px;margin-top:4px">Image or short mp4. The user_id targets one account (owner prefilled); clear it to post to every user.</div>
+  </div>
 
   <div id="tab-media">
     <div class="filter-bar" style="flex-wrap:wrap;">
@@ -268,6 +278,30 @@ async function api(method, path, body) {
   });
   if (res.status === 403 || res.status === 401) { alert('Invalid admin token'); localStorage.removeItem('whispr_admin_token'); location.reload(); }
   return res.json();
+}
+
+async function postFeedMoment(btn) {
+  const girl = document.getElementById('fmGirl').value.trim();
+  const user = document.getElementById('fmUser').value.trim();
+  const caption = document.getElementById('fmCaption').value;
+  const f = document.getElementById('fmFile').files[0];
+  const msg = document.getElementById('fmMsg');
+  if (!girl || !f) { msg.textContent = 'Pick a girl id and a file first.'; return; }
+  btn.disabled = true; msg.textContent = 'Posting...';
+  try {
+    const b64 = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(',')[1]);
+      r.onerror = reject;
+      r.readAsDataURL(f);
+    });
+    const body = { girl_id: girl, caption: caption, filename: f.name, user_id: user };
+    if ((f.type || '').startsWith('video')) body.video_b64 = b64; else body.image_b64 = b64;
+    const r = await api('POST', '/api/v1/admin/her-day/inject', body);
+    if (r && r.ok) { msg.textContent = 'Posted - created ' + r.created + ' - ' + r.media_url; }
+    else { msg.textContent = 'Failed: ' + ((r && r.detail) || 'unknown error'); }
+  } catch (e) { msg.textContent = 'Failed: ' + e.message; }
+  btn.disabled = false;
 }
 
 async function backfillHerDay(btn) {
