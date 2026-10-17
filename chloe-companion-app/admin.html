@@ -121,6 +121,19 @@
       <input id="newGirlName" placeholder="Display name">
       <button onclick="addGirl()">Add Character</button>
     </div>
+    <div id="girlEditor" class="hidden" style="margin:12px 0;padding:12px;border:1px solid #ddd;border-radius:10px;">
+      <div style="font-weight:700;margin-bottom:8px;">Edit character: <span id="geId"></span></div>
+      <input id="geName" placeholder="Display name" style="display:block;width:100%;margin:6px 0;">
+      <textarea id="gePersona" placeholder="Persona" rows="5" style="display:block;width:100%;margin:6px 0;"></textarea>
+      <input id="geVoice" placeholder="Voice (companion_voice, e.g. liora)" style="display:block;width:100%;margin:6px 0;">
+      <input id="geBlurb" placeholder="Blurb" style="display:block;width:100%;margin:6px 0;">
+      <input id="geAvatar" placeholder="Avatar URL (or pick a photo below)" style="display:block;width:100%;margin:6px 0;">
+      <div style="margin:6px 0;">Photo: <input type="file" id="gePhoto" accept="image/*"> <span style="color:#888;font-size:12px;">a chosen photo becomes the avatar if saved</span></div>
+      <label style="display:block;margin:6px 0;"><input type="checkbox" id="geEnabled"> Enabled</label>
+      <button onclick="saveGirl()">Save changes</button>
+      <button onclick="closeGirlEditor()">Cancel</button>
+      <span id="geMsg" style="margin-left:8px;color:#555"></span>
+    </div>
     <div id="girlList"></div>
   </div>
 
@@ -355,12 +368,78 @@ async function delMedia(id) {
   loadMedia();
 }
 
+let girlsById = {};
+let editingGirlId = '';
 async function loadGirls() {
   const data = await api('GET', '/api/v1/admin/girls');
   const girls = data.girls || data || [];
+  girlsById = {};
+  girls.forEach(g => { girlsById[g.id] = g; });
   document.getElementById('girlList').innerHTML = girls.map(g =>
-    `<div class="girl-card"><div class="girl-name">${g.name || g.id}</div><div style="color:#888;font-size:13px;">ID: ${g.id}</div></div>`
+    '<div class="girl-card"><div class="girl-name">' + (g.name || g.id) + '</div>' +
+    '<div style="color:#888;font-size:13px;">ID: ' + g.id + '</div>' +
+    '<div style="margin-top:8px;"><button onclick="editGirl(\'' + g.id + '\')">Edit</button> ' +
+    '<button onclick="deleteGirl(\'' + g.id + '\')" style="color:#b00020;">Delete</button></div></div>'
   ).join('');
+}
+
+function editGirl(id) {
+  const g = girlsById[id];
+  if (!g) return;
+  editingGirlId = id;
+  document.getElementById('geId').textContent = id;
+  document.getElementById('geName').value = g.name || '';
+  document.getElementById('gePersona').value = g.persona || '';
+  document.getElementById('geVoice').value = g.companion_voice || 'liora';
+  document.getElementById('geBlurb').value = g.blurb || '';
+  document.getElementById('geAvatar').value = g.avatar_url || '';
+  document.getElementById('geEnabled').checked = g.enabled !== false;
+  document.getElementById('gePhoto').value = '';
+  document.getElementById('geMsg').textContent = '';
+  document.getElementById('girlEditor').classList.remove('hidden');
+}
+
+function closeGirlEditor() {
+  editingGirlId = '';
+  document.getElementById('girlEditor').classList.add('hidden');
+}
+
+async function saveGirl() {
+  if (!editingGirlId) return;
+  const msg = document.getElementById('geMsg');
+  const body = {
+    name: document.getElementById('geName').value.trim(),
+    persona: document.getElementById('gePersona').value,
+    companion_voice: document.getElementById('geVoice').value.trim() || 'liora',
+    blurb: document.getElementById('geBlurb').value,
+    avatar_url: document.getElementById('geAvatar').value.trim(),
+    enabled: document.getElementById('geEnabled').checked,
+  };
+  const fileInput = document.getElementById('gePhoto');
+  const file = fileInput && fileInput.files && fileInput.files[0];
+  if (file) {
+    body.avatar_url = await new Promise(res => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => res(body.avatar_url);
+      r.readAsDataURL(file);
+    });
+  }
+  msg.textContent = 'Saving...';
+  try {
+    const r = await api('PUT', '/api/v1/admin/girls/' + encodeURIComponent(editingGirlId), body);
+    if (r && (r.girl || r.ok)) { msg.textContent = 'Saved.'; loadGirls(); loadMedia(); }
+    else msg.textContent = 'Save failed: ' + JSON.stringify(r);
+  } catch (e) { msg.textContent = 'Save failed'; }
+}
+
+async function deleteGirl(id) {
+  if (!confirm('Delete character "' + id + '"? This cannot be undone.')) return;
+  try {
+    const r = await api('DELETE', '/api/v1/admin/girls/' + encodeURIComponent(id));
+    if (r && r.ok) { if (editingGirlId === id) closeGirlEditor(); loadGirls(); loadMedia(); }
+    else alert('Delete failed: ' + JSON.stringify(r));
+  } catch (e) { alert('Delete failed'); }
 }
 
 async function addGirl() {
