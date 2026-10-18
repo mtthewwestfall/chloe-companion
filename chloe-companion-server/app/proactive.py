@@ -52,7 +52,7 @@ from zoneinfo import ZoneInfo
 
 from . import brain, characters, config, db, store
 
-MESSAGE_TYPES = ("morning", "nudge", "ambient", "winback")
+MESSAGE_TYPES = ("morning", "nudge", "ambient", "winback", "warmhour")
 
 # Per-user daily cap (mirrors scheduler.MAX_PROACTIVE_PER_DAY).
 MAX_PROACTIVE_PER_DAY = 2
@@ -330,6 +330,67 @@ def should_send_winback(conn: sqlite3.Connection, user_id: str,
         return False
     local_today = _user_local_now(user.get("timezone"), now).date() \
         .isoformat()
+    if _retention_sent_on(conn, user_id, local_today):
+        return False
+    return True
+
+
+def _last_turn_any(conn: sqlite3.Connection, user_id: str,
+                   character_id: str) -> tuple[str, datetime | None]:
+    """The pair's most recent conversation turn, whoever spoke."""
+    try:
+        row = conn.execute(
+            """SELECT role, created_at FROM conversation
+               WHERE user_id = ? AND character_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (user_id, character_id)).fetchone()
+    except Exception:
+        return "", None
+    if not row:
+        return "", None
+    return (row[0] or ""), _parse_ts(row[1])
+
+
+def should_send_warmhour(conn: sqlite3.Connection, user_id: str,
+                         character_id: str,
+                         now: datetime | None = None) -> bool:
+    """Conversion fix Item E5 (2026-10-18): the warm-hour nudge. A
+    first-day user (signed up today, his local day) who went quiet
+    mid-first-conversation — HIS was the last message, 60-120 minutes
+    ago, lifetime 1-14 — gets ONE short in-character nudge the same
+    day. Shares the retention ledger with Item B: at most one of
+    B/E5 per user per day, and the scheduler checks E5 first, so E5
+    wins on day one."""
+    if not config.CONV_WARMHOUR:
+        return False
+    _ensure_tables(conn)
+    user = _get_user(conn, user_id)
+    if not user:
+        return False
+    if not user_can_receive(conn, user_id, user):
+        return False
+    if _is_test_or_probe_user(user_id, user):
+        return False
+    total = int(user.get("messages_used_total") or 0)
+    if total < 1 or total >= config.FIRST_SESSION_MESSAGES:
+        return False
+    tz = user.get("timezone")
+    created = _parse_ts(user.get("created_at"))
+    if created is None:
+        return False
+    if _user_local_now(tz, created).date() != _user_local_now(tz, now) \
+            .date():
+        return False  # not his first day anymore
+    role, last_at = _last_turn_any(conn, user_id, character_id)
+    if role != "user" or last_at is None:
+        return False
+    tick = now or datetime.now()
+    age = tick - last_at
+    if age < timedelta(minutes=60) or age > timedelta(minutes=120):
+        return False
+    if _retention_row(conn, user_id, "warmhour") is not None:
+        return False
+    local_today = _user_local_now(tz, now).date().isoformat()
     if _retention_sent_on(conn, user_id, local_today):
         return False
     return True
@@ -697,6 +758,20 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
                 "or feeling right now, with a little warmth or tease. "
                 "Do not mention being an AI."
             ) + anniv_clause
+        elif mtype == "warmhour":
+            # Conversion fix Item E5 (2026-10-18): pick the very
+            # first conversation back up, same day, while it's warm.
+            prompt = (
+                "Write him ONE short text — you two only just started "
+                "talking today and the conversation went quiet about "
+                "an hour ago, right in the middle of it. Pick it back "
+                "up warmly, like you drifted off still thinking "
+                "about it: reference the last thing you two were "
+                "talking about and leave him something easy to "
+                "answer. 1-2 short sentences, in your voice, like a "
+                "text. No offers, no pressure. Do not mention being "
+                "an AI."
+            )
         elif mtype == "winback":
             # Conversion fix Item B (2026-10-18): the one win-back a
             # new user ever gets. The brain context carries his real
@@ -749,6 +824,8 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
         return "good morning. hope today treats you right."
     if mtype == "winback":
         return "hey you — I was just thinking about our chat. how's your day going?"
+    if mtype == "warmhour":
+        return "hey — I keep thinking about what you said earlier. tell me more?"
     return "hey — it's been a while. you good?"
 
 
@@ -818,6 +895,32 @@ def send_telegram_photo(chat_id: str, photo_url: str, caption: str) -> bool:
         return False
 
 
+def send_telegram_video(chat_id: str, video_url: str,
+                        caption: str = "") -> bool:
+    """Send a video by URL through the Whispr bot's Bot API — the
+    Item E3 early taste on the Telegram path (mirrors the photo
+    sender; Telegram fetches the URL itself, no upload)."""
+    token = config.TELEGRAM_BOT_TOKEN
+    if not token or not video_url:
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendVideo"
+    payload = json.dumps({"chat_id": chat_id, "video": video_url,
+                          "caption": (caption or "")[:1000]}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json",
+                 "User-Agent": "chloe-companion/proactive"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            return bool(data.get("ok"))
+    except Exception as e:
+        print(f"[proactive] telegram video send failed: "
+              f"{e.__class__.__name__} {getattr(e, 'code', '')}",
+              flush=True)
+        return False
+
+
 def send_web_push(conn: sqlite3.Connection, user_id: str, title: str,
                   body: str, url: str = "", image: str = "") -> int:
     """Web Push to all of the user's subscriptions. Returns the number
@@ -878,6 +981,13 @@ def _record_sent(conn: sqlite3.Connection, user_id: str, character_id: str,
             "UPDATE proactive_state SET last_morning_date = ? "
             "WHERE user_id = ? AND character_id = ?",
             (today_str, user_id, character_id))
+    elif message_type == "warmhour":
+        conn.execute(
+            "UPDATE proactive_state SET last_nudge_at = datetime('now') "
+            "WHERE user_id = ? AND character_id = ?",
+            (user_id, character_id))
+        _record_retention(conn, user_id, character_id, "warmhour",
+                          today_str)
     elif message_type == "winback":
         conn.execute(
             "UPDATE proactive_state SET last_nudge_at = datetime('now') "

@@ -45,6 +45,14 @@ def _tick() -> None:
                                                     character_id):
                 proactive.deliver_proactive_message(conn, user_id,
                                                   character_id, "morning")
+            elif proactive.should_send_warmhour(conn, user_id,
+                                                character_id):
+                # Conversion fix Item E5 (2026-10-18): checked before
+                # the win-back — on day one, the warm-hour nudge wins
+                # (the shared retention ledger caps B/E5 at one send
+                # per user per day regardless).
+                proactive.deliver_proactive_message(conn, user_id,
+                                                  character_id, "warmhour")
             elif proactive.should_send_winback(conn, user_id,
                                                character_id):
                 # Conversion fix Item B (2026-10-18): for a new user

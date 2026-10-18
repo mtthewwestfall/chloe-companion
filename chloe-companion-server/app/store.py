@@ -1337,6 +1337,107 @@ def record_give_send(conn: sqlite3.Connection, user_id: str, girl_id: str,
     conn.commit()
 
 
+def has_received_give(conn: sqlite3.Connection, user_id: str) -> bool:
+    """True when the user has ever received give media — in-chat gives
+    (user_give_history) or a fulfilled give media request."""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM user_give_history WHERE user_id = ? LIMIT 1",
+            (user_id,)).fetchone()
+        if row:
+            return True
+        row = conn.execute(
+            "SELECT 1 FROM media_requests WHERE user_id = ? "
+            "AND kind = 'give' AND status = 'ready' LIMIT 1",
+            (user_id,)).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Conversion fix Item E (2026-10-18): first-session state + open loops.
+# first_session_state carries the once-per-user "early taste" marker;
+# open_loops carries the unfinished story thread she planted in his
+# first session (one active loop per user+girl) so the Item B win-back
+# can pick it back up first.
+# ---------------------------------------------------------------------------
+def _ensure_first_session_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS first_session_state (
+            user_id      TEXT PRIMARY KEY,
+            taste_sent_at TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS open_loops (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      TEXT NOT NULL,
+            character_id TEXT NOT NULL DEFAULT 'chloe',
+            thread       TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            resolved_at  TEXT
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_open_loops_user "
+        "ON open_loops(user_id, character_id, resolved_at)")
+
+
+def taste_was_sent(conn: sqlite3.Connection, user_id: str) -> bool:
+    _ensure_first_session_tables(conn)
+    row = conn.execute(
+        "SELECT taste_sent_at FROM first_session_state "
+        "WHERE user_id = ?", (user_id,)).fetchone()
+    return bool(row and row["taste_sent_at"])
+
+
+def mark_taste_sent(conn: sqlite3.Connection, user_id: str) -> None:
+    _ensure_first_session_tables(conn)
+    conn.execute(
+        """INSERT INTO first_session_state (user_id, taste_sent_at)
+           VALUES (?, datetime('now'))
+           ON CONFLICT(user_id) DO UPDATE SET
+               taste_sent_at = datetime('now')""",
+        (user_id,))
+    conn.commit()
+
+
+def save_open_loop(conn: sqlite3.Connection, user_id: str,
+                   character_id: str, thread: str) -> None:
+    _ensure_first_session_tables(conn)
+    conn.execute(
+        "INSERT INTO open_loops (user_id, character_id, thread) "
+        "VALUES (?, ?, ?)",
+        (user_id, (character_id or "chloe").strip().lower(),
+         (thread or "").strip()[:240]))
+    conn.commit()
+
+
+def get_open_loop(conn: sqlite3.Connection, user_id: str,
+                  character_id: str) -> str | None:
+    """The active open thread for this pair, if any — unresolved and
+    planted within the last 14 days."""
+    _ensure_first_session_tables(conn)
+    row = conn.execute(
+        """SELECT thread FROM open_loops
+           WHERE user_id = ? AND character_id = ? AND resolved_at IS NULL
+             AND created_at >= datetime('now', '-14 days')
+           ORDER BY id DESC LIMIT 1""",
+        (user_id, (character_id or "chloe").strip().lower())).fetchone()
+    return (row["thread"] or None) if row else None
+
+
+def resolve_open_loop(conn: sqlite3.Connection, user_id: str,
+                      character_id: str) -> None:
+    _ensure_first_session_tables(conn)
+    conn.execute(
+        """UPDATE open_loops SET resolved_at = datetime('now')
+           WHERE user_id = ? AND character_id = ? AND resolved_at IS NULL""",
+        (user_id, (character_id or "chloe").strip().lower()))
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Requested give actions (2026-10-06): user-requested actions saved per girl,
 # usable as presets in the give flow.

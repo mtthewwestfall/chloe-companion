@@ -943,6 +943,11 @@ let presetSheetGirl = null;
         sessionStorage.setItem('whispr_trial_offer_shown', '1');
         setTimeout(() => showPaywall(false), 900);
       }
+      // Conversion fix Item E3 (2026-10-18): her early taste — she
+      // sent him something in character, unprompted.
+      if (res.give_media && res.give_media.url) {
+        addPresetMediaBubble(res.give_media.url, res.give_media.media_type || 'video', 'just for you 💛', targetCharacterName);
+      }
       maybeReferralAsk(res, text);
       if (typeof res.streak_current === 'number') {
         const prev = myStreaks[targetCharacterId] || {};

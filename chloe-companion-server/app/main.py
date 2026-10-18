@@ -1474,6 +1474,26 @@ def chat(body: ChatIn, request: Request):
         context = brain.build_brain_context(conn, user_id, user,
                                             effective_message, character)
 
+        # Conversion fix Item E (2026-10-18): first-session package.
+        # While his lifetime count is under FIRST_SESSION_MESSAGES,
+        # the brain gives his turns priority treatment and she leads
+        # (guidance rides in the context); the open thread she
+        # planted in an earlier reply rides along for the callback.
+        _first_session = bool(
+            config.CONV_FIRST_SESSION and not is_owner
+            and lifetime_before < config.FIRST_SESSION_MESSAGES)
+        if _first_session:
+            context["first_session"] = True
+            context["lifetime_before"] = lifetime_before
+            try:
+                _open_loop = store.get_open_loop(conn, user_id, cid)
+            except Exception:
+                _open_loop = None
+            if _open_loop:
+                context["open_loop"] = _open_loop
+            elif 1 <= lifetime_before <= 4:
+                context["plant_thread"] = True
+
         # Live give creation — FIRST CLAIM on an explicit ask
         # (2026-10-14 routing fix): for the four private girls, an
         # owner's plain "make me a video of you ..." ask is evaluated
@@ -1631,18 +1651,103 @@ def chat(body: ChatIn, request: Request):
         # opens the in-app credential form (POST /assist/sogni-login).
         if assist_hit and assist_hit.get("sogni_login_box"):
             resp["sogni_login_box"] = True
-        # Conversion fix Item D (2026-10-18): at real depth she offers
-        # the $0.99 trial herself — telegram gets her message in the
-        # bot flow; web gets the flag the app turns into one soft
-        # paywall showing. Never allowed to break the chat reply.
+        # Conversion fix plan (2026-10-18) — post-reply hooks for
+        # Items D and E. None of them may break the chat reply.
+        _new_total = int(user.get("messages_used_total") or 0)
         try:
-            _new_total = int(user.get("messages_used_total") or 0)
+            # Item E6: funnel markers — one event per lifetime-message
+            # crossing, countable in the Item C admin daily counts.
+            if not is_owner and _new_total in (1, 3, 5, 10, 30):
+                events.record_event(conn, user_id,
+                                    f"milestone_{_new_total}",
+                                    {"character_id": cid})
+        except Exception:
+            pass
+        try:
+            # Item D: at real depth she offers the $0.99 trial
+            # herself — telegram gets her message in the bot flow;
+            # web gets the flag the app turns into one soft paywall.
             if _trial_offer_due(conn, user, lifetime_before, _new_total):
                 _offer = _fire_trial_offer(conn, user, character, context)
                 if _offer:
                     resp["trial_offer"] = _offer
         except Exception:
             pass
+        if _first_session:
+            try:
+                # Item E4: capture the thread she planted — one small
+                # model call, only in the planting window, only until
+                # a loop is stored. Item B's win-back reads it first.
+                if 1 <= lifetime_before <= 4 \
+                        and not context.get("open_loop"):
+                    _extract = brain.gemini_generate(
+                        "Here is a message she just sent him:\n\n"
+                        + (reply_text or "")[:600]
+                        + "\n\nIf she started telling a story about "
+                          "her day or her life and left it UNFINISHED "
+                          "(trailed off, got interrupted, promised "
+                          "the rest later), reply with ONLY the "
+                          "thread in one short line, like: the story "
+                          "about her neighbor's dog. If there is no "
+                          "unfinished thread, reply with exactly: NONE",
+                        context, cid)
+                    if _extract and _extract.strip() \
+                            and _extract.strip().upper() != "NONE" \
+                            and not brain._polices_his_speech(_extract):
+                        store.save_open_loop(conn, user_id, cid,
+                                             _extract.strip())
+            except Exception:
+                pass
+            try:
+                # Item E3: the early taste — once per user, around
+                # messages 4-6, if she has give media and he has
+                # never received any. Her own framing, no ask.
+                if 3 <= lifetime_before <= 5 \
+                        and not store.taste_was_sent(conn, user_id) \
+                        and store.girl_has_give(conn, cid) \
+                        and not store.has_received_give(conn, user_id):
+                    _clip = store.pick_give_clip(conn, user_id, cid)
+                    if _clip:
+                        store.record_give_send(conn, user_id, cid,
+                                               _clip["id"])
+                        store.mark_taste_sent(conn, user_id)
+                        _url = _clip["url"]
+                        _mt = "video" if _url.lower().split("?")[0] \
+                            .endswith((".mp4", ".webm", ".mov")) \
+                            else "image"
+                        if user_id.startswith("tg_"):
+                            _cap = None
+                            try:
+                                _cap = brain.gemini_generate(
+                                    "Write ONE short line in your "
+                                    "voice to send him with a little "
+                                    "surprise clip of you — you just "
+                                    "like him, that's the whole "
+                                    "reason. Warm and playful.",
+                                    context, cid)
+                                if _cap and brain._polices_his_speech(
+                                        _cap):
+                                    _cap = None
+                            except Exception:
+                                _cap = None
+                            from . import proactive as _pro
+                            _abs = _pro._abs_media(_url)
+                            if _mt == "video":
+                                _pro.send_telegram_video(
+                                    user_id[3:], _abs,
+                                    caption=_cap or "")
+                            else:
+                                _pro.send_telegram_photo(
+                                    user_id[3:], _abs,
+                                    caption=_cap or "")
+                            store.log_turn(conn, user_id, cid,
+                                           "[sent you something 💛]",
+                                           cid)
+                        else:
+                            resp["give_media"] = {"url": _url,
+                                                   "media_type": _mt}
+            except Exception:
+                pass
         return resp
     finally:
         conn.close()

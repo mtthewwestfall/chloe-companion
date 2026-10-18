@@ -20,6 +20,7 @@ import os
 import random
 import re
 import sqlite3
+import time
 import urllib.request
 from typing import Any
 
@@ -1154,6 +1155,36 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
                 "OPERATOR CONTEXT PACK (your standing rules and "
                 "facts as his stand-in — work from them; do not "
                 "recite them back unprompted):\n" + pack)
+    # Conversion fix Item E2 (2026-10-18): first-session guidance.
+    # While his lifetime count is under 15 (the caller sets the flag),
+    # she LEADS: she carries the conversation instead of only
+    # answering, lands an easy hook in most replies, learns his name
+    # and one interest early and visibly uses them. Guidance only —
+    # every line is still improvised.
+    if context.get("first_session"):
+        parts.append(
+            "FIRST DAYS TOGETHER (he's brand new — make him want to "
+            "stay): lead the conversation, don't just answer him. "
+            "End most replies with something easy to answer — a "
+            "question, a tease, an either/or. Early on, learn his "
+            "name and one thing he's into, and then actually use "
+            "them — callback to what he told you within this same "
+            "conversation so he feels remembered. Be warm and "
+            "specific to HIM, never generic, never a menu of "
+            "options.")
+        if context.get("plant_thread"):
+            parts.append(
+                "Sometime in this reply or the next, start telling "
+                "him a little story from your day — and leave it "
+                "hanging on purpose: trail off, get interrupted, or "
+                "promise him the rest later. One thread only, kept "
+                "light — it gives him a reason to come back.")
+        _loop = (context.get("open_loop") or "").strip()
+        if _loop:
+            parts.append(
+                "THE THREAD YOU LEFT HANGING: " + _loop
+                + " — if it fits, weave it back in naturally, like "
+                  "you've been meaning to finish telling him.")
     assist_result = (context.get("assist_result") or "").strip()
     if assist_result:
         if cid == "rocky":
@@ -1384,6 +1415,14 @@ def _scene_fallback_line(context: dict[str, Any]) -> str:
     return random.choice(candidates or _SCENE_FALLBACK_LINES)
 
 
+# Conversion fix Item E1 (2026-10-18): inside a new user's first 10
+# lifetime messages the canned banks are never served — if the model
+# is truly down after retries, she holds with this one-line wait in
+# her voice instead of a stock reply.
+_FIRST_SESSION_WAIT_LINE = ("give me one sec, babe — i'm right here, "
+                            "just catching my breath 💛")
+
+
 def compose_reply(user_text: str, context: dict[str, Any],
                   character_id: str = "chloe") -> str:
     """Full brain pipeline: mouth -> auditor. Call this, not the pieces.
@@ -1406,6 +1445,28 @@ def compose_reply(user_text: str, context: dict[str, Any],
         # before any canned line may answer it.
         draft = gemini_generate(user_text, context, cid)
         from_model = bool(draft)
+    # Conversion fix Item E1 (2026-10-18): first-session turns (the
+    # caller flags the context while lifetime < FIRST_SESSION_MESSAGES)
+    # get the strongest treatment this path has — one extra model
+    # attempt before any fallback; and inside the first
+    # FIRST_SESSION_NOCANNED_MESSAGES, retries with a breath, then the
+    # wait line — the canned banks are never served.
+    _first_session = bool(context.get("first_session"))
+    _no_canned = _first_session and int(
+        context.get("lifetime_before") or 0) < 10
+    if not draft and _first_session and not scene:
+        draft = gemini_generate(user_text, context, cid)
+        from_model = bool(draft)
+    if not draft and _no_canned:
+        for _pause in (0.8, 1.6):
+            time.sleep(_pause)
+            draft = gemini_generate(user_text, context, cid)
+            if draft:
+                from_model = True
+                break
+    if not draft and _no_canned:
+        return audit_reply(_FIRST_SESSION_WAIT_LINE, context) \
+            or _FIRST_SESSION_WAIT_LINE
     if not draft:
         if cid == "chloe":
             draft = capability_hooks.mouth_with_hook(user_text, context)
