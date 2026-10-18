@@ -430,6 +430,8 @@
     $('onboarding').classList.add('hidden');
     $('app').classList.remove('hidden');
     $('chatView').classList.add('hidden');
+    const dv = $('duoView');
+    if (dv) dv.classList.add('hidden');
     $('landingView').classList.remove('hidden');
     renderGirlCards();
     loadPricing();
@@ -1222,6 +1224,135 @@ let presetSheetGirl = null;
   }
 
   $('memoryBtn').addEventListener('click', openMemorySheet);
+  /* ---------- duo mode (2026-10-17): two girls, one thread ---------- */
+  let duoPair = [];
+  let duoPicks = [];
+  let duoBusy = false;
+
+  function duoAddMsg(who, text, name) {
+    const log = $('duoLog');
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + who;
+    const b = document.createElement('div');
+    b.className = 'bubble';
+    b.textContent = text;
+    wrap.appendChild(b);
+    if (who === 'her' && name) {
+      const t = document.createElement('div');
+      t.className = 'msg-time';
+      t.textContent = name;
+      wrap.appendChild(t);
+    }
+    log.appendChild(wrap);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function openDuoPicker() {
+    duoPicks = [];
+    const list = $('duoPickList');
+    list.innerHTML = '';
+    CHARACTERS.forEach((g) => {
+      const row = document.createElement('div');
+      row.className = 'mem-item';
+      const txt = document.createElement('div');
+      txt.className = 'mem-text';
+      txt.textContent = g.name;
+      const btn = document.createElement('button');
+      btn.className = 'mem-del';
+      btn.style.width = 'auto';
+      btn.style.padding = '4px 12px';
+      btn.textContent = 'Pick';
+      btn.addEventListener('click', () => {
+        const i = duoPicks.indexOf(g.id);
+        if (i >= 0) { duoPicks.splice(i, 1); btn.textContent = 'Pick'; btn.style.opacity = ''; }
+        else {
+          if (duoPicks.length >= 2) { showToast('Two max — unpick one first', 1800); return; }
+          duoPicks.push(g.id); btn.textContent = 'Picked ✓'; btn.style.opacity = '0.65';
+        }
+        const start = $('duoStartBtn');
+        start.disabled = duoPicks.length !== 2;
+        start.textContent = duoPicks.length === 2 ? 'Start duo chat 👯' : 'Pick 2 girls';
+      });
+      row.appendChild(txt);
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+    openSheet('duoSheet');
+  }
+
+  async function startDuo() {
+    if (duoPicks.length !== 2) return;
+    duoPair = duoPicks.slice().sort();
+    const names = duoPair.map((id) => (CHARACTERS.find((c) => c.id === id) || {}).name || id);
+    $('duoName').textContent = names.join(' + ');
+    closeSheet('duoSheet');
+    $('landingView').classList.add('hidden');
+    $('chatView').classList.add('hidden');
+    $('duoView').classList.remove('hidden');
+    const log = $('duoLog');
+    log.innerHTML = '';
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/chat/duo/history?character_a=' + duoPair[0] + '&character_b=' + duoPair[1], {
+        headers: { 'Authorization': 'Bearer ' + getToken() },
+      });
+      const d = await res.json();
+      (d.turns || []).forEach((t) => {
+        if (t.role === 'user') duoAddMsg('him', t.text);
+        else {
+          const m = /^\[([^\]]+)\]\s*(.*)$/.exec(t.text || '');
+          if (m) duoAddMsg('her', m[2], m[1]);
+          else duoAddMsg('her', t.text, names[0]);
+        }
+      });
+      if (!log.children.length) {
+        duoAddMsg('her', 'okay we\'re both here 💜 what are we getting into?', names[0]);
+        duoAddMsg('her', 'this is gonna be fun 😌', names[1]);
+      }
+    } catch (e) {}
+    if (messagesRemaining !== null) $('duoCounterNum').textContent = messagesRemaining;
+  }
+
+  async function sendDuo() {
+    const input = $('duoInput');
+    const text = (input.value || '').trim();
+    if (!text || duoBusy || duoPair.length !== 2) return;
+    if (messagesRemaining !== null && messagesRemaining <= 0) { showPaywall(true); return; }
+    duoBusy = true;
+    input.value = '';
+    duoAddMsg('him', text);
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/chat/duo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
+        body: JSON.stringify({ character_a: duoPair[0], character_b: duoPair[1], message: text }),
+      });
+      if (res.status === 402) { showToast("You're out of messages — top up to keep chatting", 3000); showPaywall(true); return; }
+      const d = await res.json();
+      (d.messages || []).forEach((mm, i) => {
+        setTimeout(() => duoAddMsg('her', mm.text, mm.name), 350 * (i + 1));
+      });
+      if (typeof d.messages_remaining === 'number') {
+        setMessagesRemaining(d.messages_remaining);
+        $('duoCounterNum').textContent = d.messages_remaining;
+      }
+    } catch (e) {
+      duoAddMsg('her', 'hmm, lost you for a second. say that again?', '');
+    } finally {
+      duoBusy = false;
+    }
+  }
+
+  const duoBtnEl = $('duoBtn');
+  if (duoBtnEl) duoBtnEl.addEventListener('click', openDuoPicker);
+  const duoStartEl = $('duoStartBtn');
+  if (duoStartEl) duoStartEl.addEventListener('click', startDuo);
+  const duoBackEl = $('duoBackBtn');
+  if (duoBackEl) duoBackEl.addEventListener('click', showListView);
+  const duoSendEl = $('duoSendBtn');
+  if (duoSendEl) duoSendEl.addEventListener('click', sendDuo);
+  const duoInputEl = $('duoInput');
+  if (duoInputEl) duoInputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendDuo(); });
+
   /* ---------- voice call (2026-10-17) ---------- */
   let lastHerReply = null;
   let callActive = false;

@@ -261,6 +261,12 @@ class VoiceSayIn(BaseModel):
     text: str = ""
 
 
+class DuoChatIn(BaseModel):
+    character_a: str = ""
+    character_b: str = ""
+    message: str = ""
+
+
 class GiftGiveIn(BaseModel):
     character_id: str = "chloe"
     gift_key: str = ""
@@ -783,69 +789,6 @@ def admin_requested_actions(girl_id: str, request: Request):
         return {"actions": store.get_requested_actions(conn, girl_id)}
     finally:
         conn.close()
-
-
-class RequestedActionIn(BaseModel):
-    action: str
-
-
-def _admin_queue_requested_action(girl_id: str, action_text: str) -> dict:
-    """Admin write path for a custom give action (2026-10-17): the
-    admin equivalent of the owner's in-app studio lane. Saves the
-    action into girl_requested_actions (the same store the chat
-    pipeline's detector writes) and queues a stage-99 give_generations
-    row with the action as its prompt, in stage-description style.
-    An identical still-queued row for today is returned instead of
-    duplicated (same dedup spirit as the daily trigger)."""
-    gid = (girl_id or "").strip().lower()
-    action = (action_text or "").strip()
-    if not action:
-        raise HTTPException(status_code=400, detail="action_required")
-    roster = {str(c.get("id") or "").lower()
-              for c in characters.get_characters(include_private=True)}
-    if gid not in roster:
-        raise HTTPException(status_code=400, detail="unknown_character")
-    from datetime import datetime, timezone
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn = _conn()
-    try:
-        saved = store.save_requested_action(conn, gid, action)
-        if not saved:
-            raise HTTPException(status_code=400, detail="action_required")
-        existing = conn.execute(
-            "SELECT id FROM give_generations WHERE girl_id = ? "
-            "AND stage = 99 AND prompt = ? AND day = ? "
-            "AND status IN ('pending', 'generating')",
-            (gid, action, day),
-        ).fetchone()
-        if existing:
-            gen_id = int(existing["id"])
-            already = True
-        else:
-            gen_id = give_gen.create_give_generation(
-                conn, gid, 99, action, day, status="pending")
-            already = False
-        generation = give_gen.get_give_generation(conn, gen_id)
-    finally:
-        conn.close()
-    if not already:
-        # Same spawn the studio lane uses (assist._run_sogni_plan_job):
-        # the id joins the single give processor's priority lane and
-        # the render face-locks to the girl's own reference, unchanged.
-        # The render lands pending for the owner's approval.
-        give_gen.spawn_give_generation_job(gen_id)
-    return {"ok": True, "action": saved, "generation_id": gen_id,
-            "already_queued": already, "generation": generation}
-
-
-@app.post("/api/v1/admin/girls/{girl_id}/requested-actions")
-def admin_create_requested_action(girl_id: str, body: RequestedActionIn,
-                                  request: Request):
-    """Save a custom give action for a girl and queue its clip:
-    stage-99 give generation, spawned like the studio lane. The
-    render lands pending; approval stays the owner's."""
-    _require_admin(request)
-    return _admin_queue_requested_action(girl_id, body.action)
 
 
 # ---------------------------------------------------------------------------
@@ -2284,6 +2227,75 @@ def drawing_public():
     conn = _conn()
     try:
         return store.drawing_status(conn)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/chat/duo")
+def chat_duo(body: DuoChatIn, request: Request):
+    """Duo mode (2026-10-17): two companions, one thread. One message
+    charge per send; the pair's transcript lives under a duo: key."""
+    from . import duo as duo_mod
+    user_id = _current_user_id(request)
+    a = (body.character_a or "").strip().lower()
+    b = (body.character_b or "").strip().lower()
+    text = (body.message or "").strip()
+    if not a or not b or a == b:
+        raise HTTPException(status_code=400,
+                            detail="pick two different companions")
+    if not text:
+        raise HTTPException(status_code=400, detail="message required")
+    ga = duo_mod.girl_info(a)
+    gb = duo_mod.girl_info(b)
+    if not ga or not gb:
+        raise HTTPException(status_code=404, detail="unknown companion")
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        is_owner = user_id in assist._owner_ids()
+        if not is_owner:
+            cur = conn.execute(
+                "UPDATE users SET messages_remaining = "
+                "messages_remaining - 1, updated_at = datetime('now') "
+                "WHERE user_id = ? AND messages_remaining > 0",
+                (user_id,))
+            conn.commit()
+            if not cur.rowcount:
+                raise HTTPException(status_code=402,
+                                    detail="out of messages")
+        key = duo_mod.duo_key(a, b)
+        store.log_turn(conn, user_id, "user", text, character_id=key)
+        msgs = duo_mod.generate_duo_reply(
+            conn, user_id, ga, gb, text, user.get("name") or "")
+        for mm in msgs:
+            store.log_turn(conn, user_id, "assistant",
+                           f"[{mm['name']}] {mm['text']}",
+                           character_id=key)
+        row = conn.execute(
+            "SELECT messages_remaining FROM users WHERE user_id = ?",
+            (user_id,)).fetchone()
+        return {"messages": msgs,
+                "messages_remaining":
+                    row["messages_remaining"] if row else None}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/chat/duo/history")
+def chat_duo_history(request: Request, character_a: str = "",
+                     character_b: str = "", limit: int = 30):
+    from . import duo as duo_mod
+    user_id = _current_user_id(request)
+    key = duo_mod.duo_key((character_a or "").strip().lower(),
+                          (character_b or "").strip().lower())
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT role, text FROM conversation WHERE user_id = ? "
+            "AND character_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, key, max(1, min(int(limit or 30), 60)))).fetchall()
+        return {"turns": [{"role": r["role"], "text": r["text"]}
+                          for r in reversed(rows)]}
     finally:
         conn.close()
 
