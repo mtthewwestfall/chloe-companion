@@ -481,7 +481,106 @@ function addMsg(who, html, opts = {}) {
   const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   function addText(who, text, opts = {}, speakerName) {
-    addMsg(who, esc(text), { caption: who === 'her' ? herCaption(speakerName) : timeNow() });
+    const wrap = addMsg(who, esc(text), { caption: who === 'her' ? herCaption(speakerName) : timeNow() });
+    if (who === 'her' && (text || '').trim().length >= 12) {
+      const chip = document.createElement('button');
+      chip.className = 'share-msg-btn';
+      chip.textContent = '\u2197 Share';
+      chip.setAttribute('aria-label', 'Share this message as an image');
+      chip.addEventListener('click', () => shareHerMessage(text, speakerName || currentGirl.name));
+      wrap.appendChild(chip);
+    }
+  }
+
+  /* ---------- share-card engine (2026-10-17): her words, branded ---------- */
+  function wrapCanvasText(ctx, text, maxWidth) {
+    const words = (text || '').split(/\s+/);
+    const lines = [];
+    let line = '';
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  async function shareHerMessage(text, girlName) {
+    try {
+      const girl = CHARACTERS.find((c) => c.name === girlName) || currentGirl;
+      const W = 1080, H = 1350;
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d');
+      const grad = ctx.createLinearGradient(0, 0, W, H);
+      grad.addColorStop(0, '#171126');
+      grad.addColorStop(1, '#2b1030');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+      ctx.font = '700 620px sans-serif';
+      ctx.fillStyle = 'rgba(224,90,160,0.10)';
+      ctx.fillText('\uD83D\uDC9C', W - 480, 480);
+      // avatar (best effort — a tainted canvas just skips sharing the file)
+      let drewAvatar = false;
+      if (girl && girl.avatar) {
+        try {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = girl.avatar; });
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(150, 170, 84, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.drawImage(img, 66, 86, 168, 168);
+          ctx.restore();
+          drewAvatar = true;
+        } catch (e) {}
+      }
+      if (!drewAvatar) {
+        ctx.beginPath();
+        ctx.arc(150, 170, 84, 0, Math.PI * 2);
+        ctx.fillStyle = '#8a5cf6';
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = '700 84px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText((girlName || 'W')[0], 150, 200);
+        ctx.textAlign = 'left';
+      }
+      ctx.fillStyle = '#fff';
+      ctx.font = '700 56px sans-serif';
+      ctx.fillText(girlName || 'Whispr', 270, 165);
+      ctx.fillStyle = '#b9a8d9';
+      ctx.font = '400 34px sans-serif';
+      ctx.fillText('Whispr AI \u00B7 she texted me first \uD83D\uDC9C', 270, 218);
+      ctx.fillStyle = '#f6f2fc';
+      ctx.font = '500 47px sans-serif';
+      const lines = wrapCanvasText(ctx, text, W - 170).slice(0, 13);
+      lines.forEach((ln, i) => ctx.fillText(ln, 85, 400 + i * 66));
+      ctx.font = '800 54px sans-serif';
+      const brand = ctx.createLinearGradient(0, 0, 420, 0);
+      brand.addColorStop(0, '#e05aa0');
+      brand.addColorStop(1, '#8a5cf6');
+      ctx.fillStyle = brand;
+      ctx.fillText('lockeddoor.ai', 85, H - 90);
+      ctx.fillStyle = '#a49db3';
+      ctx.font = '400 32px sans-serif';
+      ctx.fillText('Meet your new obsession', 85, H - 140);
+      const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+      if (!blob) return;
+      const file = new File([blob], 'whispr-moment.png', { type: 'image/png' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Whispr AI' });
+      } else {
+        const aEl = document.createElement('a');
+        aEl.href = URL.createObjectURL(blob);
+        aEl.download = 'whispr-moment.png';
+        aEl.click();
+        setTimeout(() => URL.revokeObjectURL(aEl.href), 4000);
+        showToast('Card saved \u2014 post it anywhere \uD83D\uDC9C', 2600);
+      }
+    } catch (e) {}
   }
 
   function addVoiceNote(url, caption) {
