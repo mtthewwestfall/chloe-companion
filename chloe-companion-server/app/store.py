@@ -1624,6 +1624,60 @@ def drawing_status(conn: "sqlite3.Connection") -> dict[str, Any]:
             "remaining": max(0, DRAWING_GOAL - n), "full": n >= DRAWING_GOAL}
 
 
+# ---------------------------------------------------------------------------
+# Relationship anniversaries (2026-10-17): days together per (user,
+# character), counted from their first conversation turn.
+# ---------------------------------------------------------------------------
+ANNIVERSARY_MILESTONES = (7, 30, 100, 200, 365)
+
+
+def relationship_start(conn: "sqlite3.Connection", user_id: str,
+                       character_id: str) -> str | None:
+    """Date (YYYY-MM-DD) of the pair's first turn, or None."""
+    row = conn.execute(
+        "SELECT MIN(date(created_at)) AS d FROM conversation "
+        "WHERE user_id = ? AND character_id = ?",
+        (user_id, character_id)).fetchone()
+    return row["d"] if row else None
+
+
+def anniversary_today(conn: "sqlite3.Connection", user_id: str,
+                      character_id: str, today: str) -> int:
+    """Milestone days-together if TODAY is an anniversary, else 0."""
+    start = relationship_start(conn, user_id, character_id)
+    if not start:
+        return 0
+    try:
+        from datetime import date as _date
+        y, mo, d = (int(x) for x in start.split("-"))
+        t = _date.fromisoformat(today)
+        days = (t - _date(y, mo, d)).days
+    except Exception:
+        return 0
+    return days if days in ANNIVERSARY_MILESTONES else 0
+
+
+def anniversaries_for_user(conn: "sqlite3.Connection", user_id: str,
+                           today: str) -> dict[str, int]:
+    """{character_id: milestone} for every pair celebrating today."""
+    out: dict[str, int] = {}
+    rows = conn.execute(
+        "SELECT character_id, MIN(date(created_at)) AS d FROM conversation "
+        "WHERE user_id = ? GROUP BY character_id", (user_id,)).fetchall()
+    for r in rows:
+        if not r["d"]:
+            continue
+        try:
+            from datetime import date as _date
+            y, mo, d = (int(x) for x in str(r["d"]).split("-"))
+            days = (_date.fromisoformat(today) - _date(y, mo, d)).days
+        except Exception:
+            continue
+        if days in ANNIVERSARY_MILESTONES:
+            out[r["character_id"]] = days
+    return out
+
+
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
                          girl_id: str) -> bool:
     """Check if a girl already has Her Day posts generated today for a user."""
