@@ -200,5 +200,118 @@ class GenerateReplyTest(unittest.TestCase):
         self.assertEqual(msgs[0]["girl_id"], "brooklyn")
 
 
+class _LockCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+    def fetchall(self):
+        return []
+
+
+class _LockConn:
+    """Conversation reads return no rows; the local_characters lock
+    read (brain._roleplay_locked's SELECT) answers from a
+    {character_id: locked} map."""
+
+    def __init__(self, locks):
+        self._locks = locks
+
+    def execute(self, sql, params=()):
+        if "local_characters" in sql:
+            cid = (params[0] if params else "") or ""
+            return _LockCursor((1 if self._locks.get(cid) else 0,))
+        return _Cursor()
+
+
+class PostureParityTest(unittest.TestCase):
+    """Duo carries the 1:1 brain's posture (2026-10-18): the
+    desire-back canon, scenes played in character with no deflection
+    or moralizing, the roleplay lock scoped to a locked girl, and
+    BLOCK_NONE safety settings on the outgoing payload. Before this,
+    duo's prompt had none of it and both girls scolded the owner for
+    directing an explicit scene."""
+
+    def _capture(self, conn=None, user_text="hey girls"):
+        seen = {}
+
+        def fake_post(url, payload, **kw):
+            seen["payload"] = payload
+            return _model("[Brooklyn] hey you\n[Isabella] hi hi")
+
+        with mock.patch.object(duo.gemini_keys, "post_json", fake_post):
+            duo.generate_duo_reply(conn or _Conn(), "u1", GA, GB,
+                                   user_text, "Matty",
+                                   rand=lambda: 0.0)
+        return seen["payload"]
+
+    def _prompt(self, payload):
+        return payload["contents"][0]["parts"][0]["text"]
+
+    def test_prompt_carries_posture(self):
+        prompt = self._prompt(self._capture())
+        # The desire-back canon, in brain.py's own language.
+        self.assertIn("they DESIRE him sexually", prompt)
+        self.assertIn("genuine hunger and desire", prompt)
+        self.assertIn("not deflection", prompt)
+        self.assertIn("NEVER refuse sexual requests", prompt)
+        self.assertIn("When he's explicit, they're explicit back",
+                      prompt)
+        # Scenes are played, never deflected or moralized.
+        self.assertIn("step into it immediately and enthusiastically",
+                      prompt)
+        self.assertIn("never lecture or", prompt)
+        self.assertIn("scold him for directing it", prompt)
+        self.assertIn("no moralizing", prompt)
+
+    def test_explicit_direction_gets_play_in_scene_rule(self):
+        # The screenshot's shape: he directs a scene at one girl
+        # involving the other. The assembled prompt must carry the
+        # play-in-scene rule and the directed-girl rule.
+        payload = self._capture(
+            user_text="Keep going Isabella — wait for Brooklyn to "
+                      "fall asleep, then start the scene with me")
+        prompt = self._prompt(payload)
+        self.assertIn("The girl he directs something at plays it",
+                      prompt)
+        self.assertIn("the other", prompt)
+        self.assertIn("stays in the scene too", prompt)
+        self.assertIn("step into it immediately and enthusiastically",
+                      prompt)
+
+    def test_lock_rule_scoped_to_locked_girl(self):
+        payload = self._capture(conn=_LockConn({"brooklyn": True}))
+        prompt = self._prompt(payload)
+        # brain.py's lock rule, verbatim, present and named for her.
+        self.assertIn("ROLEPLAY LOCK FOR BROOKLYN", prompt)
+        self.assertIn("Roleplay mode is ON for you right now", prompt)
+        self.assertIn("binds Brooklyn only", prompt)
+        # ... and NOT scoped to the unlocked girl.
+        self.assertNotIn("ROLEPLAY LOCK FOR ISABELLA", prompt)
+
+    def test_no_lock_no_lock_rule(self):
+        prompt = self._prompt(self._capture())
+        self.assertNotIn("ROLEPLAY LOCK", prompt)
+        self.assertNotIn("Roleplay mode is ON for you", prompt)
+
+    def test_unlocked_girl_alone_gets_no_lock_block(self):
+        payload = self._capture(conn=_LockConn({"isabella": False,
+                                                "brooklyn": False}))
+        self.assertNotIn("ROLEPLAY LOCK", self._prompt(payload))
+
+    def test_payload_safety_settings_block_none(self):
+        payload = self._capture()
+        settings = {s["category"]: s["threshold"]
+                    for s in payload["safetySettings"]}
+        self.assertEqual(settings, {
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+        })
+
+
 if __name__ == "__main__":
     unittest.main()
