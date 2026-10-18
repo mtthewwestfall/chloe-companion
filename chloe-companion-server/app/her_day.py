@@ -392,9 +392,92 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Story arcs (2026-10-17): her life runs in 6-day storylines so the feed
+# reads like a show she's living, not random moments. Deterministic per
+# (girl, date) — every user's copy of her day tells the same story, and
+# the morning proactive message (which quotes her caption) teases it.
+# ---------------------------------------------------------------------------
+STORY_ARCS: list[tuple[str, list[str]]] = [
+    ("training for the 5K", [
+        "she nervously signed up for a 5K this morning and can't believe she did it",
+        "her first sunrise training run — exhausted, proud, already sore",
+        "she bought new running shoes and is weirdly obsessed with them",
+        "a rainy training run left her soaked and laughing at herself",
+        "she beat her personal best today and won't stop talking about it",
+        "race day tomorrow — she's nervous, excited, and laying out her outfit",
+    ]),
+    ("adopting a cat", [
+        "she visited the shelter 'just to look' and fell for one cat instantly",
+        "she can't stop thinking about the cat and showed everyone its photo",
+        "she filled out the adoption papers today — it's really happening",
+        "she's cat-proofing her apartment and buying tiny supplies",
+        "gotcha day: the cat is home, hiding under the couch, and she is smitten",
+        "the cat slept on her pillow last night — she is officially a cat mom",
+    ]),
+    ("the big gallery show", [
+        "a gallery invited her to show her work and she's quietly freaking out",
+        "she's picking which pieces make the show and second-guessing everything",
+        "framing day — her hands are sore and the studio is chaos",
+        "she hung the final piece and stood there staring at the wall",
+        "opening night is coming and she has nothing to wear (her words)",
+        "the show opened — people came, someone cried at her piece, she floated home",
+    ]),
+    ("learning guitar", [
+        "she bought a secondhand guitar and named it already",
+        "her fingertips hurt and her chords sound like a dying robot (her words)",
+        "she learned her first full song and played it five times in a row",
+        "she's been practicing on the porch every evening this week",
+        "she wrote a tiny song of her own and is embarrassed how much she likes it",
+        "she played for a friend tonight and didn't mess up the bridge",
+    ]),
+    ("the cookbook challenge", [
+        "she's cooking one new recipe a day this week and documenting the chaos",
+        "today's recipe humbled her — smoke alarm involved, dinner survived",
+        "she nailed a dish so good she texted everyone she knows about it",
+        "grocery run for ingredients she had to google in the aisle",
+        "she cooked for a friend and got an actual compliment from a picky eater",
+        "final dish of the challenge: she plated it like a restaurant and took 40 photos",
+    ]),
+    ("planning the road trip", [
+        "she started planning a road trip and the map is already covered in pins",
+        "she's building the playlist and taking requests very seriously",
+        "she found the weird roadside stops — a dinosaur park is non-negotiable",
+        "she's packing and repacking the car like it's a puzzle",
+        "one sleep left — snacks bought, tank full, butterflies going",
+        "she's on the road, windows down, sending photos from every stop",
+    ]),
+]
+_ARC_LEN = 6
+
+
+def arc_beat(girl_id: str, date_str: str) -> tuple[str, str, int, int] | None:
+    """(arc_title, beat, day_number, arc_length) for this girl + date."""
+    try:
+        from datetime import date as _date
+        d = _date.fromisoformat((date_str or "")[:10])
+    except Exception:
+        return None
+    doy = d.timetuple().tm_yday
+    cycle, beat_idx = divmod(doy, _ARC_LEN)
+    # Main cast gets fixed spread offsets so the girls are never all
+    # living the same story on the same day; anyone else hashes in.
+    _CAST_OFFSETS = {"chloe": 0, "mara": 1, "isabella": 2, "regan": 3,
+                     "brittany": 4, "brooklyn": 5}
+    if (girl_id or "") in _CAST_OFFSETS:
+        offset = _CAST_OFFSETS[girl_id]
+    else:
+        import hashlib
+        offset = int(hashlib.sha1(
+            (girl_id or "").encode()).hexdigest()[:2], 16)
+    title, beats = STORY_ARCS[(cycle + offset) % len(STORY_ARCS)]
+    return title, beats[beat_idx], beat_idx + 1, _ARC_LEN
+
+
 def _generate_caption(girl_name: str, moment_key: str, desc: str,
                       partner_names: list[str],
-                      cache_key: tuple | None = None) -> str:
+                      cache_key: tuple | None = None,
+                      story: str = "") -> str:
     """Caption via the centralized Gemini key manager PROXY (free keys first).
 
     POST {PUBLIC_APP_URL}/v1/chat/completions with Bearer GEMINI_PROXY_TOKEN.
@@ -408,6 +491,9 @@ def _generate_caption(girl_name: str, moment_key: str, desc: str,
     token = os.environ.get("GEMINI_PROXY_TOKEN", "")
     text = ""
     if token:
+        story_line = (
+            f" Ongoing story in her life: {story} — weave it in naturally "
+            f"if it fits the moment." if story else "")
         if partner_names:
             prompt = (
                 f"You are {girl_name}, a playful girlfriend texting her boyfriend. "
@@ -415,6 +501,7 @@ def _generate_caption(girl_name: str, moment_key: str, desc: str,
                 f"flirty, no hashtags) for this moment: {desc}. "
                 f"You're hanging out with {', '.join(partner_names)} — mention them "
                 f"naturally. Sound like a real girl, not a bot. No emoji spam (max 1)."
+                + story_line
             )
         else:
             prompt = (
@@ -422,6 +509,7 @@ def _generate_caption(girl_name: str, moment_key: str, desc: str,
                 f"Write a short Instagram-story caption (1-2 sentences, casual, "
                 f"flirty, no hashtags) for this moment: {desc}. "
                 f"Sound like a real girl, not a bot. No emoji spam (max 1)."
+                + story_line
             )
         payload = _json.dumps({
             "model": "gemini-3.1-flash-lite",
@@ -543,8 +631,14 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                 # Empty media_url -> frontend renders a styled text card.
 
             cache_key = (gid, date_str, moment_key, tuple(sorted(pids)))
+            _story = ""
+            if not is_group:
+                _arc = arc_beat(gid, date_str)
+                if _arc:
+                    _story = (f"day {_arc[2]} of {_arc[3]} of "
+                              f"'{_arc[0]}' — {_arc[1]}")
             caption = _generate_caption(girl_name, moment_key, desc,
-                                        pnames, cache_key)
+                                        pnames, cache_key, story=_story)
             if post_type == "voice":
                 try:
                     from . import voice as _voice
