@@ -2439,6 +2439,96 @@ def world_status(girl_id: str = "chloe"):
         conn.close()
 
 
+class PublicIpGenerateIn(BaseModel):
+    girl_id: str = ""
+    date: str = ""
+    force: bool = False
+
+
+class PublicIpStatusIn(BaseModel):
+    girl_id: str
+    date: str
+    status: str
+
+
+def _pip_today() -> str:
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    return _dt.now(_ZI("America/New_York")).strftime("%Y-%m-%d")
+
+
+@app.get("/api/v1/admin/public-ip")
+def admin_public_ip(request: Request, date: str = ""):
+    """Public IP approval queue (Phase B): today's content packages
+    per cast girl. Read-only — generation is an explicit POST."""
+    _require_admin(request)
+    from . import world as _world
+    d = date or _pip_today()
+    conn = _conn()
+    try:
+        return {"date": d,
+                "packages": store.list_public_packages(conn, d),
+                "cast": _world.CAST}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/public-ip/generate")
+def admin_public_ip_generate(body: PublicIpGenerateIn, request: Request):
+    """Generate (or regenerate with force) one girl's package, or
+    every missing package when girl_id is empty."""
+    _require_admin(request)
+    from . import public_ip as _pip
+    from . import world as _world
+    d = body.date or _pip_today()
+    conn = _conn()
+    try:
+        if body.girl_id:
+            pkg = _pip.ensure_package(conn, body.girl_id, d,
+                                      force=body.force)
+            return {"date": d, "packages": [pkg] if pkg else []}
+        out = []
+        for gid in _world.CAST:
+            pkg = _pip.ensure_package(conn, gid, d, force=body.force)
+            if pkg:
+                out.append(pkg)
+        return {"date": d, "packages": out}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/public-ip/status")
+def admin_public_ip_status(body: PublicIpStatusIn, request: Request):
+    _require_admin(request)
+    if body.status not in ("pending", "approved", "published",
+                           "skipped"):
+        raise HTTPException(400, "bad status")
+    conn = _conn()
+    try:
+        ok = store.set_public_package_status(
+            conn, body.girl_id, body.date, body.status)
+        return {"ok": ok}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/public-ip/weekly")
+def admin_public_ip_weekly(request: Request, start: str = ""):
+    """The weekly show outline, assembled from the world's canon."""
+    _require_admin(request)
+    from . import public_ip as _pip
+    if not start:
+        from datetime import datetime as _dt, timedelta as _td
+        from zoneinfo import ZoneInfo as _ZI
+        today = _dt.now(_ZI("America/New_York")).date()
+        start = (today - _td(days=today.weekday())).strftime("%Y-%m-%d")
+    conn = _conn()
+    try:
+        return _pip.weekly_show(conn, start)
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/drawing")
 def drawing_public():
     """Public $500-drawing progress: {entered, goal, remaining, full}."""

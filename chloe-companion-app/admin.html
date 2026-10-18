@@ -90,6 +90,7 @@
     <button class="tab" onclick="showTab('keys')">Gemini Keys</button>
     <button class="tab" onclick="showTab('custom')">Custom Videos</button>
     <button class="tab" onclick="showTab('give-gens')">Give Generations</button>
+    <button class="tab" onclick="showTab('public-ip')">Public IP</button>
   </div>
   <div style="margin:10px 0">
     <button onclick="backfillHerDay(this)">Repair today's Her Day images</button>
@@ -190,6 +191,18 @@
     </div>
   </div>
 
+  <div id="tab-public-ip" class="hidden">
+    <h3 style="margin:6px 0">🌍 Public IP — daily content packages</h3>
+    <p class="sub">One ready-to-post package per girl per day, generated from her Living World day (activities, mood, shared moments) and story arc. Approve what you like, copy it out, post it. Nothing posts itself.</p>
+    <div style="margin:10px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span id="pipDate" class="sub"></span>
+      <button onclick="generatePipAll(this)">Generate / refresh all</button>
+      <button onclick="loadPipWeekly(this)">📺 This week's show outline</button>
+    </div>
+    <div id="pipList"></div>
+    <pre id="pipWeekly" class="hidden" style="white-space:pre-wrap;background:#141419;border:1px solid #333;border-radius:10px;padding:12px;font-size:13px"></pre>
+  </div>
+
   <div id="tab-give-gens" class="hidden">
     <div class="girl-card" style="border:2px solid #a855f7;">
       <div class="girl-name">&#128228; Upload Give Media</div>
@@ -264,10 +277,12 @@ function showTab(t) {
   document.getElementById('tab-keys').classList.toggle('hidden', t !== 'keys');
   document.getElementById('tab-custom').classList.toggle('hidden', t !== 'custom');
   document.getElementById('tab-give-gens').classList.toggle('hidden', t !== 'give-gens');
+  document.getElementById('tab-public-ip').classList.toggle('hidden', t !== 'public-ip');
   if (t === 'accounts') loadAccounts();
   if (t === 'keys') loadGeminiKeys();
   if (t === 'custom') loadCustomVideos();
   if (t === 'give-gens') { loadUploadGirls(); loadGiveGenerations(); }
+  if (t === 'public-ip') loadPublicIp();
 }
 
 async function api(method, path, body) {
@@ -278,6 +293,81 @@ async function api(method, path, body) {
   });
   if (res.status === 403 || res.status === 401) { alert('Invalid admin token'); localStorage.removeItem('whispr_admin_token'); location.reload(); }
   return res.json();
+}
+
+
+/* ---------- Public IP queue (Phase B, 2026-10-18) ---------- */
+let pipData = null;
+function pipField(label, text) {
+  return '<div style="margin:8px 0"><div class="sub" style="margin-bottom:4px">' + label +
+    ' <button onclick="pipCopy(this)" data-t="' + escapeHtml(text || '') + '">Copy</button></div>' +
+    '<div style="background:#141419;border:1px solid #2c2c35;border-radius:8px;padding:8px 10px;font-size:13px;white-space:pre-wrap">' +
+    escapeHtml(text || '') + '</div></div>';
+}
+function pipCopy(btn) {
+  navigator.clipboard.writeText(btn.getAttribute('data-t') || '');
+  btn.textContent = 'Copied ✓';
+  setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+}
+async function loadPublicIp() {
+  const r = await api('GET', '/api/v1/admin/public-ip');
+  pipData = r;
+  document.getElementById('pipDate').textContent = 'Date: ' + (r.date || '');
+  renderPip();
+}
+function renderPip() {
+  const box = document.getElementById('pipList');
+  if (!pipData) { box.innerHTML = ''; return; }
+  const have = {};
+  (pipData.packages || []).forEach(p => { have[p.girl_id] = p; });
+  box.innerHTML = (pipData.cast || []).map(gid => {
+    const p = have[gid];
+    if (!p) return '<div class="card" style="margin:10px 0"><b>' + escapeHtml(gid) + '</b> — no package yet. <button onclick="generatePip(\'' + gid + '\', this)">Generate</button></div>';
+    const k = p.package || {};
+    const frames = (k.story_frames || []).map((f, i) => 'Frame ' + (i + 1) + ': ' + (f.text || '') + '  [visual: ' + (f.visual || '') + ']').join('\n');
+    const vid = k.video || {};
+    const vidText = 'Hook: ' + (vid.hook || '') + '\n' + (vid.beats || []).map((b, i) => (i + 1) + '. ' + b).join('\n') + '\nCaption: ' + (vid.caption || '');
+    const pill = { pending: '🕓 pending', approved: '✅ approved', published: '🚀 published', skipped: '⏭ skipped' }[p.status] || p.status;
+    return '<div class="card" style="margin:10px 0"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="text-transform:capitalize">' +
+      escapeHtml(gid) + '</b><span class="sub">' + pill + ' · source: ' + escapeHtml(k.source || '') + '</span>' +
+      '<button onclick="setPipStatus(\'' + gid + '\', \'approved\')">Approve</button>' +
+      '<button onclick="setPipStatus(\'' + gid + '\', \'published\')">Mark published</button>' +
+      '<button onclick="setPipStatus(\'' + gid + '\', \'skipped\')">Skip</button>' +
+      '<button onclick="generatePip(\'' + gid + '\', this, true)">Regenerate</button></div>' +
+      pipField('Feed caption', k.feed_caption) +
+      pipField('Image brief', k.image_brief) +
+      pipField('Story frames', frames) +
+      pipField('Short video script', vidText) +
+      pipField('Quote card', k.quote) +
+      '</div>';
+  }).join('');
+}
+async function generatePip(gid, btn, force) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+  await api('POST', '/api/v1/admin/public-ip/generate', { girl_id: gid, force: !!force });
+  await loadPublicIp();
+}
+async function generatePipAll(btn) {
+  btn.disabled = true; btn.textContent = 'Generating…';
+  await api('POST', '/api/v1/admin/public-ip/generate', { girl_id: '', force: false });
+  btn.disabled = false; btn.textContent = 'Generate / refresh all';
+  await loadPublicIp();
+}
+async function setPipStatus(gid, status) {
+  await api('POST', '/api/v1/admin/public-ip/status', { girl_id: gid, date: pipData.date, status });
+  await loadPublicIp();
+}
+async function loadPipWeekly(btn) {
+  btn.disabled = true;
+  const s = await api('GET', '/api/v1/admin/public-ip/weekly');
+  const el = document.getElementById('pipWeekly');
+  const lines = [s.title, '', s.intro, ''];
+  (s.segments || []).forEach(sg => { lines.push('• [' + sg.date + '] ' + sg.headline); lines.push('  ' + sg.narration); });
+  if ((s.highlights || []).length) { lines.push('', 'Highlights:'); s.highlights.forEach(h => lines.push('• ' + h.girl_id + ': ' + h.line)); }
+  lines.push('', s.outro);
+  el.textContent = lines.join('\n');
+  el.classList.remove('hidden');
+  btn.disabled = false;
 }
 
 async function postFeedMoment(btn) {
