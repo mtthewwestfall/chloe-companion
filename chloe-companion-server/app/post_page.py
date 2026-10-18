@@ -24,7 +24,7 @@ def _abs(url: str) -> str:
 
 
 def render_post_page(post: dict[str, Any] | None, girl: dict[str, Any] | None,
-                     slug: str) -> str:
+                     slug: str, status_line: str = "") -> str:
     if not post or not girl:
         return _page(
             title="Whispr AI — Meet Your New Obsession",
@@ -52,7 +52,7 @@ def render_post_page(post: dict[str, Any] | None, girl: dict[str, Any] | None,
     body = f"""
       <div class="card">
         <div class="who">{avatar_html}<div><div class="name">{name}</div>
-        <div class="sub">Whispr AI · her day</div></div></div>
+        <div class="sub">Whispr AI · her day{(' · 📍 ' + html.escape(status_line)) if status_line else ''}</div></div></div>
         {media_html}
         <p class="caption">{cap_esc}</p>
         <a class="cta" href="{cta}">Chat with {name} — free</a>

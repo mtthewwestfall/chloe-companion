@@ -2529,6 +2529,28 @@ def admin_public_ip_weekly(request: Request, start: str = ""):
         conn.close()
 
 
+@app.get("/api/v1/world/presence")
+def world_presence():
+    """Ambient presence (Phase C, 2026-10-18): every cast girl's
+    live Living World status in one call — powers the landing
+    presence rail and any surface that wants her alive before a
+    chat even opens."""
+    from . import world as _world
+    conn = _conn()
+    try:
+        by_id = {g["id"]: g for g in characters.public_list()}
+        girls = []
+        for gid in _world.CAST:
+            g = by_id.get(gid) or {}
+            st = _world.status_for(conn, gid,
+                                   name=g.get("name", ""))
+            st["avatar_url"] = g.get("avatar_url", "")
+            girls.append(st)
+        return {"girls": girls}
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/drawing")
 def drawing_public():
     """Public $500-drawing progress: {entered, goal, remaining, full}."""
@@ -2753,7 +2775,17 @@ def public_post_page(slug: str):
                 girl = {"id": post.get("girl_id"),
                         "name": post.get("girl_id", "Her"),
                         "avatar_url": ""}
-        return HTMLResponse(post_page.render_post_page(post, girl, slug))
+        status_line = ""
+        if post:
+            try:
+                from . import world as _world
+                status_line = _world.status_for(
+                    conn, post.get("girl_id") or "chloe").get(
+                    "status_line", "")
+            except Exception:
+                status_line = ""
+        return HTMLResponse(post_page.render_post_page(
+            post, girl, slug, status_line=status_line))
     finally:
         conn.close()
 
