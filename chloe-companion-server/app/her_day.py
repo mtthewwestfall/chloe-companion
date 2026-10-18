@@ -637,6 +637,15 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                 if _arc:
                     _story = (f"day {_arc[2]} of {_arc[3]} of "
                               f"'{_arc[0]}' — {_arc[1]}")
+                try:
+                    _gift = store.recent_gift(conn, user_id, gid, days=7)
+                    if _gift:
+                        _story = (_story + f" Also: he recently gave her "
+                                  f"{_gift['name'].lower()} "
+                                  f"{_gift['emoji']} and she adores it — "
+                                  f"mention it if it fits.").strip()
+                except Exception:
+                    pass
             caption = _generate_caption(girl_name, moment_key, desc,
                                         pnames, cache_key, story=_story)
             if post_type == "voice":

@@ -1133,62 +1133,6 @@ let presetSheetGirl = null;
 
   /* ---------- referral ---------- */
 
-  async function openCreatorEarnings() {
-    openSheet('creatorSheet');
-    try {
-      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/creator/me', {
-        headers: { 'Authorization': 'Bearer ' + getToken() },
-      });
-      const d = await res.json();
-      $('sparkCount').textContent = d.sparks ?? 0;
-      const fans = (d.girls || []).reduce((n, g) => n + (g.fans_7d || 0), 0);
-      $('sparkFans').textContent = fans;
-      const list = $('creatorGirls');
-      list.innerHTML = '';
-      if (!d.girls || !d.girls.length) {
-        list.innerHTML = '<div class="mem-empty">No companions yet — create one and share her to the gallery to start earning.</div>';
-      } else {
-        d.girls.forEach((g) => {
-          const row = document.createElement('div');
-          row.className = 'mem-item';
-          const txt = document.createElement('div');
-          txt.className = 'mem-text';
-          txt.textContent = g.name + ' · ' + (g.fans_7d || 0) + ' fans this week' + (g.gallery_public ? '' : ' · not in gallery (no earnings)');
-          row.appendChild(txt);
-          list.appendChild(row);
-        });
-      }
-      const btn = $('redeemSparksBtn');
-      btn.disabled = (d.sparks || 0) < (d.redeem_cost || 25);
-      btn.textContent = 'Redeem ' + (d.redeem_cost || 25) + ' sparks → +' + (d.redeem_messages || 100) + ' messages';
-      const lb = await (await fetch(CONFIG.API_BASE_URL + '/api/v1/creator/leaderboard')).json();
-      const gotw = lb.girl_of_the_week;
-      const gel = $('creatorGotw');
-      if (gotw) {
-        gel.hidden = false;
-        gel.textContent = '🔥 Girl of the Week: ' + gotw.name + ' (' + gotw.fans_7d + ' fans)';
-      } else gel.hidden = true;
-    } catch (e) {}
-  }
-
-  async function redeemSparks() {
-    try {
-      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/creator/redeem', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + getToken() },
-      });
-      const d = await res.json();
-      if (d.ok) {
-        showToast('+100 messages — creator rewards 💜', 2800);
-        $('sparkCount').textContent = d.sparks ?? 0;
-        $('redeemSparksBtn').disabled = (d.sparks || 0) < (d.redeem_cost || 25);
-        updateBalance();
-      } else {
-        showToast('Not enough sparks yet', 2200);
-      }
-    } catch (e) {}
-  }
-
   async function openReferral() {
     openSheet('referralSheet');
     try {
@@ -1207,10 +1151,6 @@ let presetSheetGirl = null;
   }
 
   $('referralBtn').addEventListener('click', () => { closeSheet('profileSheet'); openReferral(); });
-  const _ceb = $('creatorEarningsBtn');
-  if (_ceb) _ceb.addEventListener('click', () => { closeSheet('profileSheet'); openCreatorEarnings(); });
-  const _rsb = $('redeemSparksBtn');
-  if (_rsb) _rsb.addEventListener('click', redeemSparks);
 
   /* ---------- what she remembers (2026-10-17) ---------- */
   async function memFetch(path, body) {
@@ -1281,6 +1221,71 @@ let presetSheetGirl = null;
   }
 
   $('memoryBtn').addEventListener('click', openMemorySheet);
+  const giftBtnEl = $('giftBtn');
+  if (giftBtnEl) giftBtnEl.addEventListener('click', openGiftSheet);
+
+  async function openGiftSheet() {
+    $('giftGirlName').textContent = currentGirl.name;
+    openSheet('giftSheet');
+    const list = $('giftList');
+    list.innerHTML = '<div class="mem-empty">Loading gifts…</div>';
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/gifts/catalog');
+      const d = await res.json();
+      list.innerHTML = '';
+      (d.gifts || []).forEach((g) => {
+        const row = document.createElement('div');
+        row.className = 'mem-item';
+        const txt = document.createElement('div');
+        txt.className = 'mem-text';
+        txt.textContent = g.emoji + ' ' + g.name;
+        const btn = document.createElement('button');
+        btn.className = 'mem-del';
+        btn.style.width = 'auto';
+        btn.style.padding = '4px 10px';
+        btn.style.fontSize = '12px';
+        btn.textContent = g.msg_cost + ' msgs';
+        btn.setAttribute('aria-label', 'Send ' + g.name);
+        btn.addEventListener('click', () => sendGift(g, btn));
+        row.appendChild(txt);
+        row.appendChild(btn);
+        list.appendChild(row);
+      });
+      if (!list.children.length) list.innerHTML = '<div class="mem-empty">No gifts right now.</div>';
+    } catch (e) {
+      list.innerHTML = '<div class="mem-empty">Could not load gifts.</div>';
+    }
+  }
+
+  async function sendGift(g, btn) {
+    btn.disabled = true;
+    try {
+      const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/gifts/give', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
+        body: JSON.stringify({ character_id: currentGirl.id, gift_key: g.key }),
+      });
+      if (res.status === 402) {
+        closeSheet('giftSheet');
+        showToast('Not enough messages for that gift', 2400);
+        showPaywall(true);
+        return;
+      }
+      const d = await res.json();
+      if (d.ok) {
+        closeSheet('giftSheet');
+        setMessagesRemaining(d.messages_remaining);
+        addText('her', (d.gift && d.gift.reaction) || 'thank you 💜', {}, currentGirl.name);
+        showToast('Gift sent ' + g.emoji, 2200);
+      } else {
+        showToast('Gift failed — try again', 2200);
+      }
+    } catch (e) {
+      showToast('Gift failed — try again', 2200);
+    } finally {
+      btn.disabled = false;
+    }
+  }
   $('memForgetAll').addEventListener('click', async (ev) => {
     const btn = ev.currentTarget;
     if (!btn.dataset.armed) {

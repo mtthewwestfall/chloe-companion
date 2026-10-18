@@ -179,6 +179,7 @@
           </div>
           <div class="header-icons">
             <button id="memoryBtn" aria-label="What she remembers about you">🧠</button>
+            <button id="giftBtn" aria-label="Send her a gift">🎁</button>
             <button id="videoCallBtn" aria-label="Video call">📹</button>
             <button id="phoneCallBtn" aria-label="Voice call">📞</button>
           </div>
@@ -351,6 +352,16 @@
         </div>
         <div id="authError" class="auth-error hidden"></div>
         <div id="authVerifyMsg" class="auth-verify hidden">Check your email to verify your account, then log in.</div>
+      </div>
+    </div>
+
+    <!-- Gift sheet -->
+    <div id="giftSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Send <span id="giftGirlName">her</span> a gift 🎁</h2><button class="sheet-close" data-close="giftSheet">✕</button></div>
+        <p class="sheet-sub">She'll remember it, mention it in her day — and wear it in her photos. Paid from your message balance, or with ⭐ Stars in the Telegram app.</p>
+        <div id="giftList" class="mem-list"></div>
       </div>
     </div>
 

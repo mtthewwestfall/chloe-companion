@@ -2208,6 +2208,58 @@ def drawing_public():
         conn.close()
 
 
+@app.get("/api/v1/gifts/catalog")
+def gifts_catalog():
+    return {"gifts": [{"key": k, "name": g["name"], "emoji": g["emoji"],
+                       "msg_cost": g["msg_cost"], "stars": g["stars"]}
+                      for k, g in store.GIFTS.items()]}
+
+
+@app.post("/api/v1/gifts/give")
+def gifts_give(body: GiftGiveIn, request: Request):
+    """Web rail: spend message balance on a gift for her (2026-10-17)."""
+    user_id = _current_user_id(request)
+    g = store.GIFTS.get(body.gift_key)
+    if not g:
+        raise HTTPException(status_code=400, detail="unknown gift")
+    cid = (body.character_id or "chloe").strip().lower() or "chloe"
+    conn = _conn()
+    try:
+        cur = conn.execute(
+            "UPDATE users SET messages_remaining = messages_remaining - ?, "
+            "updated_at = datetime('now') WHERE user_id = ? "
+            "AND messages_remaining >= ?",
+            (g["msg_cost"], user_id, g["msg_cost"]))
+        conn.commit()
+        if not cur.rowcount:
+            raise HTTPException(status_code=402,
+                                detail="not enough messages")
+        out = store.give_gift(conn, user_id, cid, body.gift_key,
+                              source="web")
+        row = conn.execute(
+            "SELECT messages_remaining FROM users WHERE user_id = ?",
+            (user_id,)).fetchone()
+        return {"ok": True, "gift": out,
+                "messages_remaining": row["messages_remaining"] if row else 0}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/admin/gifts/grant")
+def gifts_grant(body: GiftGrantIn, request: Request):
+    """Telegram Stars fulfillment: record a paid gift (2026-10-17)."""
+    _require_admin(request)
+    conn = _conn()
+    try:
+        out = store.give_gift(conn, body.user_id, body.girl_id,
+                              body.gift_key, source="stars")
+        if not out:
+            raise HTTPException(status_code=400, detail="unknown gift")
+        return {"ok": True, "gift": out}
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/creator/me")
 def creator_me(request: Request):
     user_id = _current_user_id(request)
@@ -3952,6 +4004,17 @@ def memory_export(body: UserIdIn, request: Request):
                                                   body.character_id or "chloe")}
     finally:
         conn.close()
+
+
+class GiftGiveIn(BaseModel):
+    character_id: str = "chloe"
+    gift_key: str = ""
+
+
+class GiftGrantIn(BaseModel):
+    user_id: str = ""
+    girl_id: str = "chloe"
+    gift_key: str = ""
 
 
 class MemoryDeleteOneIn(BaseModel):
