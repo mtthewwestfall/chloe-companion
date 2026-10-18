@@ -57,6 +57,22 @@ def _tick() -> None:
             print(f"[proactive-scheduler] pair failed "
                   f"{user_id}/{character_id}:", flush=True)
             traceback.print_exc()
+    # Owner gate diagnostics (2026-10-18): after three silent
+    # mornings, the scheduler now states WHY the owner's sends did
+    # or didn't fire, every tick, in the deploy logs.
+    try:
+        for oid in proactive._owner_ids():
+            for pair in pairs:
+                if pair.get("user_id") == oid:
+                    cid = pair.get("character_id") or "chloe"
+                    print(f"[proactive] owner gate {oid}/{cid}: "
+                          f"morning="
+                          f"{proactive.explain_morning_gate(conn, oid, cid)}"
+                          f" ambient="
+                          f"{proactive.explain_ambient_gate(conn, oid, cid)}",
+                          flush=True)
+    except Exception:
+        pass
     conn.close()
 
 
