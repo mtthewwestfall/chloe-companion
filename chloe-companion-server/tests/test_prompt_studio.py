@@ -1,11 +1,15 @@
 """Prompt Studio tests (2026-10-17).
 
-Covers the owner's private prompt desk (app/studio.py): the owner gate
-(non-owner refused at the page AND the generate endpoint), prompt
-assembly, and the generate endpoint with the Gemini pool boundary
-mocked — asserting the request shape (image model URL, BLOCK_NONE on
-all four harm categories, the prompt verbatim, the reference image as
-an inlineData part in edit mode) and the plain-refusal surfacing.
+Covers the owner's private prompt desk (app/studio.py): the door (the
+/studio shell is public UI with no data in it; every data/action
+endpoint stays owner-gated — anonymous 401, non-owner session 403,
+owner session and admin token through — and the page's JS opens the
+gate with the app's own session door: localStorage 'whispr_token' sent
+as 'Authorization: Bearer'), prompt assembly, and the generate
+endpoint with the Gemini pool boundary mocked — asserting the request
+shape (image model URL, BLOCK_NONE on all four harm categories, the
+prompt verbatim, the reference image as an inlineData part in edit
+mode) and the plain-refusal surfacing.
 
 No Gemini call ever leaves the process here; the model's own refusal
 layer is proven with canned blocked responses.
@@ -89,27 +93,72 @@ class StudioTestBase(unittest.TestCase):
 
 
 class GateTest(StudioTestBase):
-    def test_page_refuses_anonymous(self):
+    def test_page_shell_is_public_and_carries_no_data(self):
+        # A plain browser navigation presents no credential, so the
+        # shell must load for anyone: it is just the UI. No roster, no
+        # secrets, no generation data travel with it — the girls list
+        # and recent strip are fetched from the gated endpoints.
         resp = self._client().get("/studio")
-        self.assertEqual(resp.status_code, 401)
-        self.assertIn("Owner only", resp.text)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Prompt Studio", resp.text)
+        self.assertIn("Boudoir / lingerie", resp.text)
+        self.assertNotIn("test-admin-secret", resp.text)
+        self.assertNotIn("owner-tok", resp.text)
+        self.assertNotIn('"girls"', resp.text)
 
-    def test_page_refuses_non_owner_session(self):
+    def test_page_shell_served_regardless_of_headers(self):
+        # The server cannot gate a navigation (the app session rides
+        # in localStorage, not in the page request) — a non-owner's
+        # refusal happens at the data endpoints, never here.
         resp = self._client().get(
             "/studio", headers={"Authorization": "Bearer other-tok"})
-        self.assertEqual(resp.status_code, 403)
-
-    def test_page_loads_for_admin_token(self):
+        self.assertEqual(resp.status_code, 200)
         resp = self._client().get(
             "/studio", headers={"X-Admin-Token": "test-admin-secret"})
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Prompt Studio", resp.text)
-        self.assertIn("Boudoir / lingerie", resp.text)
-
-    def test_page_loads_for_owner_session(self):
         resp = self._client().get(
             "/studio", headers={"Authorization": "Bearer owner-tok"})
         self.assertEqual(resp.status_code, 200)
+
+    def test_page_client_gate_uses_the_apps_own_session_door(self):
+        # The page must read the session exactly where the companion
+        # app keeps it and present it the way the app presents it:
+        # localStorage 'whispr_token' (app.js getToken()), sent as
+        # 'Authorization: Bearer <token>' on the studio API calls, with
+        # a probe of a gated endpoint deciding between the studio and
+        # the Owner-only notice.
+        resp = self._client().get("/studio")
+        self.assertIn("localStorage.getItem('whispr_token')", resp.text)
+        self.assertIn("'Authorization': 'Bearer '", resp.text)
+        self.assertIn("'X-Admin-Token': adminTok", resp.text)
+        self.assertIn("fetch('/api/v1/studio/recent'", resp.text)
+        self.assertIn('id="gate"', resp.text)
+        self.assertIn('id="studio-ui" hidden', resp.text)
+        self.assertIn("Owner only.", resp.text)
+
+    def test_data_endpoints_gate_matrix(self):
+        client = self._client()
+        for path in ("/api/v1/studio/recent", "/api/v1/studio/girls"):
+            resp = client.get(path)
+            self.assertEqual(resp.status_code, 401, path)
+            resp = client.get(
+                path, headers={"Authorization": "Bearer other-tok"})
+            self.assertEqual(resp.status_code, 403, path)
+            resp = client.get(
+                path, headers={"Authorization": "Bearer bad-tok"})
+            self.assertEqual(resp.status_code, 401, path)
+        with mock.patch.object(studio.characters, "get_characters",
+                               return_value=[]):
+            for path in ("/api/v1/studio/recent", "/api/v1/studio/girls"):
+                resp = client.get(
+                    path, headers={"Authorization": "Bearer owner-tok"})
+                self.assertEqual(resp.status_code, 200, path)
+                resp = client.get(
+                    path, headers={"X-Admin-Token": "test-admin-secret"})
+                self.assertEqual(resp.status_code, 200, path)
+                resp = client.get(path + "?admin_token=test-admin-secret")
+                self.assertEqual(resp.status_code, 200, path)
 
     def test_gate_function_matrix(self):
         self.assertEqual(

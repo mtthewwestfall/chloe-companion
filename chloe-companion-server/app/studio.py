@@ -1,8 +1,18 @@
 """Prompt Studio — the owner's private prompt desk (2026-10-17).
 
-A standalone page at /studio, OWNER-ONLY: gated by the admin token or
-an owner account session (ASSIST_OWNER_IDS), the same two doors the
-app's other owner/admin surfaces use. Nobody else can load or use it.
+A standalone page at /studio, OWNER-ONLY in everything but the shell.
+GET /studio serves the page UI to anyone — it carries no data, no
+roster, no secrets — and the page's own JS presents the app's session
+token on every /api/v1/studio/* call: localStorage 'whispr_token',
+read exactly the way the companion app's own getToken() reads it and
+sent as 'Authorization: Bearer <token>', the app's real door. All
+data/action endpoints stay gated server-side by require_studio_access
+(an owner account session, ASSIST_OWNER_IDS, or the admin token via
+header or ?admin_token= — the standing fallback door). A plain browser
+navigation sends neither, which is why the session check lives in the
+page's fetches, not in the page load: with no valid token found
+client-side, the page shows the plain "Owner only." notice instead of
+the studio; a signed-in owner just gets the studio.
 
 What it is: a standing desk for his image work. A Builder assembles a
 prompt from structured fields (subject, background, composition, style
@@ -273,7 +283,9 @@ def parse_image_response(data) -> tuple[bytes, str]:
 
 
 # ---------------------------------------------------------------------------
-# Gate: admin token OR owner account session — nobody else.
+# Gate for every data/action endpoint: admin token OR owner account
+# session — nobody else. (The /studio shell itself is public; see the
+# module docstring.)
 # ---------------------------------------------------------------------------
 def _conn():
     return db.connect()
@@ -539,7 +551,12 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 </style>
 </head>
 <body>
-<main class="wrap">
+<div id="gate" style="padding:60px 20px;text-align:center">
+<div class="brand">PROMPT STUDIO</div>
+<h1>Prompt Studio</h1>
+<p class="sub" id="gate-msg" style="margin-top:10px">Checking your sign-in…</p>
+</div>
+<main class="wrap" id="studio-ui" hidden>
 <div class="brand">PROMPT STUDIO</div>
 <h1>Your prompt desk</h1>
 <p class="sub">Owner only. Prompts go to the model exactly as written.</p>
@@ -609,6 +626,8 @@ if (qs.get('admin_token')) {
   sessionStorage.setItem('studio_admin', adminTok);
   history.replaceState(null, '', '/studio');
 }
+// The app's own session door: app.js getToken() reads localStorage
+// 'whispr_token' and sends it as 'Authorization: Bearer <token>'.
 const sessionTok = localStorage.getItem('whispr_token') || '';
 function authHeaders() {
   return adminTok ? {'X-Admin-Token': adminTok}
@@ -757,8 +776,27 @@ $('btn-generate').onclick = async () => {
     setStatus('Not generated — the request never landed.', 'err');
   } finally { btn.disabled = false; }
 };
-refreshPrompt();
-loadGirls();
+async function gateOpen() {
+  // The data endpoints are the real gate — probe the cheapest one with
+  // whatever credential this browser holds. Only a valid OWNER session
+  // (or the admin token) answers 200; anonymous gets 401 and a
+  // non-owner session gets 403, and both land on the notice below.
+  if (!adminTok && !sessionTok) return false;
+  try {
+    const r = await fetch('/api/v1/studio/recent', {headers: authHeaders()});
+    return r.ok;
+  } catch (e) { return false; }
+}
+(async () => {
+  if (await gateOpen()) {
+    $('gate').hidden = true;
+    $('studio-ui').hidden = false;
+    refreshPrompt();
+    loadGirls();
+  } else {
+    $('gate-msg').textContent = 'Owner only.';
+  }
+})();
 </script>
 </body>
 </html>
@@ -775,24 +813,18 @@ def _page_html() -> str:
     return _PAGE.replace("__STUDIO_DATA__", json.dumps(data))
 
 
-_GATE_HTML = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prompt Studio</title></head>
-<body style="background:#0a0a12;color:#f5f5fa;font-family:-apple-system,sans-serif;
-padding:40px 20px;text-align:center">
-<h1>Prompt Studio</h1><p>Owner only.</p></body></html>"""
-
-
 def register(app) -> None:
     """Attach the studio page + its three API routes to the app."""
 
     @app.get("/studio", response_class=HTMLResponse, include_in_schema=False)
     def studio_page(request: Request):
-        try:
-            require_studio_access(request)
-        except HTTPException as exc:
-            return HTMLResponse(_GATE_HTML, status_code=exc.status_code)
+        # The shell is public on purpose: it holds no data, no roster
+        # and no secrets — just the UI. A plain navigation can present
+        # neither the app's Bearer session nor the admin token, so the
+        # gate lives in the page's own calls to the endpoints below
+        # (each one re-checks require_studio_access server-side); the
+        # page probes one on load and shows its "Owner only." notice
+        # to anyone whose token does not open the gate.
         return HTMLResponse(_page_html(),
                             headers={"Cache-Control": "no-store"})
 
