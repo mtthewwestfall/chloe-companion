@@ -255,6 +255,22 @@ class GrantMessagesIn(BaseModel):
     count: int = 100
 
 
+class VoiceSayIn(BaseModel):
+    character_id: str = "chloe"
+    text: str = ""
+
+
+class GiftGiveIn(BaseModel):
+    character_id: str = "chloe"
+    gift_key: str = ""
+
+
+class GiftGrantIn(BaseModel):
+    user_id: str = ""
+    girl_id: str = "chloe"
+    gift_key: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -4045,22 +4061,6 @@ def memory_export(body: UserIdIn, request: Request):
                                                   body.character_id or "chloe")}
     finally:
         conn.close()
-
-
-class VoiceSayIn(BaseModel):
-    character_id: str = "chloe"
-    text: str = ""
-
-
-class GiftGiveIn(BaseModel):
-    character_id: str = "chloe"
-    gift_key: str = ""
-
-
-class GiftGrantIn(BaseModel):
-    user_id: str = ""
-    girl_id: str = "chloe"
-    gift_key: str = ""
 
 
 class MemoryDeleteOneIn(BaseModel):
