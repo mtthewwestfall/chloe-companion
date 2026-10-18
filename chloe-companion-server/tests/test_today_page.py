@@ -1,11 +1,12 @@
 """Public Today page (GET /today) — server-rendered Her Day feed.
 
-Covers the 2026-10-15 feature: the page lists today's shared Her Day
-posts newest-first, renders text-only posts (empty media/voice urls —
-the current upstream state) as clean text cards with NO media elements
-or placeholders, shows media/voice automatically when a post carries
-them, escapes captions, and carries one CTA into the signup flow (the
-app root, whose auth sheet opens on arrival for logged-out visitors).
+Covers the 2026-10-15 feature as amended by the owner's display rules
+(2026-10-17): the page lists today's shared Her Day posts newest-first,
+but only pictured posts appear — at most one per character per day —
+and picture-less posts never render (no text cards, no placeholders).
+Captions are escaped, and the page carries one CTA into the signup
+flow (the app root, whose auth sheet opens on arrival for logged-out
+visitors).
 
 Run:  python -m unittest tests.test_today_page -v
 """
@@ -70,37 +71,49 @@ class TodayPageTest(unittest.TestCase):
         return resp.body.decode("utf-8")
 
     def test_lists_posts_newest_first(self):
-        self._post("regan", "text", "older post about coffee", 90)
-        self._post("mara", "text", "newer post about the gym", 5)
+        self._post("regan", "image", "older post about coffee", 90,
+                   media_url="/generated/herday_regan.jpg")
+        self._post("mara", "image", "newer post about the gym", 5,
+                   media_url="/generated/herday_mara.jpg")
         body = self._body()
         self.assertLess(body.index("newer post about the gym"),
                         body.index("older post about coffee"))
         self.assertIn("Regan", body)
         self.assertIn("Mara", body)
 
-    def test_text_only_post_renders_without_media_elements(self):
+    def test_pictureless_posts_do_not_render(self):
+        # Owner display rules (2026-10-17): no picture, no public post —
+        # text posts and failed renders (empty media_url) stay hidden,
+        # with no text card or placeholder in their place.
         self._post("regan", "text", "just a thought today", 10)
         self._post("regan", "image", "bedtime soon", 20)  # empty media_url
         body = self._body()
-        self.assertIn("just a thought today", body)
-        self.assertIn("bedtime soon", body)
-        self.assertNotIn("<img", body)
-        self.assertNotIn("<audio", body)
-        self.assertNotIn("<video", body)
-        self.assertIn("today-textcard", body)
-        # Avatar falls back to an initial (no broken image).
-        self.assertIn("today-avatar-fallback", body)
+        self.assertNotIn("just a thought today", body)
+        self.assertNotIn("bedtime soon", body)
+        self.assertNotIn('<article class="today-card today-textcard">', body)
+        self.assertIn("Nothing yet today", body)
 
-    def test_media_and_voice_render_when_present(self):
+    def test_media_renders_and_voice_only_post_is_hidden(self):
         self._post("mara", "image", "gym done", 5,
                    media_url="/generated/herday_mara_gym.jpg")
         self._post("regan", "voice", "rant incoming", 15,
                    voice_url="/generated/voice/rant.mp3")
         body = self._body()
         self.assertIn('<img class="today-media" src="/generated/herday_mara_gym.jpg"', body)
-        self.assertIn('<audio controls src="/generated/voice/rant.mp3">', body)
+        # A voice-only post has no picture, so it never appears publicly.
+        self.assertNotIn("rant incoming", body)
+        self.assertNotIn("<audio", body)
         # Mara has an avatar url -> avatar img renders too.
         self.assertIn('<img class="today-avatar" src="https://x.test/mara.jpg"', body)
+
+    def test_one_post_per_girl_per_day(self):
+        self._post("mara", "image", "mara later pic", 10,
+                   media_url="/generated/herday_mara_late.jpg")
+        self._post("mara", "image", "mara earliest pic", 90,
+                   media_url="/generated/herday_mara_early.jpg")
+        body = self._body()
+        self.assertIn("mara earliest pic", body)
+        self.assertNotIn("mara later pic", body)
 
     def test_cta_targets_signup_root(self):
         self._post("regan", "text", "hi", 5)
@@ -109,7 +122,8 @@ class TodayPageTest(unittest.TestCase):
         self.assertIn("50 free messages", body)
 
     def test_caption_is_escaped(self):
-        self._post("regan", "text", "<script>alert(1)</script>", 5)
+        self._post("regan", "image", "<script>alert(1)</script>", 5,
+                   media_url="/generated/herday_regan.jpg")
         body = self._body()
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
         self.assertNotIn("<script>alert(1)</script>", body)

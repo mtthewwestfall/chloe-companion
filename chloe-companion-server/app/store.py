@@ -1540,18 +1540,34 @@ def get_public_her_day_posts(conn: "sqlite3.Connection",
                              limit: int = 24) -> list[dict]:
     """Get recent Her Day posts across all users for the public landing page.
 
-    Returns the most recent non-expired posts (no user_id exposed).
-    Used by GET /api/v1/her-day/public — no auth required.
+    Display rules (owner direction, 2026-10-17): the public feed shows
+    only posts that carry a picture (non-empty media_url), and at most
+    ONE post per character per day — the earliest pictured post of her
+    day. Picture-less posts stay in the table (the per-user feed and
+    the media backfill still use them); they just never surface here.
+
+    Returns non-expired posts (no user_id exposed), newest first.
+    Used by GET /api/v1/her-day/public and GET /today — no auth required.
     """
     rows = conn.execute(
         "SELECT girl_id, post_type, media_url, voice_url, caption,"
         " created_at FROM her_day_posts"
         " WHERE expires_at > datetime('now')"
         " AND created_at <= datetime('now')"
-        " ORDER BY created_at DESC LIMIT ?",
-        (limit,),
+        " AND TRIM(COALESCE(media_url, '')) != ''"
+        " ORDER BY created_at ASC, caption ASC",
     ).fetchall()
-    return [dict(r) for r in rows]
+    seen: set[tuple[str, str]] = set()
+    kept: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        key = (d.get("girl_id") or "", (d.get("created_at") or "")[:10])
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(d)
+    kept.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    return kept[:limit]
 
 
 def post_slug(girl_id: str, created_at: str, caption: str) -> str:

@@ -2375,6 +2375,8 @@ def get_public_her_day():
 
     Returns recent non-expired posts across all users (no user_id exposed),
     with girl info attached. Powers the public stories bar on the landing page.
+    Display rules live in store.get_public_her_day_posts: pictured posts
+    only, at most one post per character per day.
     """
     conn = _conn()
     try:
@@ -2750,8 +2752,9 @@ def today_page():
 
     Read-only over the same shared day-set as GET /api/v1/her-day/public
     (no generation, no schema changes, SFW Her Day posts only — never
-    Give/private-library content). Text-only posts render as clean text
-    cards; media/voice appear automatically when a post carries them.
+    Give/private-library content). Per the owner's display rules only
+    pictured posts appear, one per character per day (see
+    store.get_public_her_day_posts); picture-less posts never render.
     The CTA lands on the app root, whose signup sheet opens on arrival
     for logged-out visitors (50 free messages; existing trial/plans).
     """
