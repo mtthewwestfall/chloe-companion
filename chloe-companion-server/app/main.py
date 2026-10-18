@@ -2417,8 +2417,8 @@ def chat_duo(body: DuoChatIn, request: Request):
                             detail="pick two different companions")
     if not text:
         raise HTTPException(status_code=400, detail="message required")
-    ga = duo_mod.girl_info(a)
-    gb = duo_mod.girl_info(b)
+    ga = duo_mod.girl_info(a, user_id)
+    gb = duo_mod.girl_info(b, user_id)
     if not ga or not gb:
         raise HTTPException(status_code=404, detail="unknown companion")
     conn = _conn()
