@@ -1767,6 +1767,9 @@ async def preset_video(body: PresetVideoIn, request: Request):
             user_id = _current_user_id(request)
         except Exception:
             pass
+        # Group/event accounts are capped at stage 3 (owner rule,
+        # 2026-10-18): every walk below stays inside the cap.
+        cap = store.give_stage_cap(user_id)
 
         # Owner-scoped (private) girls are invisible to everyone else.
         if not characters.visible_to(key[0], user_id):
@@ -1780,7 +1783,7 @@ async def preset_video(body: PresetVideoIn, request: Request):
                 (user_id, key[0])).fetchone()
             gives = prog["gives_received"] if prog else 0
             # Rotation: stages cycle 1-9, each rotation serves fresh clips
-            stage = (gives % 9) + 1
+            stage = (gives % cap) + 1
             seen_rows = conn.execute(
                 "SELECT media_id FROM user_give_seen WHERE user_id = ? AND girl_id = ?",
                 (user_id, key[0])).fetchall()
@@ -1792,7 +1795,7 @@ async def preset_video(body: PresetVideoIn, request: Request):
         db_rows = []
         try:
             if stage > 0:
-                for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+                for try_stage in list(range(stage, cap + 1)) + list(range(1, stage)):
                     db_rows = conn.execute(
                         """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
                            AND (preset = ? OR preset IS NULL) AND stage = ?""",
@@ -1810,7 +1813,7 @@ async def preset_video(body: PresetVideoIn, request: Request):
             # girls, so their behavior is unchanged.)
             try:
                 if stage > 0:
-                    for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+                    for try_stage in list(range(stage, cap + 1)) + list(range(1, stage)):
                         db_rows = conn.execute(
                             """SELECT id, url FROM girl_media WHERE girl_id = ? AND kind = 'give'
                                AND preset = 'give' AND stage = ?""",
@@ -1846,7 +1849,7 @@ async def preset_video(body: PresetVideoIn, request: Request):
             picked = dir_clips
             if stage > 0:
                 picked = []
-                for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+                for try_stage in list(range(stage, cap + 1)) + list(range(1, stage)):
                     at = [c for c in dir_clips if c["stage"] == try_stage]
                     if at:
                         stage = try_stage

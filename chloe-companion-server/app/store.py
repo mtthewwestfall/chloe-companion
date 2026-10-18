@@ -2093,3 +2093,19 @@ def set_public_package_status(conn: "sqlite3.Connection", girl_id: str,
         (status, girl_id, date_str))
     conn.commit()
     return cur.rowcount > 0
+
+def give_stage_cap(user_id: str | None) -> int:
+    """Stage ceiling for give serving. Group/event traffic runs on
+    synthetic shared accounts (tg_<id> with id >= 900_000_000_000,
+    minted by the Telegram bot for group live events and the group
+    /give command); in a public group only stages 1-3 (tease-level)
+    may be served — the full 1-9 escalation is for private chats
+    only. (Owner rule, 2026-10-18.)"""
+    uid = (user_id or "").strip()
+    if uid.startswith("tg_"):
+        try:
+            if int(uid[3:]) >= 900_000_000_000:
+                return 3
+        except ValueError:
+            pass
+    return 9
