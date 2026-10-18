@@ -462,6 +462,24 @@ def export_memories(conn: sqlite3.Connection, user_id: str,
     return recall_memories(conn, user_id, limit=100000, character_id=character_id)
 
 
+def vault_summary(conn: sqlite3.Connection, user_id: str,
+                  character_id: str = "chloe") -> dict[str, Any]:
+    """Lifetime Memory Vault stats (Phase A2, 2026-10-18): totals,
+    per-type counts, and the span of what she remembers."""
+    tot = conn.execute(
+        "SELECT COUNT(*) AS n, MIN(created_at) AS first_at, "
+        "MAX(created_at) AS latest_at FROM memories WHERE user_id = ? "
+        "AND character_id = ?", (user_id, character_id)).fetchone()
+    by = conn.execute(
+        "SELECT mem_type, COUNT(*) AS n FROM memories WHERE "
+        "user_id = ? AND character_id = ? GROUP BY mem_type",
+        (user_id, character_id)).fetchall()
+    return {"total": (tot["n"] or 0) if tot else 0,
+            "first_at": tot["first_at"] if tot else None,
+            "latest_at": tot["latest_at"] if tot else None,
+            "by_type": {r["mem_type"]: r["n"] for r in by}}
+
+
 # ---------------------------------------------------------------------------
 # Daily streaks (2026-10-17): consecutive LOCAL days with at least one
 # user turn, per (user, character). Dates arrive pre-computed in the

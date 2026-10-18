@@ -1201,18 +1201,40 @@ let presetSheetGirl = null;
     return res.json();
   }
 
+  let vaultMems = [];
+  let vaultSummary = null;
+  const MEM_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  function paintMemStats() {
+    const el = $('memStats');
+    if (!el) return;
+    const s = vaultSummary;
+    $('memExport').classList.toggle('hidden', !(s && s.total));
+    if (!s || !s.total) { el.textContent = ''; return; }
+    const since = (s.first_at || '').slice(0, 10);
+    el.textContent = s.total + (s.total === 1 ? ' memory' : ' memories') + (since ? ' · remembering since ' + since : '') + ' · she never forgets 💜';
+  }
   function renderMemories(mems) {
     const list = $('memList');
     list.innerHTML = '';
-    $('memForgetAll').classList.toggle('hidden', !mems.length);
+    $('memForgetAll').classList.toggle('hidden', !vaultMems.length);
     if (!mems.length) {
       const d = document.createElement('div');
       d.className = 'mem-empty';
-      d.textContent = "She's still getting to know you \u2014 nothing saved yet. Tell her your name, your favorites, what's going on in your life, and it will show up here.";
+      d.textContent = vaultMems.length ? "Nothing matches that search." : "She's still getting to know you \u2014 nothing saved yet. Tell her your name, your favorites, what's going on in your life, and it will show up here.";
       list.appendChild(d);
       return;
     }
+    let lastMonth = '';
     mems.forEach((m) => {
+      const mk = (m.created_at || '').slice(0, 7);
+      if (mk && mk !== lastMonth) {
+        lastMonth = mk;
+        const hd = document.createElement('div');
+        hd.className = 'mem-month';
+        const yy = parseInt(mk.slice(0, 4), 10), mm = parseInt(mk.slice(5, 7), 10);
+        hd.textContent = (MEM_MONTHS[mm - 1] || mk) + (yy ? ' ' + yy : '');
+        list.appendChild(hd);
+      }
       const row = document.createElement('div');
       row.className = 'mem-item';
       const main = document.createElement('div');
@@ -1236,8 +1258,10 @@ let presetSheetGirl = null;
         del.disabled = true;
         try {
           await memFetch('/api/v1/memory/delete-one', { character_id: currentGirl.id, memory_id: m.id });
-          row.remove();
-          if (!$('memList').children.length) renderMemories([]);
+          vaultMems = vaultMems.filter((x) => x.id !== m.id);
+          if (vaultSummary) { vaultSummary.total = Math.max(0, (vaultSummary.total || 1) - 1); }
+          paintMemStats();
+          renderMemories(applyMemFilter());
         } catch (e) { del.disabled = false; }
       });
       row.appendChild(main);
@@ -1247,19 +1271,39 @@ let presetSheetGirl = null;
     });
   }
 
+  function applyMemFilter() {
+    const q = (($('memSearch') || {}).value || '').trim().toLowerCase();
+    if (!q) return vaultMems;
+    return vaultMems.filter((m) => ((m.text || '') + ' ' + (m.mem_type || '')).toLowerCase().includes(q));
+  }
   async function openMemorySheet() {
     $('memGirlName').textContent = currentGirl.name;
     openSheet('memorySheet');
     $('memList').innerHTML = '<div class="mem-empty">Loading\u2026</div>';
     try {
-      const d = await memFetch('/api/v1/memory/export', { character_id: currentGirl.id });
-      renderMemories(d.memories || []);
+      const d = await memFetch('/api/v1/memory/vault', { character_id: currentGirl.id });
+      vaultMems = d.memories || [];
+      vaultSummary = d.summary || null;
+      paintMemStats();
+      renderMemories(vaultMems);
     } catch (e) {
       $('memList').innerHTML = '<div class="mem-empty">Could not load her memories right now.</div>';
     }
   }
 
   $('memoryBtn').addEventListener('click', openMemorySheet);
+  $('memSearch').addEventListener('input', () => renderMemories(applyMemFilter()));
+  $('memExport').addEventListener('click', async () => {
+    try {
+      const d = await memFetch('/api/v1/memory/vault-export', { character_id: currentGirl.id });
+      const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'whispr-vault-' + currentGirl.id + '.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    } catch (e) { showToast('Export failed — try again in a moment'); }
+  });
   /* ---------- duo mode (2026-10-17): two girls, one thread ---------- */
   let duoPair = [];
   let duoPicks = [];
@@ -1566,6 +1610,9 @@ let presetSheetGirl = null;
     btn.disabled = true;
     try {
       await memFetch('/api/v1/memory/delete', { character_id: currentGirl.id });
+      vaultMems = [];
+      vaultSummary = null;
+      paintMemStats();
       renderMemories([]);
     } catch (e) {}
     btn.disabled = false;

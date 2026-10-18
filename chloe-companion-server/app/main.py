@@ -4358,6 +4358,59 @@ def memory_export(body: UserIdIn, request: Request):
         conn.close()
 
 
+class MemoryVaultIn(BaseModel):
+    character_id: str = "chloe"
+    q: str = ""
+
+
+@app.post("/api/v1/memory/vault")
+def memory_vault(body: MemoryVaultIn, request: Request):
+    """Lifetime Memory Vault (Phase A2, 2026-10-18): the full,
+    searchable memory timeline for one relationship, plus summary
+    stats and the relationship start. Memories are never auto-expired
+    or reset — the vault only changes when she learns something new or
+    the user deletes a memory themselves."""
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        cid = body.character_id or "chloe"
+        q = (body.q or "").strip()
+        mems = store.recall_memories(
+            conn, user_id, keyword=q or None, limit=1000,
+            character_id=cid)
+        return {"memories": mems,
+                "summary": store.vault_summary(conn, user_id, cid),
+                "relationship_start": store.relationship_start(
+                    conn, user_id, cid)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/memory/vault-export")
+def memory_vault_export(body: UserIdIn, request: Request):
+    """Downloadable vault export: her memories of you, in a portable
+    envelope. This envelope is the seed of the Phase D Companion
+    Passport format — do not reshape it casually."""
+    from datetime import datetime, timezone
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        cid = body.character_id or "chloe"
+        mems = store.export_memories(conn, user_id, cid)
+        return {
+            "format": "whispr-memory-vault",
+            "version": 1,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "character_id": cid,
+            "relationship_start": store.relationship_start(
+                conn, user_id, cid),
+            "memory_count": len(mems),
+            "memories": mems,
+        }
+    finally:
+        conn.close()
+
+
 class MemoryDeleteOneIn(BaseModel):
     character_id: str = "chloe"
     memory_id: int
