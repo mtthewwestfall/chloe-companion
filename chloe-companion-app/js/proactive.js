@@ -62,6 +62,21 @@
       div.className = 'bubble her';
       div.innerHTML = esc(m.text);
       log.appendChild(div);
+      // Nudges are the ONLY shareable messages (owner ruling 2026-10-17):
+      // regular chat replies carry no Share button. The pending payload
+      // types these messages; 'nudge' (server default) gets the chip,
+      // wired to app.js's share-card engine.
+      if ((m.message_type || 'nudge') === 'nudge' &&
+          String(m.text || '').trim().length >= 12 &&
+          window.shareHerMessage) {
+        const chip = document.createElement('button');
+        chip.className = 'share-msg-btn';
+        chip.textContent = '\u2197 Share';
+        chip.setAttribute('aria-label', 'Share this message as an image');
+        chip.addEventListener('click', () =>
+          window.shareHerMessage(m.text, m.character_name || 'Chloe'));
+        log.appendChild(chip);
+      }
       log.scrollTop = log.scrollHeight;
     } else if (window.showToast) {
       window.showToast((m.character_name || 'Chloe') + ': ' +

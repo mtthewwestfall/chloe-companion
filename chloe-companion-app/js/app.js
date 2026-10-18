@@ -484,7 +484,10 @@ function addMsg(who, html, opts = {}) {
 
   function addText(who, text, opts = {}, speakerName) {
     const wrap = addMsg(who, esc(text), { caption: who === 'her' ? herCaption(speakerName) : timeNow() });
-    if (who === 'her' && (text || '').trim().length >= 12) {
+    // Share chip is NUDGE-ONLY (owner ruling 2026-10-17): regular chat
+    // replies never get one. Nudges arrive via proactive.js, which adds
+    // its own chip; a caller here must pass opts.share === true.
+    if (who === 'her' && opts.share === true && (text || '').trim().length >= 12) {
       const chip = document.createElement('button');
       chip.className = 'share-msg-btn';
       chip.textContent = '\u2197 Share';
@@ -584,6 +587,9 @@ function addMsg(who, html, opts = {}) {
       }
     } catch (e) {}
   }
+  // proactive.js renders nudge messages itself and hooks the share-card
+  // engine through here to give nudges (only) their Share chip.
+  window.shareHerMessage = shareHerMessage;
 
   function addVoiceNote(url, caption) {
     const isDemo = url === 'demo:voice';
