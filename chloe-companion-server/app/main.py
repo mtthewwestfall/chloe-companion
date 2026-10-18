@@ -2208,6 +2208,47 @@ def drawing_public():
         conn.close()
 
 
+@app.post("/api/v1/voice/say")
+def voice_say(body: VoiceSayIn, request: Request):
+    """Speak arbitrary text in her voice (2026-10-17) — powers the
+    in-app voice call. Metered like a voice note: 1 voice credit per
+    utterance for non-owners."""
+    user_id = _current_user_id(request)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    cid = (body.character_id or "chloe").strip().lower() or "chloe"
+    character = characters.get_character(cid)
+    if not character:
+        raise HTTPException(status_code=404, detail="unknown character")
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        is_owner = user_id in assist._owner_ids()
+        has_quota = is_owner or (user.get("voice_notes_remaining") or 0) > 0
+        if not has_quota:
+            raise HTTPException(status_code=402,
+                                detail="no voice notes remaining")
+        url = voice.maybe_generate_voice_note(
+            text[:600], user_id,
+            character.get("companion_voice") or "liora",
+            quota=True,
+            consume=(lambda: store.consume_voice_note(conn, user_id))
+            if not is_owner else None,
+            character_id=cid)
+        if not url:
+            raise HTTPException(status_code=503,
+                                detail="voice unavailable")
+        row = conn.execute(
+            "SELECT voice_notes_remaining FROM users WHERE user_id = ?",
+            (user_id,)).fetchone()
+        return {"audio_url": url,
+                "voice_notes_remaining":
+                    row["voice_notes_remaining"] if row else None}
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/gifts/catalog")
 def gifts_catalog():
     return {"gifts": [{"key": k, "name": g["name"], "emoji": g["emoji"],
@@ -4004,6 +4045,11 @@ def memory_export(body: UserIdIn, request: Request):
                                                   body.character_id or "chloe")}
     finally:
         conn.close()
+
+
+class VoiceSayIn(BaseModel):
+    character_id: str = "chloe"
+    text: str = ""
 
 
 class GiftGiveIn(BaseModel):
