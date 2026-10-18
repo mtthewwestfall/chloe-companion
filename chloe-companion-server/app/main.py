@@ -848,6 +848,115 @@ def admin_create_requested_action(girl_id: str, body: RequestedActionIn,
     return _admin_queue_requested_action(girl_id, body.action)
 
 
+class ImageRenderIn(BaseModel):
+    prompt: str
+    girl_id: str | None = None
+    image_b64: str | None = None
+
+
+def _decode_reference_upload(image_b64: str) -> str:
+    """An owner-supplied reference picture (base64, optional data:
+    URI) as a temp file for the render's contextImages. The caller
+    deletes the file when the render finishes."""
+    import base64 as _b64
+    import tempfile as _tempfile
+    raw = (image_b64 or "").strip()
+    if raw.startswith("data:"):
+        raw = raw.split(",", 1)[-1]
+    try:
+        data = _b64.b64decode(raw, validate=True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="reference_invalid")
+    if len(data) < 1024:
+        raise HTTPException(status_code=400, detail="reference_invalid")
+    suffix = ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        suffix = ".png"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        suffix = ".webp"
+    fd, path = _tempfile.mkstemp(suffix=".ref" + suffix)
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
+    return path
+
+
+def _admin_run_image_render(prompt_text: str, girl_id: str | None,
+                            image_b64: str | None) -> dict:
+    """Admin Sogni plan-session IMAGE render (2026-10-17): one image
+    from an arbitrary prompt plus ONE reference — either the girl's
+    own face-lock frame (her avatar, resolved server-side) or an
+    owner-uploaded picture handed to the endpoint.
+
+    The render runs the Her Day way: the reference travels as
+    contextImages through assist's locked seam on the stored
+    subscription session — never the paid dashboard API, never a
+    fresh sign-in — serialized against every other render on the
+    shared login. The seam's output already lands in GENERATED_DIR,
+    served at /generated/. A non-done outcome (throttle pause,
+    moderation, dead session after the seam's own single heal)
+    surfaces as 502: nothing retries or re-logs-in from here."""
+    prompt = (prompt_text or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt_required")
+    gid = (girl_id or "").strip().lower()
+    if gid and image_b64:
+        raise HTTPException(status_code=400, detail="reference_ambiguous")
+    ref_path = None
+    try:
+        if image_b64:
+            ref_path = _decode_reference_upload(image_b64)
+        elif gid:
+            roster = {str(c.get("id") or "").lower(): c
+                      for c in characters.get_characters(
+                          include_private=True)}
+            char = roster.get(gid)
+            if char is None:
+                raise HTTPException(status_code=400,
+                                    detail="unknown_character")
+            ref_path = assist._fetch_first_frame(
+                char.get("avatar_url") or "")
+            if not ref_path:
+                raise HTTPException(status_code=400,
+                                    detail="reference_unavailable")
+        conn = _conn()
+        try:
+            session = assist.stored_sogni_session(conn)
+        finally:
+            conn.close()
+        if not session or session.get("api_key"):
+            # Same stance as her_day._plan_session: the dashboard API
+            # key is the paid path, not a plan session — never used.
+            raise HTTPException(status_code=503,
+                                detail="sogni_session_unavailable")
+        outcome, _fresh = assist._sogni_plan_image_run(
+            session, prompt, ref_path)
+    finally:
+        if ref_path:
+            try:
+                os.unlink(ref_path)
+            except OSError:
+                pass
+    if outcome.get("status") != "done" or not outcome.get("path"):
+        raise HTTPException(
+            status_code=502,
+            detail="sogni_{0}: {1}".format(
+                outcome.get("status") or "failed",
+                outcome.get("detail") or ""))
+    return {"ok": True, "status": "done",
+            "url": "/generated/" + os.path.basename(outcome["path"]),
+            "project_id": outcome.get("project_id")}
+
+
+@app.post("/api/v1/admin/image-renders")
+def admin_create_image_render(body: ImageRenderIn, request: Request):
+    """Run ONE plan-session image render (an arbitrary prompt plus a
+    girl's reference or an uploaded reference) on the backend's live
+    Sogni session and return its /generated/ URL."""
+    _require_admin(request)
+    return _admin_run_image_render(body.prompt, body.girl_id,
+                                   body.image_b64)
+
+
 # ---------------------------------------------------------------------------
 # Admin: Gemini API key rotation (2026-10-06). Key values are NEVER returned
 # in full — only masked ("...abcd"). See app/gemini_keys.py.
