@@ -309,6 +309,7 @@
     $('chatName').textContent = girl.name;
     paintCharacterStatus();
     paintStreak();
+    paintWorld();
     paintAnniversary();
     clearPendingAttachments();
     // Owner media attachments work in every character thread.
@@ -941,6 +942,7 @@ let presetSheetGirl = null;
         myStreaks[targetCharacterId] = { current: res.streak_current, longest: Math.max(res.streak_current, prev.longest || 0) };
         paintStreak();
       }
+      if (res.world_status) { worldStatusByGirl[targetCharacterId] = res.world_status; paintWorld(); }
       maybePeakPaywall(res, text);
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
@@ -1773,6 +1775,7 @@ let presetSheetGirl = null;
   setTimeout(() => { if (messagesRemaining > 0) showPaywall(false); }, 1200);
 }
 let myStreaks = {};
+let worldStatusByGirl = {};
   let myAnniversaries = {};
   function paintAnniversary() {
     const days = myAnniversaries[currentGirl.id] || 0;
@@ -1794,6 +1797,16 @@ let myStreaks = {};
       chatLog.appendChild(card);
       scrollBottom();
     }, 700);
+  }
+  function paintWorld() {
+    const chip = $('worldChip');
+    if (!chip || !currentGirl) return;
+    const known = worldStatusByGirl[currentGirl.id];
+    if (known) { $('worldText').textContent = known; chip.classList.remove('hidden'); return; }
+    fetch(CONFIG.API_BASE_URL + '/api/v1/world/status?girl_id=' + encodeURIComponent(currentGirl.id))
+      .then((r) => r.json())
+      .then((s) => { if (s && s.status_line) { worldStatusByGirl[currentGirl.id] = s.status_line; if (currentGirl) { $('worldText').textContent = s.status_line; chip.classList.remove('hidden'); } } })
+      .catch(() => {});
   }
   function paintStreak() {
     const chip = $('streakChip');

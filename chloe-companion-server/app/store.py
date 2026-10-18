@@ -1928,3 +1928,85 @@ def get_random_give_media(conn: "sqlite3.Connection", girl_id: str,
         (girl_id.strip().lower(), kind),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ---------- Living World persistence (Phase A1, 2026-10-18) ----------
+
+def _ensure_world(conn: "sqlite3.Connection") -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS world_state (
+               girl_id TEXT NOT NULL,
+               date TEXT NOT NULL,
+               mood TEXT NOT NULL,
+               plan_json TEXT NOT NULL,
+               PRIMARY KEY (girl_id, date))""")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS world_events (
+               date TEXT NOT NULL,
+               slot INTEGER NOT NULL,
+               girl_a TEXT NOT NULL,
+               girl_b TEXT NOT NULL,
+               kind TEXT NOT NULL,
+               activity TEXT NOT NULL DEFAULT '',
+               place TEXT NOT NULL,
+               block_idx INTEGER NOT NULL,
+               text TEXT NOT NULL,
+               PRIMARY KEY (date, slot))""")
+
+
+def save_world_day(conn: "sqlite3.Connection", girl_id: str,
+                   date_str: str, plan: dict) -> None:
+    import json as _json
+    _ensure_world(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO world_state (girl_id, date, mood, "
+        "plan_json) VALUES (?, ?, ?, ?)",
+        (girl_id, date_str, plan.get("mood", ""),
+         _json.dumps({"blocks": plan.get("blocks", [])})))
+    conn.commit()
+
+
+def get_world_day(conn: "sqlite3.Connection", girl_id: str,
+                  date_str: str) -> dict | None:
+    import json as _json
+    _ensure_world(conn)
+    row = conn.execute(
+        "SELECT mood, plan_json FROM world_state WHERE girl_id = ? "
+        "AND date = ?", (girl_id, date_str)).fetchone()
+    if not row:
+        return None
+    try:
+        blocks = _json.loads(row[1]).get("blocks", [])
+    except Exception:
+        blocks = []
+    return {"girl_id": girl_id, "date": date_str, "mood": row[0],
+            "blocks": [tuple(b) for b in blocks]}
+
+
+def save_world_events(conn: "sqlite3.Connection", date_str: str,
+                      events: list) -> None:
+    _ensure_world(conn)
+    for ev in events:
+        conn.execute(
+            "INSERT OR IGNORE INTO world_events (date, slot, girl_a, "
+            "girl_b, kind, activity, place, block_idx, text) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (date_str, ev["slot"], ev["girl_a"], ev["girl_b"],
+             ev["kind"], ev.get("activity", ""), ev["place"],
+             ev["block_idx"], ev["text"]))
+    conn.commit()
+
+
+def get_world_events(conn: "sqlite3.Connection",
+                     date_str: str) -> list | None:
+    _ensure_world(conn)
+    rows = conn.execute(
+        "SELECT slot, girl_a, girl_b, kind, activity, place, "
+        "block_idx, text FROM world_events WHERE date = ? "
+        "ORDER BY slot",
+        (date_str,)).fetchall()
+    if not rows:
+        return None
+    return [{"slot": r[0], "girl_a": r[1], "girl_b": r[2], "kind": r[3],
+             "activity": r[4], "place": r[5], "block_idx": r[6],
+             "text": r[7]} for r in rows]
