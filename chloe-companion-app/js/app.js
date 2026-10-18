@@ -50,6 +50,16 @@
       videos: [],
       desc: 'Sun-kissed, easygoing, and always mid-laugh.',
       bestFor: 'Beach-day lightness, music at sunset, and talks that drift past midnight.' },
+    { id: 'nova', name: 'Nova',
+      avatar: 'https://companion.lockeddoor.ai/img/nova-avatar.jpg',
+      videos: [],
+      desc: 'Late-night wit, dry edge, soft underneath.',
+      bestFor: 'Banter, late-night talks, and roleplay that stays light and charged.' },
+    { id: 'elise', name: 'Elise',
+      avatar: 'https://companion.lockeddoor.ai/img/elise-avatar.jpg',
+      videos: [],
+      desc: 'Free-spirited, playful, and a little bit chaotic.',
+      bestFor: 'Mini-adventures, laughing voice notes, and talks with zero filter.' },
   ];
   // The live picker list: starts as the curated cards, then loadRoster()
   // reconciles it with the server roster (see below).

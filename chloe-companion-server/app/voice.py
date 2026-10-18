@@ -100,6 +100,8 @@ _CHARACTER_GEMINI_VOICES = {
     "bailey": "Laomedeia",    # upbeat (was Bella; distinct from Mara)
     "rina": "Callirrhoe",     # easy-going (was Gigi)
     "sabrina": "Kore",        # firm (was Matilda)
+    "nova": "Gacrux",         # mature (new 2026-10-18)
+    "elise": "Achernar",      # soft (new 2026-10-18)
     "jake": "Alnilam",        # firm (was Josh)
     "eli": "Schedar",         # even (was Arnold)
     "rocky": "Charon",        # informative (was Adam/rex)
