@@ -314,7 +314,7 @@ def _next_stage(conn: Any, user_id: str, girl_id: str) -> int:
         gives = int(row[0]) if row else 0
     except Exception:  # noqa: BLE001 — progression is a nicety here
         gives = 0
-    return (gives % 9) + 1
+    return (gives % store.give_stage_cap(user_id)) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -344,11 +344,12 @@ def _static_media_dir() -> str:
                         "chloe-companion-app", "media")
 
 
-def _stage_order_from(want_stage: int) -> list[int]:
+def _stage_order_from(want_stage: int, cap: int = 9) -> list[int]:
     """Stage visit order for an ask-aware pick: the asked stage first,
     then by distance, the stage below before the stage above at each
-    distance (1 away below, 1 away above, 2 below, 2 above, ...)."""
-    return sorted(range(1, 10),
+    distance (1 away below, 1 away above, 2 below, 2 above, ...).
+    Never leaves 1..cap — group/event accounts cap at 3."""
+    return sorted(range(1, cap + 1),
                   key=lambda s: (abs(s - want_stage),
                                  0 if s <= want_stage else 1))
 
@@ -375,6 +376,12 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
     Within a stage: the requested kind, then unseen, then row order."""
     if want_stage is not None and not (1 <= int(want_stage) <= 9):
         want_stage = None
+    # Group/event accounts cap at stage 3 (owner rule, 2026-10-18):
+    # the ask clamps, the progression wraps inside the cap, and the
+    # ask-aware visit order never leaves it.
+    cap = store.give_stage_cap(user_id)
+    if want_stage is not None:
+        want_stage = min(int(want_stage), cap)
     try:
         row = conn.execute(
             "SELECT gives_received FROM user_give_progress "
@@ -389,11 +396,11 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
         gives, seen = 0, set()
     if want_stage is not None:
         return _pick_preset_for_stage(conn, girl_id, want_kind,
-                                      int(want_stage), seen)
-    stage = (gives % 9) + 1
+                                      int(want_stage), seen, cap=cap)
+    stage = (gives % cap) + 1
     rows: list[dict[str, Any]] = []
     try:
-        for try_stage in list(range(stage, 10)) + list(range(1, stage)):
+        for try_stage in list(range(stage, cap + 1)) + list(range(1, stage)):
             found = conn.execute(
                 "SELECT id, url FROM girl_media WHERE girl_id = ? "
                 "AND kind = 'give' AND stage = ? ORDER BY id ASC",
@@ -417,7 +424,7 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
                     continue
                 m = re.search(r"-stage(\d+)", fl)
                 st = int(m.group(1)) if m else 0
-                if 1 <= st <= 9:
+                if 1 <= st <= cap:
                     rows.append({"id": None, "url": "/media/" + fn,
                                  "media_type": "video", "stage": st})
         except OSError:
@@ -431,7 +438,7 @@ def _pick_preset(conn: Any, user_id: str, girl_id: str,
 
 def _pick_preset_for_stage(conn: Any, girl_id: str, want_kind: str,
                            want_stage: int,
-                           seen: set) -> dict[str, Any] | None:
+                           seen: set, cap: int = 9) -> dict[str, Any] | None:
     """Ask-aware pick: her presets grouped by stage (DB rows first;
     the static library only when she has no staged DB rows at all —
     the same precedence as the legacy walk), visited in
@@ -466,7 +473,7 @@ def _pick_preset_for_stage(conn: Any, girl_id: str, want_kind: str,
                          "media_type": "video", "stage": st})
         except OSError:
             pass
-    for st in _stage_order_from(want_stage):
+    for st in _stage_order_from(want_stage, cap):
         pick = _prefer_within_stage(by_stage.get(st) or [], want_kind,
                                     seen)
         if pick:
