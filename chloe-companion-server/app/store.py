@@ -2028,3 +2028,68 @@ def get_world_events(conn: "sqlite3.Connection",
     return [{"slot": r[0], "girl_a": r[1], "girl_b": r[2], "kind": r[3],
              "activity": r[4], "place": r[5], "block_idx": r[6],
              "text": r[7]} for r in rows]
+
+
+# ---------- Public IP packages (Phase B, 2026-10-18) ----------
+
+def _ensure_public_packages(conn: "sqlite3.Connection") -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS public_packages (
+               girl_id TEXT NOT NULL,
+               date TEXT NOT NULL,
+               package_json TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'pending',
+               created_at TEXT NOT NULL DEFAULT (datetime('now')),
+               updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+               PRIMARY KEY (girl_id, date))""")
+
+
+def save_public_package(conn: "sqlite3.Connection", girl_id: str,
+                        date_str: str, pkg: dict) -> None:
+    import json as _json
+    _ensure_public_packages(conn)
+    conn.execute(
+        "INSERT INTO public_packages (girl_id, date, package_json) "
+        "VALUES (?, ?, ?) ON CONFLICT(girl_id, date) DO UPDATE SET "
+        "package_json = excluded.package_json, "
+        "updated_at = datetime('now')",
+        (girl_id, date_str, _json.dumps(pkg)))
+    conn.commit()
+
+
+def get_public_package(conn: "sqlite3.Connection", girl_id: str,
+                       date_str: str) -> dict | None:
+    import json as _json
+    _ensure_public_packages(conn)
+    row = conn.execute(
+        "SELECT package_json, status FROM public_packages WHERE "
+        "girl_id = ? AND date = ?", (girl_id, date_str)).fetchone()
+    if not row:
+        return None
+    try:
+        pkg = _json.loads(row[0])
+    except Exception:
+        pkg = {}
+    return {"girl_id": girl_id, "date": date_str, "status": row[1],
+            "package": pkg}
+
+
+def list_public_packages(conn: "sqlite3.Connection",
+                         date_str: str) -> list:
+    _ensure_public_packages(conn)
+    rows = conn.execute(
+        "SELECT girl_id FROM public_packages WHERE date = ? "
+        "ORDER BY girl_id", (date_str,)).fetchall()
+    return [p for p in (get_public_package(conn, r[0], date_str)
+                        for r in rows) if p]
+
+
+def set_public_package_status(conn: "sqlite3.Connection", girl_id: str,
+                              date_str: str, status: str) -> bool:
+    _ensure_public_packages(conn)
+    cur = conn.execute(
+        "UPDATE public_packages SET status = ?, "
+        "updated_at = datetime('now') WHERE girl_id = ? AND date = ?",
+        (status, girl_id, date_str))
+    conn.commit()
+    return cur.rowcount > 0
