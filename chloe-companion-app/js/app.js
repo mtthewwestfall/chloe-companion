@@ -915,6 +915,7 @@ let presetSheetGirl = null;
     if (res.image_url) addGeneratedImage(res.image_url, targetCharacterName);
     if (res.sogni_login_box) addSogniLoginButton();
   }
+      lastHerReply = { text: res.reply_text || '', voiceUrl: res.voice_note_url || '', girl: targetCharacterId, at: Date.now() };
       setMessagesRemaining(res.messages_remaining);
       maybeReferralAsk(res, text);
       if (typeof res.streak_current === 'number') {
@@ -1221,6 +1222,107 @@ let presetSheetGirl = null;
   }
 
   $('memoryBtn').addEventListener('click', openMemorySheet);
+  /* ---------- voice call (2026-10-17) ---------- */
+  let lastHerReply = null;
+  let callActive = false;
+  let callAudio = null;
+  let callRec = null;
+
+  function callSetStatus(t) { const el = $('callStatus'); if (el) el.textContent = t; }
+
+  function openCall() {
+    $('callName').textContent = currentGirl.name;
+    const av = $('callAvatar');
+    if (currentGirl.avatar) { av.src = currentGirl.avatar; av.style.display = 'block'; } else av.style.display = 'none';
+    $('callHeard').textContent = '';
+    callSetStatus('Tap to talk — she answers out loud, in her own voice.');
+    openSheet('callSheet');
+  }
+
+  function endCall() {
+    callActive = false;
+    try { if (callRec) callRec.abort(); } catch (e) {}
+    if (callAudio) { try { callAudio.pause(); } catch (e) {} callAudio = null; }
+    closeSheet('callSheet');
+  }
+
+  function speakForCall(text) {
+    const clean = (text || '').replace(/[*_#`>]/g, '').trim();
+    if (!clean) { callSetStatus('Tap to talk'); return; }
+    callSetStatus(currentGirl.name + ' is speaking…');
+    fetch(CONFIG.API_BASE_URL + '/api/v1/voice/say', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getToken() },
+      body: JSON.stringify({ character_id: currentGirl.id, text: clean }),
+    }).then(async (r) => {
+      if (!callActive) return;
+      if (r.status === 402) { callSetStatus('Out of voice notes — top up to keep talking out loud 💜'); return; }
+      const d = await r.json();
+      if (!d.audio_url) { callSetStatus('Tap to talk'); return; }
+      if (typeof d.voice_notes_remaining === 'number') $('statVoice').textContent = d.voice_notes_remaining;
+      callAudio = new Audio(d.audio_url);
+      callAudio.onended = () => { if (callActive) listenForCall(); };
+      callAudio.onerror = () => callSetStatus('Tap to talk');
+      callAudio.play().catch(() => callSetStatus('Tap to talk'));
+    }).catch(() => callSetStatus('Tap to talk'));
+  }
+
+  function playForCall(reply) {
+    if (!callActive || !reply) { callSetStatus('Tap to talk'); return; }
+    if (reply.voiceUrl) {
+      callSetStatus(currentGirl.name + ' is speaking…');
+      callAudio = new Audio(reply.voiceUrl);
+      callAudio.onended = () => { if (callActive) listenForCall(); };
+      callAudio.onerror = () => speakForCall(reply.text);
+      callAudio.play().catch(() => speakForCall(reply.text));
+    } else {
+      speakForCall(reply.text);
+    }
+  }
+
+  function listenForCall() {
+    if (!callActive) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      callSetStatus('Voice calls need Chrome or a recent Safari for your mic 💜');
+      return;
+    }
+    callSetStatus('Listening… talk to her');
+    try { callRec = new SR(); } catch (e) { callSetStatus('Mic unavailable 💜'); return; }
+    callRec.lang = 'en-US';
+    callRec.interimResults = false;
+    callRec.maxAlternatives = 1;
+    let gotResult = false;
+    callRec.onresult = async (ev) => {
+      gotResult = true;
+      const transcript = (ev.results[0][0].transcript || '').trim();
+      if (!transcript) { callSetStatus('Tap to talk'); return; }
+      $('callHeard').textContent = 'You: ' + transcript;
+      callSetStatus(currentGirl.name + ' is thinking…');
+      const before = lastHerReply ? lastHerReply.at : 0;
+      await sendMessage(transcript);
+      if (!callActive) return;
+      if (lastHerReply && lastHerReply.at !== before && lastHerReply.girl === currentGirl.id) {
+        playForCall(lastHerReply);
+      } else {
+        callSetStatus('Tap to talk');
+      }
+    };
+    callRec.onerror = (ev) => {
+      if (ev.error === 'not-allowed') callSetStatus('Mic blocked — allow microphone access to talk 💜');
+      else if (callActive && !gotResult) callSetStatus('Tap to talk');
+    };
+    callRec.onend = () => {};
+    try { callRec.start(); } catch (e) {}
+  }
+
+  const phoneBtn = $('phoneCallBtn');
+  if (phoneBtn) phoneBtn.addEventListener('click', () => { callActive = true; openCall(); });
+  const talkBtn = $('talkBtn');
+  if (talkBtn) talkBtn.addEventListener('click', listenForCall);
+  const endBtn = $('endCallBtn');
+  if (endBtn) endBtn.addEventListener('click', endCall);
+
   const giftBtnEl = $('giftBtn');
   if (giftBtnEl) giftBtnEl.addEventListener('click', openGiftSheet);
 
