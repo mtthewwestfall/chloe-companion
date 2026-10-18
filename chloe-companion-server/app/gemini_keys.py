@@ -159,6 +159,38 @@ Stage 1 — see clearly (key-manager overhaul, 2026-10-18):
     label in the attention_reason column — a dead key is never again
     conflated with a key that is merely cooling down.
     GEMINI_KEY_FORENSICS=0 restores unlabeled payment handling.
+
+Stage 2 — protect what matters (key-manager overhaul, 2026-10-18):
+(a) Reserved lanes: the K healthiest-eligible free keys by id
+    (GEMINI_RESERVE_INTERACTIVE, default 3) are reserved for
+    interactive sources (companion chat/voice, live calls). Bulk
+    sources (roof-rover scans, warmup, her-day/give pipelines,
+    prober-adjacent tooling) never draw them; when the general pool
+    empties, bulk gets a typed pool_busy rejection (status_out /
+    HTTP 429 at the proxy) with retry_after instead of eating the
+    reserve. Interactive traffic sees the whole pool and spills into
+    the general keys freely. GEMINI_LANES=0 disables.
+(b) Storm breaker: rolling real-traffic failure window in the
+    manager. Tripped (>= 20 attempts in 60 s, >= 50% failures) it
+    opens for GEMINI_STORM_OPEN_S (default 30 s): bulk fails fast
+    with the typed signal, interactive gets a shortened walk
+    (max 2 attempts). A successes-proportional attempts ceiling
+    keeps retries from self-amplifying. GEMINI_STORM_BREAKER=0 off.
+(c) Single-flight: concurrent identical post_json calls (same
+    source + URL + payload) coalesce onto one upstream execution;
+    waiters share a deep copy of the leader's result, or run the
+    call themselves if the leader failed/timed out. Leased calls
+    never coalesce (their accounting is per-lease).
+    GEMINI_SINGLEFLIGHT=0 off.
+(d) Leases: manager-issued bulk budgets in gemini_leases.
+    request_lease(source, job_id, calls) -> lease dict or None
+    (denied). post_json(lease_id=...) charges one unit per upstream
+    attempt; exhaustion aborts the walk with a typed lease_exhausted.
+    Bulk sources without an explicit lease are charged against a
+    generous standing per-source daily default lease
+    (GEMINI_LEASE_DEFAULT_CALLS, default 100000) so accounting is
+    real but nothing breaks on day one. GEMINI_LEASES=0 disables
+    charging entirely.
 """
 from __future__ import annotations
 
@@ -473,6 +505,365 @@ def _cell_model(model: str | None, capability: str) -> str:
     if capability == "grounding":
         return "*"
     return model or "*"
+
+
+# --- Stage 2: protect (2026-10-18) -------------------------------------------
+# Storm-breaker state, guarded by _lock: rolling real-attempt outcomes
+# (mono_ts, ok) and the open-until timestamp.
+_storm_events: deque = deque()
+_storm_open_until: float = 0.0
+_STORM_WINDOW_S = 60.0
+_STORM_MIN_EVENTS = 20
+_STORM_FAIL_SHARE = 0.5
+# Single-flight registry, guarded by _flight_lock.
+_flight_lock = threading.Lock()
+_flights: dict[str, dict] = {}
+_flight_hits = 0
+_flight_leader_runs = 0
+
+# Source classes for lanes/leases. Interactive is the safe default:
+# only sources explicitly known to be bulk are treated as bulk (plus
+# env additions). The live-call voice source starts with the bulk
+# "roof-rover" prefix, so interactive membership is checked FIRST.
+_BULK_EXACT_SOURCES = {
+    "prober", "whispr-facecheck", "whispr-code-review",
+    "whispr-dev-bridge", "whispr-browser-bridge", "whispr-public-ip",
+    "hannah-image", "hannah-attachments", "prompt-studio",
+}
+_BULK_SOURCE_PREFIXES = ("roof-rover", "warmup", "her-day", "give-")
+_INTERACTIVE_EXACT_SOURCES = {
+    "roof-rover-voice", "whispr-chat", "whispr-duo", "whispr-voice",
+    "whispr-search", "sims-think", "creator-bot", "whispr-vision",
+}
+
+
+def _env_list(name: str) -> set[str]:
+    raw = (os.environ.get(name, "") or "").strip()
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def _source_class(source: str | None) -> str:
+    """'bulk' or 'interactive' for a post_json source tag."""
+    s = (source or "unknown").strip()
+    if s in _INTERACTIVE_EXACT_SOURCES \
+            or s in _env_list("GEMINI_INTERACTIVE_SOURCES"):
+        return "interactive"
+    if s in _BULK_EXACT_SOURCES \
+            or s in _env_list("GEMINI_BULK_SOURCES") \
+            or any(s.startswith(p) for p in _BULK_SOURCE_PREFIXES):
+        return "bulk"
+    return "interactive"
+
+
+def _lanes_on() -> bool:
+    return _flag("GEMINI_LANES", "1")
+
+
+def _reserve_interactive_count() -> int:
+    try:
+        return max(0, int(os.environ.get(
+            "GEMINI_RESERVE_INTERACTIVE", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _lane_reserve_ids(conn) -> set[int]:
+    """The free keys reserved for interactive traffic: the K highest
+    ids among active, attention-free free keys (K =
+    GEMINI_RESERVE_INTERACTIVE). Chosen from usable keys so dead keys
+    (e.g. the rested needs_attention ids at the top of the range)
+    never waste reserve slots."""
+    if not _lanes_on():
+        return set()
+    k = _reserve_interactive_count()
+    if k <= 0:
+        return set()
+    try:
+        rows = conn.execute(
+            """SELECT id FROM gemini_keys
+               WHERE is_paid = 0 AND is_active = 1
+                 AND needs_attention = 0
+               ORDER BY id DESC LIMIT ?""",
+            (k,),
+        ).fetchall()
+        return {r["id"] for r in rows}
+    except Exception:
+        return set()
+
+
+def _pool_busy_retry_after(lane_ids: set[int]) -> int:
+    """Seconds until the earliest general (non-reserve) key leaves
+    its backoff — the honest retry_after for a pool_busy rejection."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            rows = conn.execute(
+                """SELECT id, quota_exhausted_until FROM gemini_keys
+                   WHERE is_active = 1 AND needs_attention = 0
+                     AND quota_exhausted_until IS NOT NULL
+                     AND quota_exhausted_until > datetime('now')"""
+            ).fetchall()
+        finally:
+            conn.close()
+        waits = []
+        now = time.time()
+        for r in rows:
+            if r["id"] in lane_ids:
+                continue
+            until = _parse_ts(r["quota_exhausted_until"])
+            if until:
+                waits.append(until - now)
+        if waits:
+            return int(max(5, min(min(waits), 900)))
+    except Exception:
+        pass
+    return 60
+
+
+def _storm_breaker_on() -> bool:
+    return _flag("GEMINI_STORM_BREAKER", "1")
+
+
+def _storm_open_s() -> float:
+    return max(1.0, _env_float("GEMINI_STORM_OPEN_S", 30.0))
+
+
+def _note_storm_event_locked(ok: bool) -> None:
+    """Record one real attempt outcome and trip the breaker when the
+    rolling window goes bad. Caller must hold _lock."""
+    global _storm_open_until
+    now = time.monotonic()
+    _storm_events.append((now, ok))
+    cutoff = now - 120.0
+    while _storm_events and _storm_events[0][0] <= cutoff:
+        _storm_events.popleft()
+    if not _storm_breaker_on() or _storm_open_until > now:
+        return
+    recent = [(ts, o) for ts, o in _storm_events
+              if ts > now - _STORM_WINDOW_S]
+    if len(recent) >= _STORM_MIN_EVENTS:
+        fails = sum(1 for _ts, o in recent if not o)
+        if fails / len(recent) >= _STORM_FAIL_SHARE:
+            _storm_open_until = now + _storm_open_s()
+            logger.warning(
+                "gemini_keys: STORM BREAKER open for %.0fs "
+                "(%d/%d attempts failed in the last %.0fs)",
+                _storm_open_s(), fails, len(recent), _STORM_WINDOW_S)
+
+
+def _storm_stats() -> dict:
+    """(open, seconds_left, events_60s, failures_60s, successes_60s)."""
+    now = time.monotonic()
+    with _lock:
+        recent = [(ts, o) for ts, o in _storm_events
+                  if ts > now - _STORM_WINDOW_S]
+        fails = sum(1 for _ts, o in recent if not o)
+        return {
+            "open": _storm_open_until > now,
+            "open_s_left": max(0.0, _storm_open_until - now),
+            "events_60s": len(recent),
+            "failures_60s": fails,
+            "successes_60s": len(recent) - fails,
+        }
+
+
+def _singleflight_on() -> bool:
+    return _flag("GEMINI_SINGLEFLIGHT", "1")
+
+
+def _flight_key(source: str, url: str, payload: dict) -> str:
+    raw = json.dumps(payload or {}, sort_keys=True, default=str)
+    return hashlib.sha256(
+        (source + "\n" + url + "\n" + raw).encode("utf-8")).hexdigest()
+
+
+# --- Leases (Stage 2d) ---------------------------------------------------------
+
+def _leases_on() -> bool:
+    return _flag("GEMINI_LEASES", "1")
+
+
+def _lease_max_calls() -> int:
+    try:
+        return max(1, int(os.environ.get("GEMINI_LEASE_MAX_CALLS",
+                                         "5000")))
+    except (TypeError, ValueError):
+        return 5000
+
+
+def _lease_max_active_per_source() -> int:
+    try:
+        return max(1, int(os.environ.get(
+            "GEMINI_LEASE_MAX_ACTIVE_PER_SOURCE", "8")))
+    except (TypeError, ValueError):
+        return 8
+
+
+def _lease_default_calls() -> int:
+    try:
+        return max(1, int(os.environ.get("GEMINI_LEASE_DEFAULT_CALLS",
+                                         "100000")))
+    except (TypeError, ValueError):
+        return 100000
+
+
+def _lease_row_to_dict(r) -> dict:
+    return {
+        "lease_id": r["lease_id"],
+        "source": r["source"],
+        "job_id": r["job_id"],
+        "budget_total": r["budget_total"],
+        "budget_used": r["budget_used"],
+        "budget_left": max(0, r["budget_total"] - r["budget_used"]),
+        "status": r["status"],
+        "expires_at": r["expires_at"],
+    }
+
+
+def request_lease(source: str, job_id: str, calls: int,
+                  ttl_s: float = 3600.0) -> dict | None:
+    """Issue a bulk lease: `calls` upstream attempts for
+    (source, job_id). Idempotent per (source, job_id) while the
+    lease is active AND still has budget. Returns the lease dict,
+    or None when denied (leases off, invalid size, or the source
+    already holds the max active leases)."""
+    return _issue_lease(source, job_id, calls, ttl_s,
+                        enforce_caps=True, roll_when_exhausted=False)
+
+
+def _issue_lease(source: str, job_id: str, calls: int,
+                 ttl_s: float = 3600.0,
+                 enforce_caps: bool = True,
+                 roll_when_exhausted: bool = False) -> dict | None:
+    if not _leases_on():
+        return None
+    source = (source or "unknown")[:64]
+    job_id = (job_id or "")[:128]
+    if not job_id:
+        return None
+    try:
+        calls = int(calls)
+    except (TypeError, ValueError):
+        return None
+    if calls < 1 or (enforce_caps and calls > _lease_max_calls()):
+        return None
+    import secrets as _secrets
+    now = time.time()
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            existing = conn.execute(
+                """SELECT * FROM gemini_leases
+                   WHERE source = ? AND job_id = ? AND status = 'active'
+                     AND (expires_at IS NULL OR expires_at > ?)
+                   ORDER BY created_at DESC LIMIT 1""",
+                (source, job_id, now),
+            ).fetchone()
+            if existing and (not roll_when_exhausted
+                             or existing["budget_used"]
+                             < existing["budget_total"]):
+                return _lease_row_to_dict(existing)
+            active = conn.execute(
+                """SELECT COUNT(*) AS n FROM gemini_leases
+                   WHERE source = ? AND status = 'active'
+                     AND (expires_at IS NULL OR expires_at > ?)""",
+                (source, now),
+            ).fetchone()["n"]
+            if enforce_caps and active >= _lease_max_active_per_source():
+                return None
+            lease_id = "lease_" + _secrets.token_hex(8)
+            conn.execute(
+                """INSERT INTO gemini_leases
+                       (lease_id, source, job_id, budget_total,
+                        budget_used, created_at, expires_at, status)
+                   VALUES (?, ?, ?, ?, 0, datetime('now'), ?, 'active')""",
+                (lease_id, source, job_id, calls,
+                 now + max(60.0, float(ttl_s))),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM gemini_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            return _lease_row_to_dict(row)
+        finally:
+            conn.close()
+
+
+def lease_status(lease_id: str) -> dict | None:
+    """Current state of one lease (for callers/admin)."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            row = conn.execute(
+                "SELECT * FROM gemini_leases WHERE lease_id = ?",
+                (lease_id,),
+            ).fetchone()
+            return _lease_row_to_dict(row) if row else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def release_lease(lease_id: str) -> bool:
+    """Close a lease early (holder is done)."""
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            cur = conn.execute(
+                """UPDATE gemini_leases SET status = 'released'
+                   WHERE lease_id = ? AND status = 'active'""",
+                (lease_id,),
+            )
+            conn.commit()
+            return (cur.rowcount or 0) > 0
+        finally:
+            conn.close()
+
+
+def _lease_charge(lease_id: str) -> bool:
+    """Atomically spend one unit of a lease. False when the lease is
+    unknown, released, expired, or exhausted."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            cur = conn.execute(
+                """UPDATE gemini_leases
+                   SET budget_used = budget_used + 1
+                   WHERE lease_id = ? AND status = 'active'
+                     AND budget_used < budget_total
+                     AND (expires_at IS NULL OR expires_at > ?)""",
+                (lease_id, time.time()),
+            )
+            conn.commit()
+            return (cur.rowcount or 0) > 0
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def _default_source_lease(source: str) -> str | None:
+    """The standing daily default lease for a bulk source (Stage 2d):
+    generous, persisted, and really charged, so unleased bulk traffic
+    is accounted without breaking on day one. None when leases are
+    off or issuance is denied (caller then runs unleased)."""
+    if not _leases_on():
+        return None
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Internal issuance: the public size cap does not apply (the
+    # default must stay generous), and an exhausted default rolls
+    # into a fresh lease via _issue_lease's has-budget check.
+    lease = _issue_lease(source, f"default:{source}:{day}",
+                         _lease_default_calls(), ttl_s=26 * 3600.0,
+                         enforce_caps=False, roll_when_exhausted=True)
+    return lease["lease_id"] if lease else None
 
 
 def _model_is_dead(model: str | None) -> bool:
@@ -957,6 +1348,37 @@ def degradation_info() -> dict:
                      tz=timezone.utc).isoformat()}
                 for m, until in sorted(_model_dead_until.items())
                 if until > time.monotonic()]
+            # Stage 2 observability: lanes, storm breaker, single
+            # flight, leases.
+            try:
+                lane_conn = db.connect()
+                try:
+                    _ensure_table(lane_conn)
+                    info["lanes"] = {
+                        "enabled": _lanes_on(),
+                        "reserve_key_ids": sorted(
+                            _lane_reserve_ids(lane_conn)),
+                        "reserve_count": _reserve_interactive_count(),
+                    }
+                    lease_rows = lane_conn.execute(
+                        """SELECT source, COUNT(*) AS n,
+                                  SUM(budget_used) AS used,
+                                  SUM(budget_total) AS total
+                           FROM gemini_leases WHERE status = 'active'
+                             AND (expires_at IS NULL
+                                  OR expires_at > ?)
+                           GROUP BY source""",
+                        (time.time(),),
+                    ).fetchall()
+                    info["leases"] = {
+                        r["source"]: {
+                            "active": r["n"], "used": r["used"] or 0,
+                            "total": r["total"] or 0}
+                        for r in lease_rows}
+                finally:
+                    lane_conn.close()
+            except Exception:
+                pass
             info["prober"] = {
                 "running": bool(_prober_thread is not None
                                 and _prober_thread.is_alive()),
@@ -966,6 +1388,16 @@ def degradation_info() -> dict:
                     if _prober_last_cycle_at else None),
                 "probes_total": _probes_total,
                 "probes_ok": _probes_ok,
+            }
+        # Storm + single-flight state (outside the lock above:
+        # _storm_stats takes it itself).
+        info["storm"] = _storm_stats()
+        with _flight_lock:
+            info["singleflight"] = {
+                "enabled": _singleflight_on(),
+                "hits": _flight_hits,
+                "leader_runs": _flight_leader_runs,
+                "in_flight": len(_flights),
             }
         # Per-model fallback-chain status (outside the lock above:
         # _model_health_info takes it itself).
@@ -1064,6 +1496,19 @@ def _ensure_table(conn) -> None:
             until_ts   REAL,
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (key_id, model, capability)
+        )
+    """)
+    # Stage 2 leases: manager-issued bulk call budgets.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gemini_leases (
+            lease_id     TEXT PRIMARY KEY,
+            source       TEXT NOT NULL,
+            job_id       TEXT NOT NULL,
+            budget_total INTEGER NOT NULL,
+            budget_used  INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at   REAL,
+            status       TEXT NOT NULL DEFAULT 'active'
         )
     """)
     conn.commit()
@@ -1746,6 +2191,13 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
     seconds = time.monotonic() - start
     with _lock:
         _record_latency_locked(key_id, seconds)
+        # Stage 2 storm breaker: real traffic outcomes feed it (the
+        # prober's own checks are not caller weather). 'model' and
+        # 'request' class outcomes are excluded: model outages have
+        # their own tracker, and bad requests say nothing about the
+        # pool's weather.
+        if source != "prober" and error_type not in ("model", "request"):
+            _note_storm_event_locked(error_type is None)
     model = _model_from_url(url)
     capability = _request_capability(url, payload)
     if error_type is None:
@@ -1780,6 +2232,32 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
     return False, None, seconds, error_type
 
 
+def _charge_lease_or_stop(state) -> bool:
+    """Charge the call's lease for one more upstream attempt (Stage
+    2d). True when the attempt may proceed. On exhaustion of an
+    explicit lease the walk stops fatally with a typed
+    lease_exhausted in status_out; a default source lease that ran
+    dry simply detaches (day-one safety — the exhaustion stays
+    visible on the lease row) and the call continues unleased."""
+    lease_id = state.get("lease_id")
+    if not lease_id:
+        return True
+    if _lease_charge(lease_id):
+        return True
+    if not state.get("lease_strict", True):
+        state["lease_id"] = None
+        logger.warning(
+            "gemini_keys: default source lease %s exhausted; "
+            "continuing unleased", lease_id)
+        return True
+    state["fatal"] = "lease_exhausted"
+    out = state.get("status_out")
+    if out is not None:
+        out.update({"error": "lease_exhausted", "lease_id": lease_id})
+    logger.warning("gemini_keys: lease %s exhausted mid-call", lease_id)
+    return False
+
+
 def _try_candidates(candidates, url, payload, timeout, source, tried,
                     state) -> dict | None:
     """Try candidates in order until one succeeds. `tried` (set of key
@@ -1794,6 +2272,8 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
             if key_id in tried:
                 continue
             if state["n"] >= state.get("max_n", _max_attempts()) or time.monotonic() >= state["deadline"]:
+                break
+            if not _charge_lease_or_stop(state):
                 break
             tried.add(key_id)
             state["n"] += 1
@@ -1853,6 +2333,8 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                 if state["n"] >= state.get("max_n", _max_attempts()) \
                         or time.monotonic() >= state["deadline"]:
                     return False
+                if not _charge_lease_or_stop(state):
+                    return False
                 tried.add(key_id)
                 state["n"] += 1
                 fut = executor.submit(_attempt, key_id, key_value, url,
@@ -1902,10 +2384,56 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
         executor.shutdown(wait=False)
 
 
-def post_json(url: str, payload: dict, timeout: int = 30,
-              source: str = "unknown", free_only: bool = False,
-              max_attempts: int | None = None,
-              fail_fast: bool = False) -> dict | None:
+def _general_available(lane_ids: set[int]) -> bool:
+    """True when at least one eligible key sits OUTSIDE the
+    interactive lane reserve (a general key could serve bulk)."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            rows = _eligible_rows(conn)
+            return any(r["id"] not in lane_ids for r in rows)
+        finally:
+            conn.close()
+    except Exception:
+        return True
+
+
+def _set_lease_exhausted(status_out, state) -> None:
+    """Type a failed call as lease_exhausted when its explicit lease
+    ended the call fully spent (Stage 2d): the last unit may have
+    been consumed by the final attempt itself, in which case the
+    walk simply runs out of candidates without ever charging again
+    — the exhaustion is still the truthful terminal signal."""
+    if status_out is None or "error" in status_out:
+        return
+    lease_id = state.get("lease_id")
+    if not lease_id or not state.get("lease_strict"):
+        return
+    st = lease_status(lease_id)
+    if st and st["budget_left"] <= 0:
+        status_out.update({"error": "lease_exhausted",
+                           "lease_id": lease_id})
+
+
+def _set_pool_busy(status_out, sclass: str, lane_ids: set[int]) -> None:
+    """Type a bulk failure as pool_busy when the general pool is
+    empty and only lane-reserved keys remain (Stage 2 lanes)."""
+    if status_out is None or sclass != "bulk" \
+            or "error" in status_out:
+        return
+    if lane_ids and not _general_available(lane_ids):
+        status_out.update({
+            "error": "pool_busy",
+            "retry_after_s": _pool_busy_retry_after(lane_ids)})
+
+
+def _post_json_core(url: str, payload: dict, timeout: int = 30,
+                    source: str = "unknown", free_only: bool = False,
+                    max_attempts: int | None = None,
+                    fail_fast: bool = False,
+                    lease_id: str | None = None,
+                    status_out: dict | None = None) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Fail-fast phases (no sleeping anywhere on the request path):
@@ -1964,6 +2492,44 @@ def post_json(url: str, payload: dict, timeout: int = 30,
              "max_n": attempt_cap, "quota_failures": 0}
     tried: set[int] = set()
 
+    # --- Stage 2: storm breaker, lanes, leases -------------------------
+    sclass = _source_class(source)
+    storm = _storm_stats()
+    if _storm_breaker_on() and storm["open"]:
+        if sclass == "bulk":
+            # Fail fast with the typed signal instead of walking a
+            # pool that is actively failing.
+            if status_out is not None:
+                status_out.update({
+                    "error": "pool_busy", "reason": "storm",
+                    "retry_after_s": int(storm["open_s_left"]) + 1})
+            return None
+        # Interactive rides out a storm on a shortened walk.
+        state["max_n"] = min(state["max_n"], 2)
+    elif _storm_breaker_on() and storm["events_60s"] >= 10:
+        # Attempts ceiling proportional to recent successes: while
+        # the window is mostly failures, a call may not march the
+        # full key list and amplify the storm.
+        state["max_n"] = max(2, min(state["max_n"],
+                                    storm["successes_60s"]))
+    lane_ids: set[int] = set()
+    if sclass == "bulk" and _lanes_on():
+        with _lock:
+            conn = db.connect()
+            try:
+                _ensure_table(conn)
+                lane_ids = _lane_reserve_ids(conn)
+            finally:
+                conn.close()
+    if lease_id is not None and not _leases_on():
+        lease_id = None  # leases disabled: ignore any supplied id
+    strict_lease = lease_id is not None
+    if lease_id is None and sclass == "bulk":
+        lease_id = _default_source_lease(source)
+    state["lease_id"] = lease_id
+    state["lease_strict"] = strict_lease
+    state["status_out"] = status_out
+
     if free_only:
         # Free-only mode (partner traffic, e.g. Roof Rover's Winston API):
         # restrict every selection phase to keys that are NOT paid. When
@@ -1987,7 +2553,13 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         def _only_free(cands):
             return cands
 
-    fast = _only_free(_fast_candidates())
+    def _only_general(cands):
+        # Stage 2 lanes: bulk never draws the interactive reserve.
+        if not lane_ids:
+            return cands
+        return [c for c in cands if c[0] not in lane_ids]
+
+    fast = _only_general(_only_free(_fast_candidates()))
     if fast:
         url = _route_url(url)
         fast = _filter_cells(fast, _model_from_url(url),
@@ -2003,7 +2575,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
             return data
         if state.get("fatal"):
             return None
-    sweep = _only_free(get_candidate_keys())
+    sweep = _only_general(_only_free(get_candidate_keys()))
     if not sweep:
         # Nothing believed healthy (phase 1 empty or all its attempts
         # just failed into a pause/backoff) and nothing eligible for
@@ -2014,6 +2586,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         logger.warning(
             "gemini_keys: pool down (no believed-healthy or eligible "
             "keys), failing fast for source=%s", source)
+        _set_lease_exhausted(status_out, state)
+        _set_pool_busy(status_out, sclass, lane_ids)
         return None
     url = _route_url(url)
     sweep = _filter_cells(sweep, _model_from_url(url),
@@ -2053,7 +2627,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                          if r["is_paid"] and r["id"] not in tried]
         finally:
             conn.close()
-    fallback = _only_free(_order_by_health(reserve_rows + paid_rows))
+    fallback = _only_general(_only_free(
+        _order_by_health(reserve_rows + paid_rows)))
     if fallback:
         if state["n"] > 0 \
                 and state.get("quota_failures", 0) >= state["n"]:
@@ -2062,9 +2637,88 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         url = _route_url(url)
         fallback = _filter_cells(fallback, _model_from_url(url),
                                   _request_capability(url, payload))
-        return _try_candidates(fallback, url, payload,
+        data = _try_candidates(fallback, url, payload,
                                caller_timeout, source, tried, state)
+        if data is not None:
+            return data
+    _set_lease_exhausted(status_out, state)
+    _set_pool_busy(status_out, sclass, lane_ids)
     return None
+
+
+def post_json(url: str, payload: dict, timeout: int = 30,
+              source: str = "unknown", free_only: bool = False,
+              max_attempts: int | None = None,
+              fail_fast: bool = False,
+              lease_id: str | None = None,
+              status_out: dict | None = None) -> dict | None:
+    """POST JSON through the shared key pool (see _post_json_core for
+    the rotation/failover semantics).
+
+    Stage 2 additions:
+    - lease_id: charge every upstream attempt against a manager
+      lease (request_lease); exhaustion surfaces as a typed
+      lease_exhausted in status_out and a None return.
+    - status_out: when a dict is passed, typed failure signals are
+      written into it ({"error": "pool_busy", "retry_after_s": N} or
+      {"error": "lease_exhausted", ...}) so HTTP callers can answer
+      429 instead of a bare 502.
+    - Single-flight (GEMINI_SINGLEFLIGHT): concurrent identical
+      unleased calls coalesce onto one execution; waiters share a
+      deep copy of the leader's success, or run the call themselves
+      when the leader failed or overran."""
+    global _flight_hits, _flight_leader_runs
+    if not _singleflight_on() or lease_id is not None:
+        return _post_json_core(
+            url, payload, timeout=timeout, source=source,
+            free_only=free_only, max_attempts=max_attempts,
+            fail_fast=fail_fast, lease_id=lease_id,
+            status_out=status_out)
+    fkey = _flight_key(source, url, payload)
+    with _flight_lock:
+        entry = _flights.get(fkey)
+        if entry is None:
+            entry = {"event": threading.Event(), "result": None,
+                     "done": False}
+            _flights[fkey] = entry
+            leader = True
+        else:
+            leader = False
+    if leader:
+        with _flight_lock:
+            _flight_leader_runs += 1
+        try:
+            result = _post_json_core(
+                url, payload, timeout=timeout, source=source,
+                free_only=free_only, max_attempts=max_attempts,
+                fail_fast=fail_fast, lease_id=None,
+                status_out=status_out)
+        except Exception:
+            result = None
+            entry["result"] = None
+            entry["done"] = True
+            with _flight_lock:
+                _flights.pop(fkey, None)
+            entry["event"].set()
+            raise
+        entry["result"] = result
+        entry["done"] = True
+        with _flight_lock:
+            _flights.pop(fkey, None)
+        entry["event"].set()
+        return result
+    # Waiter: share the leader's success; never share its failure —
+    # a failed leader just means this caller runs the call itself.
+    wait_s = _attempt_budget_s() + float(timeout or 30) + 5.0
+    if entry["event"].wait(timeout=wait_s) and entry.get("done") \
+            and entry.get("result") is not None:
+        with _flight_lock:
+            _flight_hits += 1
+        return json.loads(json.dumps(entry["result"]))
+    return _post_json_core(
+        url, payload, timeout=timeout, source=source,
+        free_only=free_only, max_attempts=max_attempts,
+        fail_fast=fail_fast, lease_id=None, status_out=status_out)
 
 
 # ---------------------------------------------------------------------------

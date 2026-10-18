@@ -4936,6 +4936,49 @@ def _require_proxy_token(request: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _raise_pool_status(status_out: dict):
+    """Translate the key manager's typed failure signals (Stage 2)
+    into HTTP responses: pool_busy / lease_exhausted are 429s (the
+    caller can retry later / must stop), anything else falls through
+    to the caller's generic 502."""
+    err = (status_out or {}).get("error")
+    if err == "lease_exhausted":
+        raise HTTPException(status_code=429, detail="lease_exhausted")
+    if err == "pool_busy":
+        try:
+            retry = int(status_out.get("retry_after_s") or 60)
+        except (TypeError, ValueError):
+            retry = 60
+        raise HTTPException(status_code=429, detail="pool_busy",
+                            headers={"Retry-After": str(retry)})
+
+
+@app.post("/v1/pool/leases")
+def proxy_pool_lease(body: dict, request: Request):
+    """Issue a bulk call-budget lease from the key manager (Stage 2):
+    {source, job_id, calls, ttl_s} -> lease dict with lease_id.
+    Callers pass the id back as the X-Pool-Lease header; every
+    upstream attempt is charged against it and exhaustion answers
+    429 lease_exhausted. Denial (too many active leases for the
+    source, bad size, leases off) is also a 429."""
+    _require_proxy_token(request)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400,
+                            detail="body_must_be_json_object")
+    try:
+        ttl_s = float(body.get("ttl_s") or 3600)
+    except (TypeError, ValueError):
+        ttl_s = 3600.0
+    lease = gemini_keys.request_lease(
+        str(body.get("source") or "unknown"),
+        str(body.get("job_id") or ""),
+        body.get("calls") or 0,
+        ttl_s=ttl_s)
+    if lease is None:
+        raise HTTPException(status_code=429, detail="lease_denied")
+    return lease
+
+
 
 def _default_safety_settings():
     """Default safety settings: sexually explicit unblocked, others at medium+."""
@@ -4968,9 +5011,13 @@ def proxy_gemini_generate_content(model: str, body: dict, request: Request):
     free_only = (request.headers.get("x-free-only") or "").strip().lower() \
         in ("1", "true", "yes")
     _ensure_safety_settings(body)
+    lease_id = (request.headers.get("x-pool-lease") or "").strip() or None
+    status_out: dict = {}
     data = gemini_keys.post_json(url, body, timeout=60, source=source,
-                                 free_only=free_only)
+                                 free_only=free_only, lease_id=lease_id,
+                                 status_out=status_out)
     if data is None:
+        _raise_pool_status(status_out)
         raise HTTPException(status_code=502, detail="all_keys_failed")
     return data
 
@@ -5029,9 +5076,13 @@ def proxy_openai_chat_completions(body: dict, request: Request):
     source = (request.headers.get("x-source") or "proxy").strip()[:64] or "proxy"
     free_only = (request.headers.get("x-free-only") or "").strip().lower() \
         in ("1", "true", "yes")
+    lease_id = (request.headers.get("x-pool-lease") or "").strip() or None
+    status_out: dict = {}
     data = gemini_keys.post_json(url, payload, timeout=60, source=source,
-                                 free_only=free_only)
+                                 free_only=free_only, lease_id=lease_id,
+                                 status_out=status_out)
     if data is None:
+        _raise_pool_status(status_out)
         raise HTTPException(status_code=502, detail="all_keys_failed")
     text, finish = "", "STOP"
     try:

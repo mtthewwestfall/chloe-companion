@@ -67,12 +67,29 @@ class GeminiKeysTestBase(unittest.TestCase):
         gemini_keys._model_overload_events.clear()
         gemini_keys._model_probe_at.clear()
         gemini_keys._model_belief.clear()
+        # Reset Stage 1/2 state (2026-10-18): dead-model marks, the
+        # storm breaker window, and the single-flight registry.
+        gemini_keys._model_dead_until.clear()
+        gemini_keys._storm_events.clear()
+        gemini_keys._storm_open_until = 0.0
+        with gemini_keys._flight_lock:
+            gemini_keys._flights.clear()
+            gemini_keys._flight_hits = 0
+            gemini_keys._flight_leader_runs = 0
         self._env = {}
         for name in ("GEMINI_MAX_ATTEMPTS", "GEMINI_FAST_TIMEOUT_S",
                      "GEMINI_ATTEMPT_BUDGET_S", "GEMINI_HEDGE_AFTER_S",
                      "GEMINI_PER_KEY_RPM", "GEMINI_RESERVE_COUNT",
                      "GEMINI_PROBE_INTERVAL_S", "GEMINI_PROBER",
-                     "GEMINI_MODEL_CHAIN", "GEMINI_MODEL_COOLDOWN_S"):
+                     "GEMINI_MODEL_CHAIN", "GEMINI_MODEL_COOLDOWN_S",
+                     "GEMINI_QUOTA_CLASSIFY", "GEMINI_HEALTH_GRID",
+                     "GEMINI_KEY_FORENSICS", "GEMINI_LANES",
+                     "GEMINI_RESERVE_INTERACTIVE", "GEMINI_STORM_BREAKER",
+                     "GEMINI_STORM_OPEN_S", "GEMINI_SINGLEFLIGHT",
+                     "GEMINI_LEASES", "GEMINI_LEASE_MAX_CALLS",
+                     "GEMINI_LEASE_MAX_ACTIVE_PER_SOURCE",
+                     "GEMINI_LEASE_DEFAULT_CALLS",
+                     "GEMINI_BULK_SOURCES", "GEMINI_INTERACTIVE_SOURCES"):
             self._env[name] = os.environ.pop(name, None)
 
     def tearDown(self):
