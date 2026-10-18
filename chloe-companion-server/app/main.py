@@ -102,6 +102,12 @@ app.add_middleware(sims.SimsCorsMiddleware)
 sims_saves.register(app)
 app.add_middleware(sims_saves.SimsSavesCorsMiddleware)
 
+# Prompt Studio (2026-10-17): the owner's private prompt desk at
+# /studio — builder + Gemini-pool generation, owner-gated inside the
+# module. See app/studio.py.
+from . import studio as _studio
+_studio.register(app)
+
 # Finished regular media-request generations are served from /generated/.
 os.makedirs(config.GENERATED_DIR, exist_ok=True)
 app.mount("/generated", StaticFiles(directory=config.GENERATED_DIR), name="generated")
