@@ -14,6 +14,16 @@ page's fetches, not in the page load: with no valid token found
 client-side, the page shows the plain "Owner only." notice instead of
 the studio; a signed-in owner just gets the studio.
 
+The gate also carries a small sign-in form (email + password) that
+posts to the app's own POST /api/v1/auth/login and, on success,
+stores the returned token in localStorage 'whispr_token' exactly as
+the app's setToken() does, then re-probes. That door exists because
+the owner's app session lives in the installed PWA while links he
+taps open in mobile Safari, whose localStorage is a different jar —
+the form signs him in in whichever browser he is standing in. The
+server-side gate does not move: a NON-owner who signs in here still
+gets the probe's 403 and the studio stays shut.
+
 What it is: a standing desk for his image work. A Builder assembles a
 prompt from structured fields (subject, background, composition, style
 presets, palette, details) with one-click templates; Generate runs the
@@ -526,7 +536,7 @@ background:#12121c;border:1px solid rgba(255,255,255,.1);color:#9a9ab0;font-weig
 border-radius:18px;padding:14px;margin:0 0 14px}
 label{display:block;font-size:.85rem;color:#9a9ab0;margin:12px 0 5px;font-weight:600}
 label:first-child{margin-top:0}
-input[type=text],select,textarea{width:100%;background:#0d0d16;color:#f5f5fa;
+input[type=text],input[type=email],input[type=password],select,textarea{width:100%;background:#0d0d16;color:#f5f5fa;
 border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:11px;font-size:1rem}
 textarea{min-height:74px;resize:vertical}
 .row{display:flex;gap:10px}.row>div{flex:1}
@@ -548,6 +558,7 @@ background:linear-gradient(90deg,#ec4899,#9d4edd);margin:14px 0 6px}
 .strip figcaption{font-size:.68rem;color:#9a9ab0;margin-top:4px;
 display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .hint{font-size:.85rem;color:#9a9ab0}
+#gate-login{max-width:340px;margin:22px auto 0;text-align:left}
 </style>
 </head>
 <body>
@@ -555,6 +566,14 @@ display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hi
 <div class="brand">PROMPT STUDIO</div>
 <h1>Prompt Studio</h1>
 <p class="sub" id="gate-msg" style="margin-top:10px">Checking your sign-in…</p>
+<form id="gate-login" hidden>
+<label for="gate-email">Email</label>
+<input type="email" id="gate-email" autocomplete="username">
+<label for="gate-password">Password</label>
+<input type="password" id="gate-password" autocomplete="current-password">
+<button class="btn" id="gate-login-btn" type="submit">Sign in</button>
+<p class="status err" id="gate-login-msg"></p>
+</form>
 </div>
 <main class="wrap" id="studio-ui" hidden>
 <div class="brand">PROMPT STUDIO</div>
@@ -628,7 +647,9 @@ if (qs.get('admin_token')) {
 }
 // The app's own session door: app.js getToken() reads localStorage
 // 'whispr_token' and sends it as 'Authorization: Bearer <token>'.
-const sessionTok = localStorage.getItem('whispr_token') || '';
+// (let, not const: the gate's sign-in form can mint a fresh one in
+// this browser — see the login handler below.)
+let sessionTok = localStorage.getItem('whispr_token') || '';
 function authHeaders() {
   return adminTok ? {'X-Admin-Token': adminTok}
                   : {'Authorization': 'Bearer ' + sessionTok};
@@ -776,26 +797,71 @@ $('btn-generate').onclick = async () => {
     setStatus('Not generated — the request never landed.', 'err');
   } finally { btn.disabled = false; }
 };
-async function gateOpen() {
+async function probeGate() {
   // The data endpoints are the real gate — probe the cheapest one with
-  // whatever credential this browser holds. Only a valid OWNER session
-  // (or the admin token) answers 200; anonymous gets 401 and a
-  // non-owner session gets 403, and both land on the notice below.
-  if (!adminTok && !sessionTok) return false;
+  // whatever credential this browser holds and report the STATUS:
+  // 200 opens the studio; 403 means the signed-in account is not the
+  // owner; 401/0 mean this browser holds no usable credential.
+  if (!adminTok && !sessionTok) return 0;
   try {
     const r = await fetch('/api/v1/studio/recent', {headers: authHeaders()});
-    return r.ok;
-  } catch (e) { return false; }
+    return r.status;
+  } catch (e) { return 0; }
 }
+function openStudio() {
+  $('gate').hidden = true;
+  $('studio-ui').hidden = false;
+  refreshPrompt();
+  loadGirls();
+}
+function showGate(status) {
+  // The studio stays shut; the gate offers the app's own sign-in so
+  // the owner can open it from any browser — the PWA's localStorage
+  // and mobile Safari's are separate jars, so a live app session
+  // does not follow a tapped link into Safari.
+  $('gate-msg').textContent = status === 403
+    ? "That account isn't the owner." : 'Owner only.';
+  $('gate-login').hidden = false;
+}
+$('gate-login').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const btn = $('gate-login-btn'), msg = $('gate-login-msg');
+  msg.textContent = '';
+  btn.disabled = true;
+  try {
+    // The app's EXISTING login endpoint, reused exactly — this page
+    // adds no auth path of its own and never handles the password
+    // beyond handing it to that endpoint.
+    const r = await fetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: $('gate-email').value.trim(),
+                            password: $('gate-password').value})});
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.token) {
+      // Wrong password and friends: the endpoint's normal error,
+      // shown plainly, and nothing is stored.
+      msg.textContent = data.detail || 'Login failed';
+      return;
+    }
+    // app.js setToken(): the token lives in localStorage
+    // 'whispr_token'. Store it, then re-probe — the server-side gate
+    // still decides: a non-owner's fresh session earns a 403 here
+    // and the studio stays shut.
+    localStorage.setItem('whispr_token', data.token);
+    sessionTok = data.token;
+    const st = await probeGate();
+    if (st === 200) { openStudio(); return; }
+    msg.textContent = st === 403 ? "That account isn't the owner."
+                                 : 'Signed in, but the studio stayed shut.';
+  } catch (e) {
+    msg.textContent = 'Network error — try again';
+  } finally { btn.disabled = false; }
+});
 (async () => {
-  if (await gateOpen()) {
-    $('gate').hidden = true;
-    $('studio-ui').hidden = false;
-    refreshPrompt();
-    loadGirls();
-  } else {
-    $('gate-msg').textContent = 'Owner only.';
-  }
+  const st = await probeGate();
+  if (st === 200) openStudio();
+  else showGate(st);
 })();
 </script>
 </body>
@@ -824,7 +890,10 @@ def register(app) -> None:
         # gate lives in the page's own calls to the endpoints below
         # (each one re-checks require_studio_access server-side); the
         # page probes one on load and shows its "Owner only." notice
-        # to anyone whose token does not open the gate.
+        # to anyone whose token does not open the gate — plus the
+        # gate's sign-in form, which mints a token through the app's
+        # own login endpoint for owners standing in a browser whose
+        # localStorage never held their PWA session.
         return HTMLResponse(_page_html(),
                             headers={"Cache-Control": "no-store"})
 

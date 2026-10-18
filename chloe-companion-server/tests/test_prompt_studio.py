@@ -196,6 +196,115 @@ class GateTest(StudioTestBase):
         post.assert_not_called()
 
 
+class GateSignInTest(StudioTestBase):
+    """The gate's sign-in form (2026-10-18): the owner's app session
+    lives in the installed PWA while tapped links open in mobile
+    Safari, whose localStorage is a separate jar — so the gate itself
+    offers the app's own login. The form adds NO auth path of its
+    own: it posts to the existing POST /api/v1/auth/login, stores the
+    returned token under the app's own 'whispr_token' key, and
+    re-probes. The server-side owner gate does not move."""
+
+    def setUp(self):
+        super().setUp()
+        # auth_login reads through main's _conn() (config.DB_PATH),
+        # not studio._conn — point it at this test's DB too, so the
+        # seeded login users are the ones the endpoint sees.
+        self._real_api_conn = api._conn
+        api._conn = lambda: db.connect(self.db_path)  # noqa: E731
+
+    def tearDown(self):
+        api._conn = self._real_api_conn
+        super().tearDown()
+
+    def _seed_login_user(self, user_id, email, password):
+        from app import auth
+        conn = db.connect(self.db_path)
+        try:
+            conn.execute(
+                "UPDATE users SET email = ?, password_hash = ? "
+                "WHERE user_id = ?",
+                (email, auth.hash_password(password), user_id))
+            conn.commit()
+            store.set_email_verified(conn, user_id)
+        finally:
+            conn.close()
+
+    def test_shell_carries_the_signin_form(self):
+        resp = self._client().get("/studio")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('id="gate-login"', resp.text)
+        self.assertIn('id="gate-email"', resp.text)
+        self.assertIn('type="email"', resp.text)
+        self.assertIn('id="gate-password"', resp.text)
+        self.assertIn('type="password"', resp.text)
+        # The form posts to the app's EXISTING login endpoint.
+        self.assertIn("fetch('/api/v1/auth/login'", resp.text)
+
+    def test_login_wiring_stores_token_then_reprobes(self):
+        # On a successful login the page stores the returned token
+        # under the app's own key (app.js setToken()) and re-probes
+        # the gated endpoint before revealing anything.
+        resp = self._client().get("/studio")
+        self.assertIn(
+            "localStorage.setItem('whispr_token', data.token)", resp.text)
+        store_at = resp.text.index(
+            "localStorage.setItem('whispr_token', data.token)")
+        probe_at = resp.text.index("probeGate()", store_at)
+        self.assertGreater(probe_at, store_at)
+        self.assertIn("That account isn't the owner.", resp.text)
+
+    def test_failed_login_stores_nothing(self):
+        # The error branch returns BEFORE any token is stored: the
+        # endpoint's error is shown and localStorage is never written
+        # on that path.
+        resp = self._client().get("/studio")
+        guard = resp.text.index("if (!r.ok || !data.token)")
+        store_at = resp.text.index(
+            "localStorage.setItem('whispr_token', data.token)")
+        self.assertLess(guard, store_at)
+        self.assertIn("data.detail || 'Login failed'", resp.text)
+
+    def test_wrong_password_mints_nothing(self):
+        self._seed_login_user(OTHER, "other@example.com", "right-password")
+        resp = self._client().post(
+            "/api/v1/auth/login",
+            json={"email": "other@example.com",
+                  "password": "wrong-password"})
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.json().get("detail"),
+                         "wrong_email_or_password")
+        self.assertNotIn("token", resp.json())
+
+    def test_non_owner_login_still_refused_by_the_studio_gate(self):
+        self._seed_login_user(OTHER, "other@example.com", "right-password")
+        client = self._client()
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": "other@example.com",
+                  "password": "right-password"})
+        self.assertEqual(resp.status_code, 200)
+        token = resp.json()["token"]
+        resp = client.get(
+            "/api/v1/studio/recent",
+            headers={"Authorization": "Bearer " + token})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_owner_login_opens_the_studio_gate(self):
+        self._seed_login_user(OWNER, "owner@example.com", "owner-password")
+        client = self._client()
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": "owner@example.com",
+                  "password": "owner-password"})
+        self.assertEqual(resp.status_code, 200)
+        token = resp.json()["token"]
+        resp = client.get(
+            "/api/v1/studio/recent",
+            headers={"Authorization": "Bearer " + token})
+        self.assertEqual(resp.status_code, 200)
+
+
 class AssemblyTest(unittest.TestCase):
     def test_full_assembly(self):
         prompt = studio.assemble_prompt({
