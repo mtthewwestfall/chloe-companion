@@ -1907,9 +1907,10 @@ async def preset_video(body: PresetVideoIn, request: Request):
 
 @app.get("/api/v1/give-presets/{girl_id}")
 def give_presets(girl_id: str, request: Request):
-    """Presets for the in-app 'Send a video' sheet: counts every servable
-    give clip for the girl — girl_media rows plus staged files found in
-    the static media dir. Owner-scoped girls only for their owner."""
+    """Presets for the in-app 'Send a video' sheet: counts the girl's
+    OWN distinct servable give clips — her girl_media rows plus staged
+    files in the static media dir that are not already registered as
+    rows. Owner-scoped girls only for their owner."""
     gid = (girl_id or "").lower().strip()
     try:
         user_id = _current_user_id(request)
@@ -1918,17 +1919,29 @@ def give_presets(girl_id: str, request: Request):
     if not characters.visible_to(gid, user_id):
         raise HTTPException(status_code=404, detail="unknown girl")
     n_db = 0
+    db_files: set[str] = set()
     conn = _conn()
     try:
         try:
-            n_db = conn.execute(
-                "SELECT COUNT(*) AS c FROM girl_media WHERE girl_id = ? AND kind = 'give'",
-                (gid,)).fetchone()["c"] or 0
+            rows = conn.execute(
+                "SELECT url FROM girl_media WHERE girl_id = ? AND kind = 'give'",
+                (gid,)).fetchall()
+            n_db = len(rows)
+            db_files = {(r["url"] or "").rsplit("/", 1)[-1].split("?", 1)[0]
+                        for r in rows}
         except Exception:
             n_db = 0
+            db_files = set()
     finally:
         conn.close()
-    total = n_db + len(_scan_media_dir_give_clips(gid))
+    # A staged clip lives in BOTH sources at once (a girl_media row
+    # points at the very file the dir scan finds), so adding the two
+    # raw counts double-counts it — the sheet once showed totals no
+    # library on the server could match. Staged files count only when
+    # she does not already carry the clip as a row.
+    n_staged = sum(1 for c in _scan_media_dir_give_clips(gid)
+                   if c["file"] not in db_files)
+    total = n_db + n_staged
     if total <= 0:
         return {"presets": []}
     return {"presets": [{"name": "love", "count": total, "emoji": "\U0001f495"}]}

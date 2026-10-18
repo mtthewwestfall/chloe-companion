@@ -9750,6 +9750,25 @@ def _studio_owner_turn(conn: sqlite3.Connection, user_id: str,
     return None
 
 
+def _roleplay_locked(conn: sqlite3.Connection, character_id: str) -> bool:
+    """Fresh read of local_characters.roleplay_locked — the same read
+    brain._roleplay_locked performs each turn (mirrored here rather
+    than imported: brain is this layer's caller, not its dependency).
+    Characters with no local row are never locked, and a failed read
+    fails open, exactly like brain's."""
+    cid = (character_id or "").strip().lower()
+    if not cid:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT roleplay_locked FROM local_characters WHERE id = ?",
+            (cid,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — a lock read must never break chat
+        return False
+    return bool(row and row[0])
+
+
 def maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                  character_id: str, attachments: list[dict] | None = None) -> dict | None:
     try:
@@ -9805,6 +9824,18 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
                 and not _SOGNI_LOGOUT_RE.search(text or ""):
             return _handle_sogni_login_unparseable(
                 conn, user_id, character_id)
+        # Roleplay lock (owner order 2026-10-18): a locked girl stays
+        # in character and in-scene, so the capability lane must never
+        # claim her turns. The credential intakes above still ran (a
+        # pasted secret is scrubbed even mid-scene); everything else —
+        # studio, Sogni, image, dev, and the intent detectors below —
+        # is skipped while her lock is on, so an in-scene question can
+        # never come back as a helpdesk answer ("I tried to look into
+        # it for you"). The flag is read fresh; build_brain_context
+        # has already flipped it on the release word before this runs,
+        # so unlocking restores the lane on the very same turn.
+        if _roleplay_locked(conn, character_id):
+            return None
         # Hannah studio (owner-only, her thread only): add-a-give and
         # guided character creation. Runs before attachment analysis so
         # an attached photo with "add this as a give for X" files the
@@ -9926,6 +9957,10 @@ def _maybe_assist(conn: sqlite3.Connection, user: dict, text: str,
         # build attached — merge his latest finished, unmerged job.
         if detect_merge_ask(text):
             return _handle_dev_merge(conn, user_id, character_id, text)
+    # Locked girls never reach the intent detectors either (see the
+    # owner-block gate above): her turns belong to her brain alone.
+    if _roleplay_locked(conn, character_id):
+        return None
     intent, args = detect_intent(text)
     if not intent:
         return None

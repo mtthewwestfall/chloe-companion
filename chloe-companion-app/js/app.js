@@ -970,33 +970,46 @@ let presetSheetGirl = null;
 
   /* ---------- preset videos ---------- */
 
-  const PRESETS = {
-    chloe: [{ name: 'love', count: 6, emoji: '💕' }],
-    mara: [{ name: 'love', count: 1, emoji: '💕' }],
-    isabella: [{ name: 'love', count: 1, emoji: '💕' }],
-    regan: [{ name: 'love', count: 6, emoji: '💕' }],
-    jake: [{ name: 'love', count: 9, emoji: '💕' }],
-    eli: [{ name: 'love', count: 9, emoji: '💕' }],
-    brooklyn: [{ name: 'love', count: 11, emoji: '💕' }],
-  };
+  // Sheet builds are generation-guarded (2026-10-18): tapping + with a
+  // counts fetch still in flight — or switching girls before it lands —
+  // once let a stale build append ANOTHER girl's rows into this girl's
+  // sheet, every row twice. A build now renders only while it is still
+  // the newest build for the girl it was opened for; a stale build
+  // renders nothing at all. And there is no bundled count map anymore:
+  // a count that did not come from her own library is never shown.
+  let presetSheetBuild = 0;
 
   $('plusBtn').addEventListener('click', async () => {
   presetSheetGirl = { id: currentGirl.id, name: currentGirl.name };
+  const girl = presetSheetGirl;
+  const build = ++presetSheetBuild;
   const list = $('presetList');
     list.innerHTML = '';
     let presets = [];
+    let loaded = false;
     try {
-      const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(presetSheetGirl.id));
+      const r = await fetch('/api/v1/give-presets/' + encodeURIComponent(girl.id));
       if (r.ok) {
         const d = await r.json();
         presets = d.presets || [];
+        loaded = true;
       }
-    } catch (e) { /* fall through to the bundled map */ }
-    if (!presets.length) {
-      presets = PRESETS[presetSheetGirl.id] || [];
+    } catch (e) { /* no fallback numbers — an unloaded sheet says so */ }
+    if (build !== presetSheetBuild || !presetSheetGirl || presetSheetGirl.id !== girl.id) {
+      return; // stale build: a newer tap or a girl switch owns the sheet now
     }
+    // One row per preset name, whatever the payload carried.
+    const seenNames = new Set();
+    presets = presets.filter((p) => {
+      const key = String((p && p.name) || '').toLowerCase();
+      if (!key || seenNames.has(key)) return false;
+      seenNames.add(key);
+      return true;
+    });
     if (!presets.length) {
-      list.innerHTML = '<div class="sheet-sub">No presets yet for ' + presetSheetGirl.name + '.</div>';
+      list.innerHTML = '<div class="sheet-sub">' + (loaded
+        ? 'No presets yet for ' + girl.name + '.'
+        : 'Couldn\'t load ' + girl.name + '\'s videos.') + '</div>';
     }
     presets.forEach((p) => {
       const el = document.createElement('div');
@@ -1089,13 +1102,18 @@ let presetSheetGirl = null;
     try {
   const girl = presetSheetGirl || { id: currentGirl.id, name: currentGirl.name };
   const res = await ApiClient.requestPreset(girl.id, presetName);
+      // Girl switch while the clip was being fetched: her media never
+      // lands in another girl's chat (2026-10-18).
+      if (!currentGirl || currentGirl.id !== girl.id) return;
       if (res.video_url) {
         addPresetMediaBubble(res.video_url, res.media_type || 'video', presetName, girl.name);
       } else {
         addText('her', 'let me find that for you… one sec', {}, girl.name);
       }
     } catch (e) {
-      addText('her', 'hmm, couldn\'t pull that one up. try again?', {}, girl.name);
+      if (currentGirl && presetSheetGirl && currentGirl.id === presetSheetGirl.id) {
+        addText('her', 'hmm, couldn\'t pull that one up. try again?', {}, presetSheetGirl.name);
+      }
     }
   }
 
