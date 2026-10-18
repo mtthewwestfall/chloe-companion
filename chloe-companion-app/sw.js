@@ -1,7 +1,7 @@
 /* Service worker: cache-first app shell + Web Push notifications.
    All assets are local, so the app works offline-ish once installed.
    Version the cache name on changes. */
-const CACHE = 'whispr-pwa-v14-20261017';
+const CACHE = 'whispr-pwa-v15-20261017';
 const SHELL = [
   './index.html',
   './manifest.json',
