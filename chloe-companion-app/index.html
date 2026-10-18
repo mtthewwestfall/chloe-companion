@@ -240,6 +240,7 @@
           <button id="reconnectBtn" class="btn-ghost small">Retry connection</button>
           <button id="resetNameBtn" class="btn-ghost small">Change my name</button>
           <button id="referralBtn" class="btn-ghost small" style="border-color:var(--pink);color:var(--pink);">🎁 Share & Get VIP Free</button>
+          <button id="creatorEarningsBtn" class="btn-ghost small" style="border-color:#d4af37;color:#ffd968;">✨ Creator Earnings</button>
         </div>
       </div>
     </div>
@@ -350,6 +351,22 @@
         </div>
         <div id="authError" class="auth-error hidden"></div>
         <div id="authVerifyMsg" class="auth-verify hidden">Check your email to verify your account, then log in.</div>
+      </div>
+    </div>
+
+    <!-- Creator earnings sheet -->
+    <div id="creatorSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Creator Earnings ✨</h2><button class="sheet-close" data-close="creatorSheet">✕</button></div>
+        <p class="sheet-sub">When fans chat with a companion you created and shared to the gallery, you earn a spark per fan per day. 25 sparks = 100 free messages.</p>
+        <div class="stat-row">
+          <div class="stat"><div class="stat-num" id="sparkCount">0</div><div class="stat-label">sparks</div></div>
+          <div class="stat"><div class="stat-num" id="sparkFans">0</div><div class="stat-label">fans this week</div></div>
+        </div>
+        <div id="creatorGirls" class="mem-list"></div>
+        <div id="creatorGotw" class="mem-empty" hidden></div>
+        <button id="redeemSparksBtn" class="btn-primary full" disabled>Redeem 25 sparks → +100 messages</button>
       </div>
     </div>
 
