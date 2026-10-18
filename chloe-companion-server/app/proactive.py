@@ -211,7 +211,15 @@ def _user_local_now(timezone: str | None,
     except Exception:
         tz = ZoneInfo("America/New_York")
     if base.tzinfo is None:
-        return base.replace(tzinfo=tz)
+        # Naive inputs are UTC (the server clock and every stored
+        # timestamp) — CONVERT, never relabel. The old code attached
+        # the user's zone to the UTC wall time, so the "8-10am
+        # local" morning window actually fired at 8-10am UTC
+        # (4-6am EDT, 1-3am PDT), marked the day sent, and the
+        # real local window never fired at all. That is why the
+        # proactive morning message never landed in local time
+        # (found 2026-10-18, after three silent mornings).
+        base = base.replace(tzinfo=ZoneInfo("UTC"))
     return base.astimezone(tz)
 
 
@@ -321,6 +329,77 @@ def should_send_nudge(conn: sqlite3.Connection, user_id: str,
     if state["last_morning_date"] == local.strftime("%Y-%m-%d"):
         return False
     return True
+
+
+def _eligibility_reason(conn: sqlite3.Connection, user_id: str,
+                        user: dict[str, Any]) -> str | None:
+    if user_can_receive(conn, user_id, user):
+        return None
+    if not _is_owner(user_id) and not user.get("proactive_enabled"):
+        return "proactive disabled in his settings"
+    return "not eligible (no balance, never paid)"
+
+
+def _turn_reason(conn: sqlite3.Connection, user_id: str,
+                 character_id: str, tick: datetime) -> str | None:
+    last_turn = _last_user_turn_at(conn, user_id, character_id)
+    if last_turn is None:
+        return "no user turn on record"
+    ago = tick - last_turn
+    if ago < timedelta(hours=1):
+        return f"last turn {int(ago.total_seconds() // 60)}m ago (<1h)"
+    if ago > timedelta(hours=48):
+        return f"last turn {int(ago.total_seconds() // 3600)}h ago (>48h)"
+    return None
+
+
+def explain_morning_gate(conn: sqlite3.Connection, user_id: str,
+                         character_id: str,
+                         now: datetime | None = None) -> str:
+    """Diagnostic twin of should_send_morning_message: 'due', or the
+    first reason the gate says no. Exists so the scheduler can log WHY
+    a morning message did not fire (2026-10-18: three silent mornings
+    in a row with no evidence either way)."""
+    _ensure_tables(conn)
+    user = _get_user(conn, user_id)
+    if not user:
+        return "no user row"
+    reason = _eligibility_reason(conn, user_id, user)
+    if reason:
+        return reason
+    local = _user_local_now(user.get("timezone"), now)
+    if not (config.PROACTIVE_MORNING_HOUR
+            <= local.hour < config.PROACTIVE_MORNING_HOUR + 2):
+        return f"outside window (local {local:%H:%M})"
+    state = _proactive_state(conn, user_id, character_id)
+    if state["last_morning_date"] == local.strftime("%Y-%m-%d"):
+        return "already sent today"
+    return _turn_reason(conn, user_id, character_id,
+                        now or datetime.now()) or "due"
+
+
+def explain_ambient_gate(conn: sqlite3.Connection, user_id: str,
+                         character_id: str,
+                         now: datetime | None = None) -> str:
+    """Diagnostic twin of should_send_ambient."""
+    _ensure_tables(conn)
+    user = _get_user(conn, user_id)
+    if not user:
+        return "no user row"
+    reason = _eligibility_reason(conn, user_id, user)
+    if reason:
+        return reason
+    local = _user_local_now(user.get("timezone"), now)
+    if not (11 <= local.hour < 21):
+        return f"outside window (local {local:%H:%M})"
+    state = _proactive_state(conn, user_id, character_id)
+    if state.get("last_ambient_date") == local.strftime("%Y-%m-%d"):
+        return "already sent today"
+    tick = now or datetime.now()
+    last_nudge = _parse_ts(state.get("last_nudge_at"))
+    if last_nudge and (tick - last_nudge) < timedelta(hours=3):
+        return "nudge sent <3h ago"
+    return _turn_reason(conn, user_id, character_id, tick) or "due"
 
 
 def should_send_ambient(conn: sqlite3.Connection, user_id: str,
@@ -519,8 +598,8 @@ def send_telegram_message(chat_id: str, text: str) -> bool:
             data = json.loads(resp.read().decode("utf-8", "replace"))
             return bool(data.get("ok"))
     except Exception as e:
-        print(f"[proactive] telegram send failed: {e.__class__.__name__}",
-              flush=True)
+        print(f"[proactive] telegram send failed: {e.__class__.__name__} "
+              f"{getattr(e, 'code', '')}", flush=True)
         return False
 
 
@@ -542,7 +621,8 @@ def send_telegram_photo(chat_id: str, photo_url: str, caption: str) -> bool:
             data = json.loads(resp.read().decode("utf-8", "replace"))
             return bool(data.get("ok"))
     except Exception as e:
-        print(f"[proactive] telegram photo send failed: {e.__class__.__name__}",
+        print(f"[proactive] telegram photo send failed: "
+              f"{e.__class__.__name__} {getattr(e, 'code', '')}",
               flush=True)
         return False
 
@@ -575,7 +655,8 @@ def send_web_push(conn: sqlite3.Connection, user_id: str, title: str,
             webpush(subscription_info=sub_info,
                     data=json.dumps(payload),
                     vapid_private_key=config.VAPID_PRIVATE_KEY,
-                    vapid_claims={"sub": config.VAPID_MAILTO})
+                    vapid_claims={"sub": config.VAPID_MAILTO},
+                    timeout=10)
             sent += 1
         except Exception as e:
             status = getattr(getattr(e, "response", None), "status_code",
@@ -727,6 +808,8 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
         conn.commit()
 
     _record_sent(conn, user_id, character_id, mtype, today_str)
+    print(f"[proactive] sent {mtype} to {user_id}/{character_id} "
+          f"via {channel}", flush=True)
     return True
 
 
