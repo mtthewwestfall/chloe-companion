@@ -5339,6 +5339,14 @@ def proxy_pool_status(request: Request):
     info = gemini_keys.degradation_info()
     paid_ids = gemini_keys.paid_key_ids()
     believed = info.get("believed_healthy_key_ids") or []
+    if believed:
+        free_healthy = len([i for i in believed if i not in paid_ids])
+    else:
+        # Belief set cold (fresh boot, prober has not seeded it):
+        # the persisted per-key counts are the truth.
+        pool_counts = info.get("pool") or {}
+        free_healthy = max(0, int(pool_counts.get("healthy") or 0)
+                           - len(paid_ids))
     return {
         "chain": gemini_keys.model_chain(),
         "degraded": bool(info.get("degraded")),
@@ -5346,8 +5354,7 @@ def proxy_pool_status(request: Request):
         "pool": info.get("pool") or {},
         "believed_healthy_key_ids": believed,
         "paid_key_ids": paid_ids,
-        "free_healthy": len([i for i in believed
-                             if i not in paid_ids]),
+        "free_healthy": free_healthy,
         "models": info.get("models") or [],
         "dead_models": info.get("dead_models") or [],
         "storm": info.get("storm") or {},
