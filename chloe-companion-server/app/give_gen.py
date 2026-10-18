@@ -525,10 +525,17 @@ def trigger_daily_give_generations(day: str | None = None,
             girl_name = char.get("name") or gid
 
             for stage in range(1, 10):
+                # Check if generation exists for today. 'failed'
+                # counts as existing (2026-10-18): when Sogni's
+                # fair-use capacity died, every trigger (boot + the
+                # 12h loop) re-queued all 9 stages for all 18 girls,
+                # turning one bad day into a 248-row storm that kept
+                # hammering the dead account. A failed stage waits
+                # for tomorrow's fresh attempt.
                 # Check if generation exists for today
                 existing = conn.execute(
                     "SELECT id FROM give_generations WHERE girl_id = ? AND stage = ? AND day = ? "
-                    "AND status IN ('pending', 'generating', 'approved')",
+                    "AND status IN ('pending', 'generating', 'approved', 'failed')",
                     (gid, stage, today_str),
                 ).fetchone()
 
