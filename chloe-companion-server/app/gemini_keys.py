@@ -135,6 +135,30 @@ exposes per-model status under "models".
 When the primary is healthy the rewrite is a no-op and no tracker state
 is touched: key rotation, quotas, and the paid/free reserve logic behave
 exactly as before.
+
+Stage 1 — see clearly (key-manager overhaul, 2026-10-18):
+(a) Two-quota classification: a 429's error payload names WHICH quota
+    was hit. Per-minute (RPM) failures park the key briefly, aligned
+    to Google's own retryDelay (capped at ~120 s). Per-day (RPD)
+    failures park the key until the next America/Los_Angeles
+    midnight — the daily quotas reset on Pacific time — and the key
+    receives no calls and no probes until then (selection and the
+    prober already honor quota_exhausted_until). Ambiguous 429s keep
+    the classic ladder. GEMINI_QUOTA_CLASSIFY=0 restores ladder-only.
+(b) Health grid: per-(key, model, capability) cells, persisted in
+    gemini_key_cells and learned from observed outcomes. Selection
+    skips a key whose cell for the request's capability (text /
+    image / tts / grounding) is cooling or dead, without touching the
+    key's other cells. A model-not-found 404 for a chain model marks
+    the MODEL dead globally (in-memory, with a recheck window) so the
+    chain skips it for every key at once instead of rediscovering the
+    corpse per key. GEMINI_HEALTH_GRID=0 disables the grid.
+(c) Dead-key forensics: permanent-failure signatures in error bodies
+    (deleted/disabled service account, invalid key, Gemini API not
+    enabled in the project) set needs_attention WITH a plain cause
+    label in the attention_reason column — a dead key is never again
+    conflated with a key that is merely cooling down.
+    GEMINI_KEY_FORENSICS=0 restores unlabeled payment handling.
 """
 from __future__ import annotations
 
@@ -286,6 +310,188 @@ _model_overload_events: dict[str, list] = {}  # model -> [(mono_ts, key_id)]
 _model_probe_at: dict[str, float] = {}        # model -> mono of last probe
 _model_belief: dict[str, dict] = {}           # model -> {"ok","at","key_id"}
 
+# --- Stage 1: see clearly (2026-10-18) ---------------------------------------
+# Globally-dead models (model-not-found 404 on a chain model), guarded
+# by _lock: model -> monotonic expiry of the dead mark. Past the
+# recheck window the model is treated as unknown again — one attempt
+# may test it; a failure re-marks it, a success clears it. In-memory
+# only, like the rest of the model tracker: a restart forgets the
+# mark, which is the forgiving direction.
+_model_dead_until: dict[str, float] = {}
+_DEAD_MODEL_RECHECK_S = 21600.0  # 6 h
+# Cap on an RPM park: Google's retryDelay for a per-minute wall is
+# seconds-scale; anything longer is treated as daily evidence.
+_RPM_PARK_CAP_S = 120.0
+# A retryDelay at/above this with no explicit per-day marker is read
+# as daily-quota evidence (a per-minute limit never asks for 5+ min).
+_RPD_DELAY_HINT_S = 300.0
+# How much of an error body is read for classification/forensics (the
+# log line still only shows the first 300 chars).
+_ERROR_BODY_READ = 8192
+
+_CAPABILITIES = ("text", "image", "tts", "grounding")
+
+
+def _flag(name: str, default: str = "1") -> bool:
+    """Boolean env flag: '0'/'false'/'no' (any case) mean off."""
+    return (os.environ.get(name, default) or "").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+def _quota_classify_on() -> bool:
+    return _flag("GEMINI_QUOTA_CLASSIFY", "1")
+
+
+def _health_grid_on() -> bool:
+    return _flag("GEMINI_HEALTH_GRID", "1")
+
+
+def _forensics_on() -> bool:
+    return _flag("GEMINI_KEY_FORENSICS", "1")
+
+
+def _next_pt_midnight_epoch(now_ts: float | None = None) -> float:
+    """Epoch seconds of the next midnight in America/Los_Angeles.
+
+    Gemini daily quotas reset at Pacific midnight. Uses zoneinfo
+    when the tz database is present; otherwise falls back to the US
+    DST rule (PDT = UTC-7 from the second Sunday of March to the
+    first Sunday of November, PST = UTC-8 otherwise) so the park
+    never depends on tzdata being installed."""
+    ts = time.time() if now_ts is None else now_ts
+    try:
+        from zoneinfo import ZoneInfo
+        pt = ZoneInfo("America/Los_Angeles")
+        local = datetime.fromtimestamp(ts, tz=pt)
+        midnight = (local + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        return midnight.timestamp()
+    except Exception:
+        pass
+    # Manual fallback: find the UTC offset in force at ts.
+    utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+
+    def _nth_sunday(year: int, month: int, n: int) -> int:
+        first = datetime(year, month, 1)
+        days = (6 - first.weekday()) % 7  # weekday(): Mon=0 .. Sun=6
+        return 1 + days + 7 * (n - 1)
+
+    dst_start = datetime(utc.year, 3, _nth_sunday(utc.year, 3, 2), 10,
+                         tzinfo=timezone.utc)
+    dst_end = datetime(utc.year, 11, _nth_sunday(utc.year, 11, 1), 9,
+                       tzinfo=timezone.utc)
+    offset_h = -7 if dst_start <= utc < dst_end else -8
+    local = utc + timedelta(hours=offset_h)
+    midnight_local = (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    return (midnight_local - timedelta(hours=offset_h)).replace(
+        tzinfo=timezone.utc).timestamp()
+
+
+_RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+
+
+def _parse_retry_delay_s(body: str | None) -> float | None:
+    """Google's RetryInfo retryDelay ("39s") from an error body."""
+    if not body:
+        return None
+    m = _RETRY_DELAY_RE.search(body)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _classify_quota(body: str | None) -> tuple[str | None, float | None]:
+    """Classify a 429 body as (kind, retry_delay_s): kind is 'rpd'
+    (per-day), 'rpm' (per-minute), or None when the payload carries
+    no usable dimension evidence — the caller then keeps the classic
+    backoff ladder. Dimension evidence is read from the quotaId /
+    quotaMetric / quota_unit strings Google embeds in the
+    QuotaFailure/ErrorInfo details; a very long retryDelay with no
+    explicit marker is treated as daily evidence."""
+    delay = _parse_retry_delay_s(body)
+    text = (body or "").lower()
+    if "perday" in text or "requestsperday" in text \
+            or '"1/d/' in text or "per_day" in text:
+        return "rpd", delay
+    if "perminute" in text or "requestsperminute" in text \
+            or '"1/min' in text or "per_minute" in text:
+        return "rpm", delay
+    if delay is not None and delay >= _RPD_DELAY_HINT_S:
+        return "rpd", delay
+    return None, delay
+
+
+def _permanent_failure_reason(code: int | None,
+                              body: str | None) -> str | None:
+    """Plain cause label when an error body carries a PERMANENT
+    key/project failure signature — the key will never recover on its
+    own, so it belongs in needs_attention with the cause attached,
+    not in a cooldown. Returns None for ordinary failures."""
+    if code not in (400, 401, 402, 403):
+        return None
+    text = (body or "").lower()
+    if "service account" in text and ("deleted" in text
+                                      or "disabled" in text):
+        return "Google service account deleted or disabled"
+    if "api_key_invalid" in text or "api key not valid" in text:
+        return "API key not valid (revoked or mistyped)"
+    if "has not been used in project" in text \
+            or "service_disabled" in text \
+            or "api has not been used" in text:
+        return "Gemini API not enabled in this key's project"
+    return None
+
+
+def _request_capability(url: str, payload: dict | None) -> str:
+    """The capability a request exercises: 'grounding' when the
+    payload asks for Google Search grounding, 'tts' for speech
+    models, 'image' for image models/output, else 'text'."""
+    payload = payload or {}
+    tools = payload.get("tools") or []
+    for tool in tools:
+        if isinstance(tool, dict) and any(
+                "google_search" in str(k).lower() for k in tool):
+            return "grounding"
+    model = (_model_from_url(url) or "").lower()
+    if "tts" in model:
+        return "tts"
+    gen = payload.get("generationConfig") or {}
+    modalities = [str(m).upper() for m in
+                  (gen.get("responseModalities") or [])]
+    if "image" in model or "IMAGE" in modalities:
+        return "image"
+    return "text"
+
+
+def _cell_model(model: str | None, capability: str) -> str:
+    """The model a cell is keyed by. Grounding quota is a project
+    feature, not a per-model one, so grounding cells are keyed '*'."""
+    if capability == "grounding":
+        return "*"
+    return model or "*"
+
+
+def _model_is_dead(model: str | None) -> bool:
+    """True while a model's global dead mark is inside its recheck
+    window. Caller need not hold _lock (dict read is atomic)."""
+    if not model:
+        return False
+    return _model_dead_until.get(model, 0.0) > time.monotonic()
+
+
+def _mark_model_dead_locked(model: str, reason: str) -> None:
+    """Mark a model dead globally. Caller must hold _lock."""
+    _model_dead_until[model] = time.monotonic() + _DEAD_MODEL_RECHECK_S
+    _model_hot_until.pop(model, None)
+    logger.warning(
+        "gemini_keys: model %s marked DEAD globally (%s) - the chain "
+        "skips it for every key until the recheck window passes",
+        model, reason)
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -364,11 +570,15 @@ def _model_from_url(url: str) -> str | None:
 
 
 def _current_model_locked() -> str:
-    """Model currently serving traffic: the first chain model not in
-    its overload cooldown. Caller must hold _lock."""
+    """Model currently serving traffic: the first chain model neither
+    in its overload cooldown nor marked globally dead (Stage 1 grid).
+    Caller must hold _lock."""
     chain = model_chain()
     now = time.monotonic()
+    grid = _health_grid_on()
     for model in chain:
+        if grid and _model_dead_until.get(model, 0.0) > now:
+            continue
         if _model_hot_until.get(model, 0.0) <= now:
             return model
     return chain[0]
@@ -699,11 +909,27 @@ def degradation_info() -> dict:
     try:
         with _lock:
             conn = db.connect()
+            park_rows, cell_rows = [], []
             try:
                 _ensure_table(conn)
                 _seed_belief_locked(conn)
                 rows = conn.execute("SELECT * FROM gemini_keys").fetchall()
                 statuses = [_row_to_public(r)["status"] for r in rows]
+                # Stage 1 observability inputs (queried while the
+                # connection is open; assembled into info below).
+                try:
+                    park_rows = conn.execute(
+                        """SELECT quota_park_kind, COUNT(*) AS n
+                           FROM gemini_keys
+                           WHERE quota_exhausted_until IS NOT NULL
+                             AND quota_exhausted_until > datetime('now')
+                           GROUP BY quota_park_kind""").fetchall()
+                    cell_rows = conn.execute(
+                        """SELECT status, COUNT(*) AS n
+                           FROM gemini_key_cells
+                           GROUP BY status""").fetchall()
+                except Exception:
+                    park_rows, cell_rows = [], []
             finally:
                 conn.close()
             now = time.time()
@@ -712,6 +938,25 @@ def degradation_info() -> dict:
                 if b.get("ok") and (now - b.get("at", 0.0)) <= _BELIEF_TTL_S)
             info["believed_healthy_key_ids"] = healthy_ids
             info["pool"] = {s: statuses.count(s) for s in sorted(set(statuses))}
+            # Stage 1 observability: live quota parks by dimension,
+            # forensics cause labels, health-grid cell counts, and
+            # globally-dead models.
+            info["quota_parks"] = {
+                (r["quota_park_kind"] or "ladder"): r["n"]
+                for r in park_rows}
+            info["attention_reasons"] = {
+                str(r["id"]): r["attention_reason"] for r in rows
+                if r["needs_attention"]
+                and _row_get(r, "attention_reason")}
+            info["health_cells"] = {r["status"]: r["n"]
+                                    for r in cell_rows}
+            info["dead_models"] = [
+                {"model": m,
+                 "recheck_at": datetime.fromtimestamp(
+                     time.time() + (until - time.monotonic()),
+                     tz=timezone.utc).isoformat()}
+                for m, until in sorted(_model_dead_until.items())
+                if until > time.monotonic()]
             info["prober"] = {
                 "running": bool(_prober_thread is not None
                                 and _prober_thread.is_alive()),
@@ -795,6 +1040,33 @@ def _ensure_table(conn) -> None:
         # rows) so failure rates can be reported by class.
         conn.execute("ALTER TABLE gemini_key_usage ADD COLUMN error_class TEXT")
         conn.commit()
+    # Stage 1 (2026-10-18): dead-key forensics cause label + which
+    # quota dimension parked the key ('rpm' / 'rpd'; NULL = classic
+    # ladder or a non-quota park).
+    if "attention_reason" not in cols:
+        conn.execute(
+            "ALTER TABLE gemini_keys ADD COLUMN attention_reason TEXT")
+        conn.commit()
+    if "quota_park_kind" not in cols:
+        conn.execute(
+            "ALTER TABLE gemini_keys ADD COLUMN quota_park_kind TEXT")
+        conn.commit()
+    # Stage 1 health grid: one row per (key, model, capability) cell
+    # that has ever been observed non-ok (plus ok rows written on
+    # success to clear a cell). status: 'ok' / 'cooling' / 'dead';
+    # until_ts is an epoch expiry for 'cooling' (NULL = no expiry).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gemini_key_cells (
+            key_id     INTEGER NOT NULL,
+            model      TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'ok',
+            until_ts   REAL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (key_id, model, capability)
+        )
+    """)
+    conn.commit()
 
 
 # SQL fragment (used inside the report_* UPDATEs) that bumps a key's
@@ -828,6 +1100,81 @@ def _log_usage(conn, key_id: int | None, source: str, success: bool,
         conn.commit()
     except Exception:
         pass  # usage logging must never break the request path
+
+
+def _learn_cell(conn, key_id: int, model: str | None, capability: str,
+                status: str, until_ts: float | None = None) -> None:
+    """Persist one health-grid cell outcome (Stage 1). Best-effort:
+    learning must never break the request path."""
+    try:
+        conn.execute(
+            """INSERT INTO gemini_key_cells
+                   (key_id, model, capability, status, until_ts,
+                    updated_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(key_id, model, capability) DO UPDATE SET
+                   status = excluded.status,
+                   until_ts = excluded.until_ts,
+                   updated_at = excluded.updated_at""",
+            (key_id, _cell_model(model, capability), capability, status,
+             until_ts),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _learn_cell_conn(key_id: int, model: str | None, capability: str,
+                     status: str, until_ts: float | None = None) -> None:
+    """_learn_cell on a short-lived connection (attempt path)."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            _learn_cell(conn, key_id, model, capability, status, until_ts)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _cell_blocked_ids(model: str | None, capability: str) -> set[int]:
+    """Key ids whose health-grid cell for (model, capability) is
+    currently cooling (unexpired) or dead. Empty set when the grid is
+    off or nothing is blocked."""
+    if not _health_grid_on():
+        return set()
+    cmodel = _cell_model(model, capability)
+    now = time.time()
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            rows = conn.execute(
+                """SELECT key_id, status, until_ts FROM gemini_key_cells
+                   WHERE model = ? AND capability = ? AND status != 'ok'""",
+                (cmodel, capability),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return set()
+    blocked = set()
+    for r in rows:
+        if r["status"] == "dead":
+            blocked.add(r["key_id"])
+        elif r["status"] == "cooling" \
+                and (r["until_ts"] is None or r["until_ts"] > now):
+            blocked.add(r["key_id"])
+    return blocked
+
+
+def _filter_cells(candidates, model: str | None, capability: str):
+    """Drop candidates whose health-grid cell blocks this request."""
+    blocked = _cell_blocked_ids(model, capability)
+    if not blocked:
+        return candidates
+    return [c for c in candidates if c[0] not in blocked]
 
 
 def _key_hash(key_value: str) -> str:
@@ -1077,7 +1424,8 @@ def report_success(key_id: int) -> None:
                        last_used_at = ?,
                        total_requests = total_requests + 1,
                        """ + _DAY_BUMP_SQL + """
-                       quota_exhausted_until = NULL
+                       quota_exhausted_until = NULL,
+                       quota_park_kind = NULL
                    WHERE id = ?""",
                 (_now_str(), _now_str(), key_id),
             )
@@ -1092,8 +1440,22 @@ def report_success(key_id: int) -> None:
         entry["at"] = time.time()
 
 
-def report_failure(key_id: int, error_type: str) -> None:
-    """Record a failed attempt, by error class (2026-10-15 separation):
+def report_failure(key_id: int, error_type: str,
+                   quota_kind: str | None = None,
+                   retry_delay_s: float | None = None,
+                   attention_reason: str | None = None) -> float | None:
+    """Record a failure; returns the park expiry (epoch) it wrote, if
+    any, so the caller can mirror it into the health grid.
+
+    Stage 1 kwargs (all optional; today's behavior when absent):
+    - quota_kind/retry_delay_s: the 429's classified dimension.
+      'rpd' parks until the next Pacific midnight; 'rpm' parks for
+      min(retry_delay_s, ~120 s). The dimension is stored in
+      quota_park_kind so admin can tell a daily wall from a ladder.
+    - attention_reason: plain cause label stored alongside
+      needs_attention for permanent (payment-class) failures.
+
+    Error classes (2026-10-15 separation):
 
     - 'quota' (429): exponential backoff ladder (5, 15, 60, 240 min via
       quota_exhausted_until) and +1 consecutive_failures — a real wall.
@@ -1129,7 +1491,8 @@ def report_failure(key_id: int, error_type: str) -> None:
                 (key_id,),
             ).fetchone()
             if not row:
-                return
+                return None
+            parked_until = None
             if error_type == "request":
                 conn.execute(
                     """UPDATE gemini_keys
@@ -1158,9 +1521,29 @@ def report_failure(key_id: int, error_type: str) -> None:
                 return
             failures = (row["consecutive_failures"] or 0) + 1
             if error_type == "quota":
-                wait = _BACKOFF_MINUTES[min(failures - 1, len(_BACKOFF_MINUTES) - 1)]
-                until = (datetime.now(timezone.utc)
-                         + timedelta(minutes=wait)).strftime("%Y-%m-%d %H:%M:%S")
+                # Stage 1 two-quota parking: when the 429's dimension
+                # was classified, park by dimension instead of the
+                # ladder — 'rpd' until the next Pacific midnight,
+                # 'rpm' for the retryDelay (capped ~120 s). The key
+                # keeps its +1 consecutive failure either way (the
+                # ranking signal stays honest); only the park differs.
+                park_kind = None
+                if _quota_classify_on() and quota_kind == "rpd":
+                    until_epoch = _next_pt_midnight_epoch()
+                    park_kind = "rpd"
+                elif _quota_classify_on() and quota_kind == "rpm":
+                    delay = retry_delay_s if retry_delay_s else 60.0
+                    until_epoch = time.time() + min(
+                        max(delay, 1.0), _RPM_PARK_CAP_S)
+                    park_kind = "rpm"
+                else:
+                    wait = _BACKOFF_MINUTES[min(
+                        failures - 1, len(_BACKOFF_MINUTES) - 1)]
+                    until_epoch = (datetime.now(timezone.utc)
+                                   + timedelta(minutes=wait)).timestamp()
+                until = datetime.fromtimestamp(
+                    until_epoch, tz=timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S")
                 conn.execute(
                     """UPDATE gemini_keys
                        SET consecutive_failures = ?,
@@ -1168,11 +1551,13 @@ def report_failure(key_id: int, error_type: str) -> None:
                            total_requests = total_requests + 1,
                            total_failures = total_failures + 1,
                            """ + _DAY_BUMP_SQL + """
-                           quota_exhausted_until = ?
+                           quota_exhausted_until = ?,
+                           quota_park_kind = ?
                        WHERE id = ?""",
-                    (failures, _now_str(), until, key_id),
+                    (failures, _now_str(), until, park_kind, key_id),
                 )
                 _note_failure_locked(key_id)
+                parked_until = until_epoch
             elif error_type == "payment":
                 conn.execute(
                     """UPDATE gemini_keys
@@ -1181,9 +1566,12 @@ def report_failure(key_id: int, error_type: str) -> None:
                            total_requests = total_requests + 1,
                            total_failures = total_failures + 1,
                            """ + _DAY_BUMP_SQL + """
-                           needs_attention = 1
+                           needs_attention = 1,
+                           attention_reason = COALESCE(?, attention_reason)
                        WHERE id = ?""",
-                    (failures, _now_str(), key_id),
+                    (failures, _now_str(),
+                     attention_reason if _forensics_on() else None,
+                     key_id),
                 )
                 _note_failure_locked(key_id)
             else:  # transient
@@ -1196,6 +1584,9 @@ def report_failure(key_id: int, error_type: str) -> None:
                 existing = _parse_ts(row["quota_exhausted_until"])
                 if existing is not None and existing > until_dt.timestamp():
                     until = row["quota_exhausted_until"]
+                    parked_until = existing
+                else:
+                    parked_until = until_dt.timestamp()
                 conn.execute(
                     """UPDATE gemini_keys
                        SET last_failure_at = ?,
@@ -1212,6 +1603,7 @@ def report_failure(key_id: int, error_type: str) -> None:
         entry = _belief_entry_locked(key_id)
         entry["ok"] = False
         entry["at"] = time.time()
+        return parked_until
 
 
 def retry_exhausted() -> int:
@@ -1293,15 +1685,30 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
         _record_dispatch_locked(key_id)
     start = time.monotonic()
     data, error_type = None, None
+    quota_kind, retry_delay_s, attention_reason = None, None, None
+    err_full = ""
     try:
         data = _http_post(url, payload, key_value, timeout)
     except urllib.error.HTTPError as e:
         error_type = _classify_http_error(e.code)
         try:
-            _err_body = e.read().decode("utf-8", errors="replace")[:300]
+            err_full = e.read().decode(
+                "utf-8", errors="replace")[:_ERROR_BODY_READ]
         except Exception:
-            _err_body = ""
+            err_full = ""
+        _err_body = err_full[:300]
         model = _model_from_url(url)
+        # Stage 1 forensics: a permanent-failure signature (deleted
+        # service account, invalid key, API not enabled) outranks the
+        # status-code class — the key is dead, not unlucky — and is
+        # recorded as the payment class WITH its cause label.
+        if _forensics_on():
+            reason = _permanent_failure_reason(e.code, err_full)
+            if reason:
+                error_type = "payment"
+                attention_reason = reason
+        if error_type == "quota" and _quota_classify_on():
+            quota_kind, retry_delay_s = _classify_quota(err_full)
         if model is not None and model in model_chain() \
                 and _is_model_overload(_err_body):
             # Model-level outage, not a key problem: the 'model' class
@@ -1319,9 +1726,15 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
             # 'request' class — "the call itself was bad" — which is
             # fatal to the walk, so one dead chain entry takes down
             # every caller even with a healthy pool behind it.
+            # Stage 1 grid: ALSO mark the model dead globally so the
+            # chain skips it for every key at once (overload tracking
+            # above only heats it after multi-key evidence).
             error_type = "model"
             with _lock:
                 _note_model_overload_locked(model, key_id)
+                if _health_grid_on():
+                    _mark_model_dead_locked(
+                        model, "model-not-found 404 (retired/removed)")
         logger.warning(
             "gemini_keys attempt failed: source=%s key_id=%s http=%s "
             "class=%s %s",
@@ -1333,12 +1746,37 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
     seconds = time.monotonic() - start
     with _lock:
         _record_latency_locked(key_id, seconds)
+    model = _model_from_url(url)
+    capability = _request_capability(url, payload)
     if error_type is None:
         report_success(key_id)
         _log_usage_conn(key_id, source, True, seconds)
+        if _health_grid_on():
+            _learn_cell_conn(key_id, model, capability, "ok")
+            if model and _model_is_dead(model):
+                with _lock:
+                    _model_dead_until.pop(model, None)
         return True, data, seconds, None
-    report_failure(key_id, error_type)
+    parked_until = report_failure(
+        key_id, error_type, quota_kind=quota_kind,
+        retry_delay_s=retry_delay_s, attention_reason=attention_reason)
     _log_usage_conn(key_id, source, False, seconds, error_type)
+    if _health_grid_on():
+        # Mirror the outcome into this request's health-grid cell.
+        if error_type == "quota":
+            _learn_cell_conn(key_id, model, capability, "cooling",
+                             parked_until)
+        elif capability == "grounding" and error_type == "payment":
+            # Grounding failed auth-class on this project: the
+            # capability is dead for the key even though the key
+            # itself may serve other capabilities fine.
+            _learn_cell_conn(key_id, model, capability, "dead")
+        elif capability == "grounding" and err_full and (
+                "grounding" in err_full.lower()
+                and ("not enabled" in err_full.lower()
+                     or "not available" in err_full.lower()
+                     or "permission" in err_full.lower())):
+            _learn_cell_conn(key_id, model, capability, "dead")
     return False, None, seconds, error_type
 
 
@@ -1552,6 +1990,9 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     fast = _only_free(_fast_candidates())
     if fast:
         url = _route_url(url)
+        fast = _filter_cells(fast, _model_from_url(url),
+                             _request_capability(url, payload))
+    if fast:
         if _hedge_after_s() > 0 and len(fast) >= 2:
             data = _try_hedged(fast, url, payload, attempt_timeout, source,
                                tried, state)
@@ -1575,6 +2016,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
             "keys), failing fast for source=%s", source)
         return None
     url = _route_url(url)
+    sweep = _filter_cells(sweep, _model_from_url(url),
+                          _request_capability(url, payload))
     data = _try_candidates(sweep, url, payload,
                            caller_timeout, source, tried, state)
     if data is not None:
@@ -1617,6 +2060,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
             state["max_n"] = max(state["max_n"], state["n"] + min(
                 len(fallback), _RESERVE_FALLBACK_MAX_EXTRA))
         url = _route_url(url)
+        fallback = _filter_cells(fallback, _model_from_url(url),
+                                  _request_capability(url, payload))
         return _try_candidates(fallback, url, payload,
                                caller_timeout, source, tried, state)
     return None
@@ -1856,6 +2301,15 @@ def usage_by_source(limit: int = 100) -> list[dict]:
 # Admin helpers (values are masked outside this module)
 # ---------------------------------------------------------------------------
 
+def _row_get(row, name):
+    """Row value or None when the column isn't in the row (rows read
+    before a migration ran)."""
+    try:
+        return row[name]
+    except (KeyError, IndexError):
+        return None
+
+
 def _row_to_public(row) -> dict:
     exhausted = bool(row["quota_exhausted_until"])
     if exhausted:
@@ -1889,6 +2343,10 @@ def _row_to_public(row) -> dict:
         "last_failure_at": row["last_failure_at"],
         "quota_exhausted_until": row["quota_exhausted_until"],
         "needs_attention": bool(row["needs_attention"]),
+        # Stage 1: WHY a key needs attention (plain cause, forensics)
+        # and WHICH quota dimension parked it ('rpm'/'rpd'/None).
+        "attention_reason": _row_get(row, "attention_reason"),
+        "quota_park_kind": _row_get(row, "quota_park_kind"),
         "created_at": row["created_at"],
     }
 
@@ -1962,10 +2420,13 @@ def set_active(key_id: int, is_active: bool) -> dict | None:
                    SET is_active = ?,
                        needs_attention = CASE WHEN ? = 1 THEN 0
                                            ELSE needs_attention END,
+                       attention_reason = CASE WHEN ? = 1 THEN NULL
+                                               ELSE attention_reason END,
                        quota_exhausted_until = CASE WHEN ? = 1 THEN NULL
                                                ELSE quota_exhausted_until END
                    WHERE id = ?""",
                 (1 if is_active else 0, 1 if is_active else 0,
+                 1 if is_active else 0,
                  1 if is_active else 0, key_id),
             )
             conn.commit()
