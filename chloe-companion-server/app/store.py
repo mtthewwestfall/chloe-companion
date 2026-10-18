@@ -161,6 +161,51 @@ def user_for_stripe_customer(conn: sqlite3.Connection, customer_id: str) -> str 
     return row["user_id"] if row else None
 
 
+# ---------------------------------------------------------------------------
+# Conversion fix Item D (2026-10-18): trial-offer bookkeeping. One row
+# per user who has been offered the $0.99 trial in character; the chat
+# path consults it so the offer fires once at real depth and at most
+# once more, gently, a week later — never a stack, never a nag loop.
+# ---------------------------------------------------------------------------
+def _ensure_trial_offer_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS trial_offer_state (
+            user_id       TEXT PRIMARY KEY,
+            shown_count   INTEGER NOT NULL DEFAULT 0,
+            first_shown_at TEXT,
+            last_shown_at  TEXT
+        )"""
+    )
+
+
+def get_trial_offer_state(conn: sqlite3.Connection,
+                          user_id: str) -> dict[str, Any] | None:
+    _ensure_trial_offer_table(conn)
+    row = conn.execute(
+        "SELECT * FROM trial_offer_state WHERE user_id = ?",
+        (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def record_trial_offer_shown(conn: sqlite3.Connection,
+                             user_id: str) -> int:
+    """Mark one offer shown; returns the new shown_count."""
+    _ensure_trial_offer_table(conn)
+    conn.execute(
+        """INSERT INTO trial_offer_state
+               (user_id, shown_count, first_shown_at, last_shown_at)
+           VALUES (?, 1, datetime('now'), datetime('now'))
+           ON CONFLICT(user_id) DO UPDATE SET
+               shown_count = shown_count + 1,
+               last_shown_at = datetime('now')""",
+        (user_id,))
+    conn.commit()
+    row = conn.execute(
+        "SELECT shown_count FROM trial_offer_state WHERE user_id = ?",
+        (user_id,)).fetchone()
+    return int(row["shown_count"]) if row else 1
+
+
 def grant_trial_messages(conn: sqlite3.Connection, user_id: str, n: int) -> bool:
     """One-time trial credit: adds n messages. Returns True when granted,
     False when this user already used the trial (one per customer)."""

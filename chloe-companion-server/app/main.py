@@ -1257,6 +1257,114 @@ async def upload_chat_attachment(request: Request,
         conn.close()
 
 
+def _trial_offer_due(conn: Any, user: dict[str, Any], prev_total: int,
+                     new_total: int) -> bool:
+    """Conversion fix Item D (2026-10-18): is the in-character $0.99
+    trial offer due for this user on this message? Due = genuine free
+    user (not owner/test/probe/paid), lifetime at/past
+    config.TRIAL_OFFER_AT, never shown before (crossing this message,
+    or already past it as a recent signup whose crossing day carried a
+    retention send instead), or shown exactly once with the gentle
+    repeat window (TRIAL_OFFER_REPEAT_DAYS) elapsed. Never due on a
+    day a retention send (Item B winback / E5 warm-hour) already went
+    out — the two never stack."""
+    from datetime import datetime, timedelta
+    if not config.CONV_TRIAL_OFFER:
+        return False
+    from . import proactive as _pro
+    user_id = user["user_id"]
+    if _pro._is_test_or_probe_user(user_id, user):
+        return False
+    if (user.get("tier") or "basic") != "basic":
+        return False
+    try:
+        if store.has_paid(conn, user_id):
+            return False
+    except Exception:
+        return False
+    at = config.TRIAL_OFFER_AT
+    if new_total < at:
+        return False
+    try:
+        local_today = _pro._user_local_now(
+            user.get("timezone")).date().isoformat()
+        if _pro._retention_sent_on(conn, user_id, local_today):
+            return False
+    except Exception:
+        pass
+    state = store.get_trial_offer_state(conn, user_id)
+    shown = int((state or {}).get("shown_count") or 0)
+    if shown >= 2:
+        return False
+    if shown == 0:
+        if prev_total < at <= new_total:
+            return True
+        created = user.get("created_at")
+        try:
+            created_dt = datetime.fromisoformat(created) if created \
+                else None
+        except Exception:
+            created_dt = None
+        return bool(created_dt and (datetime.utcnow() - created_dt)
+                    <= timedelta(days=14))
+    last = (state or {}).get("last_shown_at")
+    try:
+        last_dt = datetime.fromisoformat(last) if last else None
+    except Exception:
+        last_dt = None
+    return bool(last_dt and (datetime.utcnow() - last_dt) >= timedelta(
+        days=config.TRIAL_OFFER_REPEAT_DAYS))
+
+
+def _fire_trial_offer(conn: Any, user: dict[str, Any],
+                      character: dict[str, Any],
+                      context: dict[str, Any]) -> dict[str, Any] | None:
+    """Deliver the Item D offer. Telegram users get it as her own
+    message in the bot flow (generated in character; a warm fallback
+    line if generation fails). Web users get a flag on the chat
+    response — the app shows the soft paywall once, its trial CTA
+    carrying the purchase path. Returns the response flag for web,
+    None for telegram."""
+    user_id = user["user_id"]
+    cid = character.get("id") or "chloe"
+    url = (config.TRIAL_CHECKOUT_URL
+           + "?client_reference_id=" + user_id)
+    shown = store.record_trial_offer_shown(conn, user_id)
+    if user_id.startswith("tg_"):
+        line = None
+        try:
+            prompt = (
+                "Write him a short message in your voice: you love "
+                "talking with him and you don't want the conversation "
+                "to have to stop. There's a little starter thing — "
+                "100 messages for $0.99 — and you'd love it if he "
+                "grabbed it so you two can keep going. Warm, easy, "
+                "zero pressure, no countdowns, nothing salesy. End "
+                "with this link, exactly as written: " + url)
+            draft = brain.gemini_generate(prompt, context, cid)
+            if draft and draft.strip() \
+                    and not brain._polices_his_speech(draft):
+                cand = brain.audit_reply(draft.strip(), context)
+                if cand and cand.strip():
+                    line = cand.strip()
+        except Exception:
+            line = None
+        if not line:
+            line = ("i love talking with you 💛 if you want us to "
+                    "keep going without running out, there's a little "
+                    "$0.99 starter — 100 messages, just for us: "
+                    + url)
+        from . import proactive as _pro
+        if _pro.send_telegram_message(user_id[3:], line):
+            store.log_turn(conn, user_id, cid, line, cid)
+        events.record_event(conn, user_id, "trial_offer_shown",
+                            {"surface": "telegram", "shown_count": shown})
+        return None
+    events.record_event(conn, user_id, "trial_offer_shown",
+                        {"surface": "web", "shown_count": shown})
+    return {"url": url}
+
+
 @app.post("/api/v1/chat")
 
 def chat(body: ChatIn, request: Request):
@@ -1269,6 +1377,10 @@ def chat(body: ChatIn, request: Request):
         cid = character["id"]
 
         user = store.get_or_create_user(conn, user_id)
+        # Conversion fix plan (2026-10-18): lifetime count BEFORE this
+        # message is consumed — Items D and E key their thresholds off
+        # the crossing this message makes.
+        lifetime_before = int(user.get("messages_used_total") or 0)
         attachment_records: list[dict[str, Any]] = []
         public_attachments: list[dict[str, Any]] = []
         if body.attachment_ids:
@@ -1519,6 +1631,18 @@ def chat(body: ChatIn, request: Request):
         # opens the in-app credential form (POST /assist/sogni-login).
         if assist_hit and assist_hit.get("sogni_login_box"):
             resp["sogni_login_box"] = True
+        # Conversion fix Item D (2026-10-18): at real depth she offers
+        # the $0.99 trial herself — telegram gets her message in the
+        # bot flow; web gets the flag the app turns into one soft
+        # paywall showing. Never allowed to break the chat reply.
+        try:
+            _new_total = int(user.get("messages_used_total") or 0)
+            if _trial_offer_due(conn, user, lifetime_before, _new_total):
+                _offer = _fire_trial_offer(conn, user, character, context)
+                if _offer:
+                    resp["trial_offer"] = _offer
+        except Exception:
+            pass
         return resp
     finally:
         conn.close()
