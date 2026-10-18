@@ -168,9 +168,12 @@ def _fetch_reference(avatar_url: str) -> str | None:
         return None
 
 
-def _build_prompt(girl_name: str, user_prompt: str, media: str) -> str:
+def _build_prompt(girl_name: str, user_prompt: str, media: str,
+                  gift_fragment: str = "") -> str:
     base = (f"Photorealistic {girl_name}, {user_prompt.strip()}"
             if user_prompt.strip() else f"Photorealistic portrait of {girl_name}")
+    if gift_fragment:
+        base = f"{base}, {gift_fragment}"
     tail = ("clean high-quality footage, natural anatomy, soft flattering "
             "light, coherent background")
     if media == "video":
@@ -179,14 +182,15 @@ def _build_prompt(girl_name: str, user_prompt: str, media: str) -> str:
 
 
 async def _generate_async(request_id: int, girl: dict[str, Any], media: str,
-                          prompt: str) -> tuple[str, float]:
+                          prompt: str,
+                          gift_fragment: str = "") -> tuple[str, float]:
     """Run the Sogni job. Returns (saved_relative_url, cost_usd)."""
     from sogni_client import SogniClient
 
     _patch_websocket_quirk()
     ref_path = _fetch_reference(girl.get("avatar_url") or "")
     params: dict[str, Any] = {
-        "positivePrompt": _build_prompt(girl.get("name") or "Chloe", prompt, media),
+        "positivePrompt": _build_prompt(girl.get("name") or "Chloe", prompt, media, gift_fragment),
         "numberOfMedia": 1,
     }
     if ref_path:
@@ -383,9 +387,16 @@ def run_generation(request_id: int) -> None:
         # hard import cycle (characters imports config only, but be safe).
         from . import characters
         girl = characters.get_character(req["girl_id"])
+        _gift_frag = ""
+        try:
+            _gift_frag = store.gift_visual_fragment(
+                conn, req["user_id"], req["girl_id"])
+        except Exception:
+            _gift_frag = ""
         try:
             url, cost = asyncio.run(
-                _generate_async(request_id, girl, req["media"], req["prompt"]))
+                _generate_async(request_id, girl, req["media"], req["prompt"],
+                                gift_fragment=_gift_frag))
         except Exception as e:  # noqa: BLE001
             print(f"[media_gen] request {request_id} failed: {e}\n"
                   f"{traceback.format_exc()}", flush=True)
@@ -402,7 +413,8 @@ def run_generation(request_id: int) -> None:
                 # photo of the wrong woman.
                 try:
                     url, cost = asyncio.run(_generate_async(
-                        request_id, girl, req["media"], req["prompt"]))
+                        request_id, girl, req["media"], req["prompt"],
+                        gift_fragment=_gift_frag))
                     verdict = _face_verdict(girl, url)
                     print(f"[media_gen] request {request_id} face check "
                           f"(retry): {verdict}", flush=True)

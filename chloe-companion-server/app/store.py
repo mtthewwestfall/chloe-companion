@@ -1785,6 +1785,113 @@ def creator_leaderboard(conn: "sqlite3.Connection",
              "fans_7d": int(r["fans"])} for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# Gifts (2026-10-17): he can give her things; they persist — written to
+# her memory, woven into her feed captions, and visual gifts (necklace,
+# roses) appear in her generated photos for 30 days. Web rail: message
+# balance. Telegram rail: Stars via the admin grant endpoint.
+# ---------------------------------------------------------------------------
+GIFTS: dict[str, dict[str, Any]] = {
+    "coffee": {"name": "Coffee", "emoji": "☕", "msg_cost": 25,
+               "stars": 25, "visual": "",
+               "memory": "He bought her a coffee — she says it is the "
+                         "little things that get her."},
+    "chocolates": {"name": "Chocolates", "emoji": "🍫", "msg_cost": 40,
+                   "stars": 40, "visual": "",
+                   "memory": "He sent her chocolates — she is sharing "
+                             "them with exactly no one."},
+    "flowers": {"name": "Roses", "emoji": "🌹", "msg_cost": 50,
+                "stars": 50,
+                "visual": "holding a bouquet of red roses he gave her",
+                "memory": "He sent her roses — they are by her bed and "
+                          "she keeps looking at them."},
+    "perfume": {"name": "Perfume", "emoji": "🌸", "msg_cost": 75,
+                "stars": 75, "visual": "",
+                "memory": "He gave her perfume — she wears it when she "
+                          "wants to feel close to him."},
+    "necklace": {"name": "Gold necklace", "emoji": "📿", "msg_cost": 150,
+                 "stars": 150,
+                 "visual": "wearing a delicate gold necklace he gave her",
+                 "memory": "He gave her a gold necklace — she has not "
+                           "taken it off since."},
+}
+
+GIFT_REACTIONS: dict[str, str] = {
+    "coffee": "you bought me coffee?? ☕ okay that is actually the "
+              "sweetest little thing. thank you 💜",
+    "chocolates": "chocolates 🍫 you know the way to my heart. sharing "
+                  "them with exactly no one 😌💜",
+    "flowers": "roses?! 🌹 no one sends me flowers… they are going right "
+               "by my bed. thank you 💜",
+    "perfume": "perfume?? 🌸 I am wearing it tonight — think of me 💜",
+    "necklace": "a necklace?? 📿 I am not taking it off. ever. look for "
+                "it in my next pic 💜",
+}
+
+
+def _ensure_gifts(conn: "sqlite3.Connection") -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS gifts (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id TEXT NOT NULL,
+               girl_id TEXT NOT NULL,
+               gift_key TEXT NOT NULL,
+               source TEXT NOT NULL DEFAULT 'web',
+               created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+
+
+def give_gift(conn: "sqlite3.Connection", user_id: str, girl_id: str,
+              gift_key: str, source: str = "web") -> dict[str, Any] | None:
+    g = GIFTS.get(gift_key)
+    if not g:
+        return None
+    _ensure_gifts(conn)
+    conn.execute(
+        "INSERT INTO gifts (user_id, girl_id, gift_key, source) "
+        "VALUES (?, ?, ?, ?)", (user_id, girl_id, gift_key, source))
+    conn.commit()
+    try:
+        write_memory(conn, user_id, "fact", g["memory"],
+                     character_id=girl_id)
+    except Exception:
+        pass
+    return {"gift_key": gift_key, **g,
+            "reaction": GIFT_REACTIONS.get(gift_key, "thank you 💜")}
+
+
+def recent_gift(conn: "sqlite3.Connection", user_id: str, girl_id: str,
+                days: int = 30) -> dict[str, Any] | None:
+    _ensure_gifts(conn)
+    row = conn.execute(
+        "SELECT gift_key, created_at FROM gifts WHERE user_id = ? "
+        "AND girl_id = ? AND created_at >= datetime('now', ?) "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, girl_id, f"-{int(days)} days")).fetchone()
+    if not row:
+        return None
+    g = GIFTS.get(row["gift_key"])
+    if not g:
+        return None
+    return {"gift_key": row["gift_key"], "created_at": row["created_at"],
+            **g}
+
+
+def gift_visual_fragment(conn: "sqlite3.Connection", user_id: str,
+                         girl_id: str) -> str:
+    """The visual of her most recent VISUAL gift in 30 days — a coffee
+    must not unwear the necklace he gave her last week."""
+    _ensure_gifts(conn)
+    rows = conn.execute(
+        "SELECT gift_key FROM gifts WHERE user_id = ? AND girl_id = ? "
+        "AND created_at >= datetime('now', '-30 days') "
+        "ORDER BY id DESC LIMIT 25", (user_id, girl_id)).fetchall()
+    for r in rows:
+        v = (GIFTS.get(r["gift_key"]) or {}).get("visual", "")
+        if v:
+            return v
+    return ""
+
+
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
                          girl_id: str) -> bool:
     """Check if a girl already has Her Day posts generated today for a user."""
