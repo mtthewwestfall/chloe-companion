@@ -1,6 +1,14 @@
-"""Per-character ElevenLabs voice IDs (2026-10-16).
+"""Per-character voice assignment (ElevenLabs IDs legacy; Gemini live).
 
-Character depth: every character gets her/his OWN distinct ElevenLabs voice
+UPDATE 2026-10-17: the owner switched the synthesis engine from
+ElevenLabs to Gemini TTS ("Forget ElevenLabs, just use Gemini").
+Synthesis now resolves a per-character Gemini prebuilt voice NAME via
+app/voice.py (_gemini_voice_for / _CHARACTER_GEMINI_VOICES, the
+canonical table). The ElevenLabs ID table below is retained for
+reference/rollback only; gemini_voice_name_for() at the bottom of this
+module is the live resolver facade for character dicts.
+
+Character depth: every character gets her/his OWN distinct voice
 for voice notes, so Mara never speaks with Chloe's voice.
 
 How it ties into PR #24 ("Switch voice TTS to ElevenLabs"): that PR resolves
@@ -96,4 +104,45 @@ def voice_id_report() -> list[dict[str, str]]:
         {"character_id": cid,
          "elevenlabs_voice_id": elevenlabs_voice_id_for({"id": cid})}
         for cid in sorted(CHARACTER_VOICE_IDS)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Gemini TTS (live engine since 2026-10-17). The canonical per-character
+# table lives in app/voice.py (_CHARACTER_GEMINI_VOICES) so the synthesis
+# path and this facade can never drift.
+# ---------------------------------------------------------------------------
+
+def gemini_voice_name_for(character: dict[str, Any] | None) -> str:
+    """Resolve the Gemini prebuilt voice name for one character.
+
+    Accepts the characters.py character dict (or a bare {"id": ...}).
+    Never raises — the voice path must survive a misconfigured roster.
+    Delegates to app.voice._gemini_voice_for with the character's
+    companion_voice name and id; falls back to voice.DEFAULT_GEMINI_VOICE.
+    """
+    from . import voice as _voice
+    char = character or {}
+    try:
+        cid = str(char.get("id") or "").strip().lower()
+    except Exception:  # noqa: BLE001 — voice resolution never breaks chat
+        cid = ""
+    try:
+        vname = str(char.get("companion_voice") or "").strip() or "liora"
+    except Exception:  # noqa: BLE001
+        vname = "liora"
+    try:
+        return _voice._gemini_voice_for(vname, cid)
+    except Exception:  # noqa: BLE001
+        return _voice.DEFAULT_GEMINI_VOICE
+
+
+def gemini_voice_report() -> list[dict[str, str]]:
+    """Distinctness audit for the live engine: one row per character in
+    the canonical Gemini table."""
+    from . import voice as _voice
+    return [
+        {"character_id": cid,
+         "gemini_voice": _voice._gemini_voice_for("liora", cid)}
+        for cid in sorted(_voice._CHARACTER_GEMINI_VOICES)
     ]
