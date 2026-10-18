@@ -137,6 +137,9 @@ class WinbackGate(unittest.TestCase):
     def test_probe_is_not_due(self):
         self.assertFalse(self._due(user_id="probe_wh_1"))
 
+    def test_internal_fixture_is_not_due(self):
+        self.assertFalse(self._due(user_id="tg_muse-ownerprobe"))
+
     def test_test_email_is_not_due(self):
         self.assertFalse(self._due(email="qa@mailinator.com"))
 

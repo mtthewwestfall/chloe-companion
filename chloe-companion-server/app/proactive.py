@@ -234,6 +234,9 @@ def _is_test_or_probe_user(user_id: str, user: dict[str, Any]) -> bool:
         return True
     if (user_id or "").startswith("probe_"):
         return True
+    if (user_id or "").startswith("tg_muse"):
+        return True  # internal fixture accounts from past test runs
+
     email = (user.get("email") or "").lower()
     return any(marker in email for marker in _TEST_EMAIL_MARKERS)
 
