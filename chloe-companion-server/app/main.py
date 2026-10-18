@@ -1086,6 +1086,16 @@ def chat(body: ChatIn, request: Request):
                 (_snow - _std(days=1)).strftime("%Y-%m-%d"))
         except Exception:
             streak_now = 0
+        try:
+            _grow = conn.execute(
+                "SELECT owner_user_id, gallery_public FROM "
+                "local_characters WHERE id = ?", (cid,)).fetchone()
+            if _grow and _grow["owner_user_id"] and _grow["gallery_public"]:
+                store.accrue_creator_spark(
+                    conn, _grow["owner_user_id"], cid, user_id,
+                    _snow.strftime("%Y-%m-%d"))
+        except Exception:
+            pass
         if attachment_records:
             assist.mark_chat_attachments_used(
                 conn, [record["id"] for record in attachment_records],
@@ -2198,6 +2208,39 @@ def drawing_public():
         conn.close()
 
 
+@app.get("/api/v1/creator/me")
+def creator_me(request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        return store.creator_stats(conn, user_id)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/creator/redeem")
+def creator_redeem(request: Request):
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        ok = store.redeem_sparks(conn, user_id)
+        stats = store.creator_stats(conn, user_id)
+        return {"ok": ok, **stats}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/creator/leaderboard")
+def creator_leaderboard_public():
+    conn = _conn()
+    try:
+        board = store.creator_leaderboard(conn)
+        return {"leaderboard": board,
+                "girl_of_the_week": board[0] if board else None}
+    finally:
+        conn.close()
+
+
 @app.get("/p/{slug}")
 def public_post_page(slug: str):
     """Shareable permalink for one Her Day moment (2026-10-17):
@@ -3259,7 +3302,7 @@ text-align:center;color:var(--sub)}
 """
 
 
-def _gallery_page_html(cards: list[dict]) -> str:
+def _gallery_page_html(cards: list[dict], gotw: dict | None = None) -> str:
     parts = [
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">",
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
@@ -3273,6 +3316,20 @@ def _gallery_page_html(cards: list[dict]) -> str:
         "<p class=\"lede\">Companions imagined and created by Whispr "
         "members. Pick one and start talking.</p>",
     ]
+    if gotw:
+        _gname = _html.escape(gotw.get("name") or "")
+        _gby = _html.escape(gotw.get("creator_name") or "")
+        _gfans = int(gotw.get("fans_7d") or 0)
+        parts.append(
+            "<div style=\"background:linear-gradient(135deg,#3a2410,#241531);"
+            "border:1px solid #d4af37;border-radius:14px;padding:14px 16px;"
+            "margin:0 0 18px;text-align:center\">"
+            "<div style=\"font-size:19px;font-weight:800;color:#ffd968\">"
+            f"🔥 Girl of the Week: {_gname}</div>"
+            f"<div style=\"color:#e8e2f2;font-size:13.5px;margin-top:4px\">"
+            f"{_gfans} fans chatted with her this week"
+            + (f" · created by {_gby}" if _gby else "")
+            + "</div></div>")
     if cards:
         parts.append("<div class=\"grid\">")
         for c in cards:
@@ -3311,7 +3368,17 @@ def _gallery_page_html(cards: list[dict]) -> str:
 
 @app.get("/gallery", response_class=HTMLResponse, include_in_schema=False)
 def gallery_page():
-    return _gallery_page_html(_gallery_cards())
+    gotw = None
+    conn = _conn()
+    try:
+        board = store.creator_leaderboard(conn, limit=1)
+        if board:
+            gotw = board[0]
+    except Exception:
+        gotw = None
+    finally:
+        conn.close()
+    return _gallery_page_html(_gallery_cards(), gotw=gotw)
 
 
 @app.get("/api/v1/submissions/mine")

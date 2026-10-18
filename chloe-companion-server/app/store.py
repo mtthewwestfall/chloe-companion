@@ -1678,6 +1678,113 @@ def anniversaries_for_user(conn: "sqlite3.Connection", user_id: str,
     return out
 
 
+# ---------------------------------------------------------------------------
+# Creator economy (2026-10-17): when someone chats with a gallery-public
+# companion you created, you earn sparks — one per unique chatter per
+# day (anti-farm). 25 sparks redeem for +100 messages.
+# ---------------------------------------------------------------------------
+SPARK_REDEEM_COST = 25
+SPARK_REDEEM_MESSAGES = 100
+
+
+def _ensure_creator(conn: "sqlite3.Connection") -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS creator_sparks (
+               creator_user_id TEXT PRIMARY KEY,
+               sparks INTEGER NOT NULL DEFAULT 0,
+               updated_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS creator_daily (
+               creator_user_id TEXT NOT NULL,
+               girl_id TEXT NOT NULL,
+               chatter_user_id TEXT NOT NULL,
+               day TEXT NOT NULL,
+               PRIMARY KEY (creator_user_id, girl_id, chatter_user_id,
+                            day))""")
+
+
+def accrue_creator_spark(conn: "sqlite3.Connection", creator_user_id: str,
+                         girl_id: str, chatter_user_id: str,
+                         day: str) -> bool:
+    """Record a fan-day; returns True when a NEW spark was earned."""
+    if not creator_user_id or creator_user_id == chatter_user_id:
+        return False
+    _ensure_creator(conn)
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO creator_daily (creator_user_id, girl_id,"
+        " chatter_user_id, day) VALUES (?, ?, ?, ?)",
+        (creator_user_id, girl_id, chatter_user_id, day))
+    if cur.rowcount:
+        conn.execute(
+            "INSERT INTO creator_sparks (creator_user_id, sparks) "
+            "VALUES (?, 1) ON CONFLICT(creator_user_id) DO UPDATE SET "
+            "sparks = sparks + 1, updated_at = datetime('now')",
+            (creator_user_id,))
+        conn.commit()
+        return True
+    return False
+
+
+def creator_stats(conn: "sqlite3.Connection",
+                  user_id: str) -> dict[str, Any]:
+    _ensure_creator(conn)
+    row = conn.execute(
+        "SELECT sparks FROM creator_sparks WHERE creator_user_id = ?",
+        (user_id,)).fetchone()
+    girls = conn.execute(
+        "SELECT lc.id, lc.name, lc.gallery_public, "
+        "(SELECT COUNT(DISTINCT cd.chatter_user_id) FROM creator_daily cd "
+        " WHERE cd.girl_id = lc.id AND cd.day >= date('now', '-7 days')) "
+        " AS fans_7d FROM local_characters lc "
+        "WHERE lc.owner_user_id = ? ORDER BY lc.name", (user_id,)).fetchall()
+    return {
+        "sparks": int(row["sparks"]) if row else 0,
+        "redeem_cost": SPARK_REDEEM_COST,
+        "redeem_messages": SPARK_REDEEM_MESSAGES,
+        "girls": [{"id": g["id"], "name": g["name"],
+                   "gallery_public": bool(g["gallery_public"]),
+                   "fans_7d": int(g["fans_7d"] or 0)} for g in girls],
+    }
+
+
+def redeem_sparks(conn: "sqlite3.Connection", user_id: str) -> bool:
+    _ensure_creator(conn)
+    row = conn.execute(
+        "SELECT sparks FROM creator_sparks WHERE creator_user_id = ?",
+        (user_id,)).fetchone()
+    if not row or int(row["sparks"]) < SPARK_REDEEM_COST:
+        return False
+    conn.execute(
+        "UPDATE creator_sparks SET sparks = sparks - ?, "
+        "updated_at = datetime('now') WHERE creator_user_id = ?",
+        (SPARK_REDEEM_COST, user_id))
+    conn.execute(
+        "UPDATE users SET messages_remaining = messages_remaining + ?, "
+        "updated_at = datetime('now') WHERE user_id = ?",
+        (SPARK_REDEEM_MESSAGES, user_id))
+    conn.commit()
+    return True
+
+
+def creator_leaderboard(conn: "sqlite3.Connection",
+                        limit: int = 10) -> list[dict[str, Any]]:
+    """Top gallery girls by unique fans in the last 7 days."""
+    _ensure_creator(conn)
+    rows = conn.execute(
+        "SELECT cd.girl_id, lc.name, lc.avatar_url, u.name AS creator_name, "
+        "COUNT(DISTINCT cd.chatter_user_id) AS fans "
+        "FROM creator_daily cd "
+        "JOIN local_characters lc ON lc.id = cd.girl_id "
+        "LEFT JOIN users u ON u.user_id = cd.creator_user_id "
+        "WHERE cd.day >= date('now', '-7 days') AND lc.gallery_public = 1 "
+        "GROUP BY cd.girl_id ORDER BY fans DESC LIMIT ?",
+        (limit,)).fetchall()
+    return [{"girl_id": r["girl_id"], "name": r["name"],
+             "avatar_url": r["avatar_url"] or "",
+             "creator_name": r["creator_name"] or None,
+             "fans_7d": int(r["fans"])} for r in rows]
+
+
 def her_day_exists_today(conn: "sqlite3.Connection", user_id: str,
                          girl_id: str) -> bool:
     """Check if a girl already has Her Day posts generated today for a user."""
