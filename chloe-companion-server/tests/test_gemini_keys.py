@@ -76,6 +76,11 @@ class GeminiKeysTestBase(unittest.TestCase):
             gemini_keys._flights.clear()
             gemini_keys._flight_hits = 0
             gemini_keys._flight_leader_runs = 0
+        # Reset Stage 3 state: validated cooldown exits, sticky
+        # sessions, and the observed cached-token counter.
+        gemini_keys._probe_validated_until.clear()
+        gemini_keys._sessions.clear()
+        gemini_keys._cached_tokens_total = 0
         self._env = {}
         for name in ("GEMINI_MAX_ATTEMPTS", "GEMINI_FAST_TIMEOUT_S",
                      "GEMINI_ATTEMPT_BUDGET_S", "GEMINI_HEDGE_AFTER_S",
@@ -89,7 +94,9 @@ class GeminiKeysTestBase(unittest.TestCase):
                      "GEMINI_LEASES", "GEMINI_LEASE_MAX_CALLS",
                      "GEMINI_LEASE_MAX_ACTIVE_PER_SOURCE",
                      "GEMINI_LEASE_DEFAULT_CALLS",
-                     "GEMINI_BULK_SOURCES", "GEMINI_INTERACTIVE_SOURCES"):
+                     "GEMINI_BULK_SOURCES", "GEMINI_INTERACTIVE_SOURCES",
+                     "GEMINI_BURN_TRACKING", "GEMINI_PROBER_SLIM",
+                     "GEMINI_STICKY_SESSIONS", "GEMINI_SPEND_LEDGER"):
             self._env[name] = os.environ.pop(name, None)
 
     def tearDown(self):
@@ -731,6 +738,14 @@ class TestFailFastEverywhere(GeminiKeysTestBase):
 
 
 class TestLeanProber(GeminiKeysTestBase):
+    def setUp(self):
+        super().setUp()
+        # This class pins the LEGACY prober semantics (confirm
+        # windows, cycling). The Stage-3 slim prober is the shipped
+        # default and has its own suite
+        # (tests/test_gemini_keys_stage3.py::TestProberSlim).
+        os.environ["GEMINI_PROBER_SLIM"] = "0"
+
     def _patch_http(self, behavior):
         calls = []
 

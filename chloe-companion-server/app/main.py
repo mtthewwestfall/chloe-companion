@@ -5012,10 +5012,13 @@ def proxy_gemini_generate_content(model: str, body: dict, request: Request):
         in ("1", "true", "yes")
     _ensure_safety_settings(body)
     lease_id = (request.headers.get("x-pool-lease") or "").strip() or None
+    session_id = (request.headers.get("x-pool-session")
+                  or "").strip() or None
     status_out: dict = {}
     data = gemini_keys.post_json(url, body, timeout=60, source=source,
                                  free_only=free_only, lease_id=lease_id,
-                                 status_out=status_out)
+                                 status_out=status_out,
+                                 session_id=session_id)
     if data is None:
         _raise_pool_status(status_out)
         raise HTTPException(status_code=502, detail="all_keys_failed")
@@ -5077,10 +5080,13 @@ def proxy_openai_chat_completions(body: dict, request: Request):
     free_only = (request.headers.get("x-free-only") or "").strip().lower() \
         in ("1", "true", "yes")
     lease_id = (request.headers.get("x-pool-lease") or "").strip() or None
+    session_id = (request.headers.get("x-pool-session")
+                  or "").strip() or None
     status_out: dict = {}
     data = gemini_keys.post_json(url, payload, timeout=60, source=source,
                                  free_only=free_only, lease_id=lease_id,
-                                 status_out=status_out)
+                                 status_out=status_out,
+                                 session_id=session_id)
     if data is None:
         _raise_pool_status(status_out)
         raise HTTPException(status_code=502, detail="all_keys_failed")

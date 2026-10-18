@@ -191,6 +191,37 @@ Stage 2 — protect what matters (key-manager overhaul, 2026-10-18):
     (GEMINI_LEASE_DEFAULT_CALLS, default 100000) so accounting is
     real but nothing breaks on day one. GEMINI_LEASES=0 disables
     charging entirely.
+
+Stage 3 — get smart (key-manager overhaul, 2026-10-18):
+(a) Burn tracking: every attempt increments gemini_key_model_day
+    (Pacific day, per key+model). When an RPD park lands, the day's
+    count for that key+model is learned into gemini_key_limits as an
+    OBSERVED daily limit (never a published prior). The health
+    payload exposes per-key served-today, the Pacific reset time,
+    learned limits, and a capacity forecast in hours at the last
+    hour's pool-wide burn rate. GEMINI_BURN_TRACKING=0 off.
+(b) Prober slimming: passive health from real traffic is the
+    default evidence. Under GEMINI_PROBER_SLIM (default on), the
+    prober no longer re-confirms idle healthy keys, probes an
+    unknown-state key once rather than cycling it, and a key leaving
+    cooldown earns exactly ONE validation probe per cooldown exit
+    (keyed to the exact backoff value); non-primary model probes
+    run only while that model is hot or dead-marked. Flag off
+    restores the legacy cycling prober.
+(c) Sticky sessions: post_json(session_id=...) (proxy header
+    X-Pool-Session) pins the session to the key that served it for
+    30 minutes; the pinned key is tried first and the pin re-forms
+    on the serving key whenever routing moves. Cached-content
+    tokens are counted only when the API actually returns
+    usageMetadata.cachedContentTokenCount — observed, never
+    estimated. GEMINI_STICKY_SESSIONS=0 off.
+(d) Spend ledger: gemini_source_day rolls up calls / failures /
+    paid-key calls per source per Pacific day, exposed in the
+    health payload with a spike flag when a source's paid calls
+    run >= 3x its trailing 7-day average (and >= 10). Paid DOLLARS
+    are never reported — no per-call price exists in this codebase,
+    so the ledger counts paid calls, not invented money.
+    GEMINI_SPEND_LEDGER=0 off.
 """
 from __future__ import annotations
 
@@ -380,6 +411,50 @@ def _health_grid_on() -> bool:
 
 def _forensics_on() -> bool:
     return _flag("GEMINI_KEY_FORENSICS", "1")
+
+
+# --- Stage 3 flags -------------------------------------------------------------
+
+def _burn_on() -> bool:
+    return _flag("GEMINI_BURN_TRACKING", "1")
+
+
+def _prober_slim_on() -> bool:
+    return _flag("GEMINI_PROBER_SLIM", "1")
+
+
+def _sticky_on() -> bool:
+    return _flag("GEMINI_STICKY_SESSIONS", "1")
+
+
+def _ledger_on() -> bool:
+    return _flag("GEMINI_SPEND_LEDGER", "1")
+
+
+def _pt_day_str(ts: float | None = None) -> str:
+    """The current Pacific (America/Los_Angeles) calendar day,
+    YYYY-MM-DD — Gemini daily quotas and all Stage-3 day tables key
+    off this day. Same zoneinfo + manual-DST fallback approach as
+    _next_pt_midnight_epoch."""
+    ts = time.time() if ts is None else ts
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(
+            ts, tz=ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+
+    def _nth_sunday(year: int, month: int, n: int) -> int:
+        first = datetime(year, month, 1)
+        return 1 + (6 - first.weekday()) % 7 + 7 * (n - 1)
+
+    dst_start = datetime(utc.year, 3, _nth_sunday(utc.year, 3, 2), 10,
+                         tzinfo=timezone.utc)
+    dst_end = datetime(utc.year, 11, _nth_sunday(utc.year, 11, 1), 9,
+                       tzinfo=timezone.utc)
+    offset_h = -7 if dst_start <= utc < dst_end else -8
+    return (utc + timedelta(hours=offset_h)).strftime("%Y-%m-%d")
 
 
 def _next_pt_midnight_epoch(now_ts: float | None = None) -> float:
@@ -670,6 +745,19 @@ def _storm_stats() -> dict:
 
 def _singleflight_on() -> bool:
     return _flag("GEMINI_SINGLEFLIGHT", "1")
+
+
+# --- Stage 3 state -----------------------------------------------------------
+# Cooldown exits that already earned their one slim-prober validation
+# probe, keyed by the exact backoff epoch — a NEW exit (a different
+# backoff value) earns a fresh one.
+_probe_validated_until: dict[int, float] = {}
+# Sticky sessions: session id -> {"key_id", "expires"} (monotonic).
+_sessions: dict[str, dict] = {}
+_SESSION_TTL_S = 1800.0
+# Cached-content tokens actually reported by the API in
+# usageMetadata (observed only; never estimated).
+_cached_tokens_total = 0
 
 
 def _flight_key(source: str, url: str, payload: dict) -> str:
@@ -1388,6 +1476,7 @@ def degradation_info() -> dict:
                     if _prober_last_cycle_at else None),
                 "probes_total": _probes_total,
                 "probes_ok": _probes_ok,
+                "slim": _prober_slim_on(),
             }
         # Storm + single-flight state (outside the lock above:
         # _storm_stats takes it itself).
@@ -1399,6 +1488,111 @@ def degradation_info() -> dict:
                 "leader_runs": _flight_leader_runs,
                 "in_flight": len(_flights),
             }
+        # Stage 3: burn + forecast, spend ledger, sticky sessions.
+        try:
+            _day = _pt_day_str()
+            conn = db.connect()
+            try:
+                _ensure_table(conn)
+                served: dict = {}
+                for r in conn.execute(
+                        """SELECT key_id, model, calls
+                           FROM gemini_key_model_day
+                           WHERE pt_day = ?""", (_day,)).fetchall():
+                    e = served.setdefault(
+                        str(r["key_id"]), {"total": 0, "by_model": {}})
+                    e["total"] += r["calls"]
+                    e["by_model"][r["model"]] = r["calls"]
+                limits = [
+                    {"key_id": r["key_id"], "model": r["model"],
+                     "daily_limit": r["daily_limit"],
+                     "learned_from": r["learned_from"]}
+                    for r in conn.execute(
+                        "SELECT * FROM gemini_key_limits").fetchall()
+                ]
+                sources: dict = {}
+                for r in conn.execute(
+                        """SELECT source, calls, failures, paid_calls
+                           FROM gemini_source_day WHERE pt_day = ?""",
+                        (_day,)).fetchall():
+                    sources[r["source"]] = {
+                        "calls": r["calls"],
+                        "failures": r["failures"],
+                        "paid_calls": r["paid_calls"],
+                        "paid_anomaly": False}
+                for r in conn.execute(
+                        """SELECT source,
+                                  AVG(paid_calls) AS avg_paid
+                           FROM gemini_source_day
+                           WHERE pt_day < ? AND pt_day >= date(?, '-7 days')
+                           GROUP BY source""",
+                        (_day, _day)).fetchall():
+                    s = sources.get(r["source"])
+                    if s is None:
+                        continue
+                    avg = float(r["avg_paid"] or 0.0)
+                    s["paid_avg_7d"] = round(avg, 2)
+                    s["paid_anomaly"] = bool(
+                        s["paid_calls"] >= 10
+                        and s["paid_calls"] >= 3.0 * max(avg, 1.0))
+                rate_row = conn.execute(
+                    """SELECT COUNT(*) AS n FROM gemini_key_usage
+                       WHERE created_at >= datetime('now', '-1 hour')"""
+                ).fetchone()
+                rate = float(rate_row["n"]) if rate_row else 0.0
+                free_active = conn.execute(
+                    """SELECT COUNT(*) AS n FROM gemini_keys
+                       WHERE is_paid = 0 AND is_active = 1"""
+                ).fetchone()["n"]
+            finally:
+                conn.close()
+            primary = model_chain()[0]
+            lim_by_key = {l["key_id"]: l["daily_limit"]
+                          for l in limits if l["model"] == primary}
+            remaining = 0
+            for kid, lim in lim_by_key.items():
+                used = served.get(str(kid), {}).get(
+                    "by_model", {}).get(primary, 0)
+                remaining += max(0, lim - used)
+            if not lim_by_key:
+                forecast = {"status": "learning",
+                            "reason": "no observed RPD limits yet",
+                            "hours": None}
+            elif rate <= 0:
+                forecast = {"status": "no_recent_burn",
+                            "hours": None,
+                            "keys_with_limits": len(lim_by_key)}
+            else:
+                forecast = {
+                    "status": "ok",
+                    "hours": round(remaining / rate, 1),
+                    "model": primary,
+                    "remaining_calls": remaining,
+                    "burn_rate_per_hour": int(rate),
+                    "keys_with_limits": len(lim_by_key),
+                    "partial": len(lim_by_key) < int(free_active),
+                }
+            info["burn"] = {
+                "pt_day": _day,
+                "pt_reset_epoch": _next_pt_midnight_epoch(),
+                "keys_served_today": served,
+                "learned_limits": limits,
+                "forecast": forecast,
+            }
+            info["ledger"] = {"pt_day": _day, "sources": sources}
+            now_m = time.monotonic()
+            with _lock:
+                active_sessions = sum(
+                    1 for e in _sessions.values()
+                    if e["expires"] > now_m)
+                cached_total = _cached_tokens_total
+            info["sessions"] = {
+                "enabled": _sticky_on(),
+                "active": active_sessions,
+                "cached_tokens_total_observed": cached_total,
+            }
+        except Exception:
+            pass
         # Per-model fallback-chain status (outside the lock above:
         # _model_health_info takes it itself).
         info["models"] = _model_health_info()
@@ -1509,6 +1703,41 @@ def _ensure_table(conn) -> None:
             created_at   TEXT NOT NULL DEFAULT (datetime('now')),
             expires_at   REAL,
             status       TEXT NOT NULL DEFAULT 'active'
+        )
+    """)
+    # Stage 3: per-key/model daily burn counters (Pacific day),
+    # learned per-key/model daily limits (observed exhaustion only),
+    # and the per-source daily spend ledger (calls/failures/paid
+    # calls — never dollars).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gemini_key_model_day (
+            pt_day TEXT NOT NULL,
+            key_id INTEGER NOT NULL,
+            model  TEXT NOT NULL,
+            calls  INTEGER NOT NULL DEFAULT 0,
+            ok     INTEGER NOT NULL DEFAULT 0,
+            fail   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (pt_day, key_id, model)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gemini_key_limits (
+            key_id      INTEGER NOT NULL,
+            model       TEXT NOT NULL,
+            daily_limit INTEGER NOT NULL,
+            learned_from TEXT,
+            updated_at  TEXT,
+            PRIMARY KEY (key_id, model)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gemini_source_day (
+            pt_day     TEXT NOT NULL,
+            source     TEXT NOT NULL,
+            calls      INTEGER NOT NULL DEFAULT 0,
+            failures   INTEGER NOT NULL DEFAULT 0,
+            paid_calls INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (pt_day, source)
         )
     """)
     conn.commit()
@@ -2203,6 +2432,9 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
     if error_type is None:
         report_success(key_id)
         _log_usage_conn(key_id, source, True, seconds)
+        _record_attempt_stats(key_id, model, source, True)
+        if _sticky_on():
+            _note_cached_tokens(data)
         if _health_grid_on():
             _learn_cell_conn(key_id, model, capability, "ok")
             if model and _model_is_dead(model):
@@ -2213,6 +2445,11 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
         key_id, error_type, quota_kind=quota_kind,
         retry_delay_s=retry_delay_s, attention_reason=attention_reason)
     _log_usage_conn(key_id, source, False, seconds, error_type)
+    _record_attempt_stats(key_id, model, source, False)
+    if quota_kind == "rpd":
+        # The day's burn for this (key, model) at the moment of an
+        # RPD exhaustion is an observed daily limit (Stage 3a).
+        _learn_limit_from_rpd(key_id, model)
     if _health_grid_on():
         # Mirror the outcome into this request's health-grid cell.
         if error_type == "quota":
@@ -2280,6 +2517,10 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
             ok, data, _seconds, error_type = _attempt(
                 key_id, key_value, url, payload, timeout, source)
             if ok:
+                state["served_key_id"] = key_id
+                _so = state.get("status_out")
+                if _so is not None:
+                    _so["served_key_id"] = key_id
                 return data
             if error_type == "quota":
                 state["quota_failures"] = state.get("quota_failures", 0) + 1
@@ -2356,9 +2597,14 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                 launch()
                 continue
             for fut in done:
-                pending.pop(fut, None)
+                winner = pending.pop(fut, None)
                 ok, data, _seconds, error_type = fut.result()
                 if ok:
+                    if winner is not None:
+                        state["served_key_id"] = winner
+                        _so = state.get("status_out")
+                        if _so is not None:
+                            _so["served_key_id"] = winner
                     return data
                 if error_type == "quota":
                     state["quota_failures"] = \
@@ -2433,7 +2679,8 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
                     max_attempts: int | None = None,
                     fail_fast: bool = False,
                     lease_id: str | None = None,
-                    status_out: dict | None = None) -> dict | None:
+                    status_out: dict | None = None,
+                    session_id: str | None = None) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Fail-fast phases (no sleeping anywhere on the request path):
@@ -2529,6 +2776,12 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
     state["lease_id"] = lease_id
     state["lease_strict"] = strict_lease
     state["status_out"] = status_out
+    # Stage 3 sticky sessions: the session's pinned key (if any and
+    # still live) is tried first in every phase; the pin re-forms on
+    # whichever key serves (handled by the post_json wrapper).
+    pin_id = _session_key_id(session_id) \
+        if (session_id and _sticky_on()) else None
+    state["pin_id"] = pin_id
 
     if free_only:
         # Free-only mode (partner traffic, e.g. Roof Rover's Winston API):
@@ -2559,7 +2812,8 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
             return cands
         return [c for c in cands if c[0] not in lane_ids]
 
-    fast = _only_general(_only_free(_fast_candidates()))
+    fast = _pin_first(
+        _only_general(_only_free(_fast_candidates())), pin_id)
     if fast:
         url = _route_url(url)
         fast = _filter_cells(fast, _model_from_url(url),
@@ -2575,7 +2829,8 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
             return data
         if state.get("fatal"):
             return None
-    sweep = _only_general(_only_free(get_candidate_keys()))
+    sweep = _pin_first(
+        _only_general(_only_free(get_candidate_keys())), pin_id)
     if not sweep:
         # Nothing believed healthy (phase 1 empty or all its attempts
         # just failed into a pause/backoff) and nothing eligible for
@@ -2635,8 +2890,9 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
             state["max_n"] = max(state["max_n"], state["n"] + min(
                 len(fallback), _RESERVE_FALLBACK_MAX_EXTRA))
         url = _route_url(url)
-        fallback = _filter_cells(fallback, _model_from_url(url),
-                                  _request_capability(url, payload))
+        fallback = _pin_first(
+            _filter_cells(fallback, _model_from_url(url),
+                          _request_capability(url, payload)), pin_id)
         data = _try_candidates(fallback, url, payload,
                                caller_timeout, source, tried, state)
         if data is not None:
@@ -2651,7 +2907,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
               max_attempts: int | None = None,
               fail_fast: bool = False,
               lease_id: str | None = None,
-              status_out: dict | None = None) -> dict | None:
+              status_out: dict | None = None,
+              session_id: str | None = None) -> dict | None:
     """POST JSON through the shared key pool (see _post_json_core for
     the rotation/failover semantics).
 
@@ -2666,15 +2923,35 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     - Single-flight (GEMINI_SINGLEFLIGHT): concurrent identical
       unleased calls coalesce onto one execution; waiters share a
       deep copy of the leader's success, or run the call themselves
-      when the leader failed or overran."""
+      when the leader failed or overran.
+
+    Stage 3 addition:
+    - session_id (GEMINI_STICKY_SESSIONS): the session's pinned key
+      is tried first; after the call the pin re-forms on the key
+      that actually served, and a fully failed call drops the pin
+      (clean fallback next call)."""
     global _flight_hits, _flight_leader_runs
+    sticky = bool(session_id) and _sticky_on()
+    # The wrapper always passes a dict down so the serving key can
+    # ride back for session pinning even when the caller passed none.
+    so = status_out if status_out is not None else {}
+
+    def _bookkeep(result):
+        if sticky:
+            served = so.get("served_key_id")
+            if result is not None and served:
+                _pin_session(session_id, served)
+            elif result is None:
+                _unpin_session(session_id)
+        return result
+
     if not _singleflight_on() or lease_id is not None:
-        return _post_json_core(
+        return _bookkeep(_post_json_core(
             url, payload, timeout=timeout, source=source,
             free_only=free_only, max_attempts=max_attempts,
             fail_fast=fail_fast, lease_id=lease_id,
-            status_out=status_out)
-    fkey = _flight_key(source, url, payload)
+            status_out=so, session_id=session_id if sticky else None))
+    fkey = _flight_key(source + "\n" + (session_id or ""), url, payload)
     with _flight_lock:
         entry = _flights.get(fkey)
         if entry is None:
@@ -2692,7 +2969,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                 url, payload, timeout=timeout, source=source,
                 free_only=free_only, max_attempts=max_attempts,
                 fail_fast=fail_fast, lease_id=None,
-                status_out=status_out)
+                status_out=so,
+                session_id=session_id if sticky else None)
         except Exception:
             result = None
             entry["result"] = None
@@ -2706,7 +2984,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         with _flight_lock:
             _flights.pop(fkey, None)
         entry["event"].set()
-        return result
+        return _bookkeep(result)
     # Waiter: share the leader's success; never share its failure —
     # a failed leader just means this caller runs the call itself.
     wait_s = _attempt_budget_s() + float(timeout or 30) + 5.0
@@ -2714,11 +2992,14 @@ def post_json(url: str, payload: dict, timeout: int = 30,
             and entry.get("result") is not None:
         with _flight_lock:
             _flight_hits += 1
+        # The shared result carries no served-key of our own; the
+        # leader's bookkeeping already maintained the (shared) pin.
         return json.loads(json.dumps(entry["result"]))
-    return _post_json_core(
+    return _bookkeep(_post_json_core(
         url, payload, timeout=timeout, source=source,
         free_only=free_only, max_attempts=max_attempts,
-        fail_fast=fail_fast, lease_id=None, status_out=status_out)
+        fail_fast=fail_fast, lease_id=None, status_out=so,
+        session_id=session_id if sticky else None))
 
 
 # ---------------------------------------------------------------------------
@@ -2769,6 +3050,7 @@ def _probe_cycle() -> int:
     interval = _probe_interval_s()
     chain = model_chain()
     primary = chain[0]
+    slim = _prober_slim_on()
     with _lock:
         conn = db.connect()
         try:
@@ -2795,14 +3077,31 @@ def _probe_cycle() -> int:
                 continue  # deep in backoff; check again near expiry
             belief = _belief.get(key_id)
             if until:
+                if slim and _probe_validated_until.get(key_id) == until:
+                    # Stage 3b: this exact cooldown exit already
+                    # earned its ONE validation probe.
+                    continue
                 due.append((0, r))  # backoff expired / expiring: confirm
             elif belief and belief.get("ok"):
+                if slim:
+                    # Stage 3b: real traffic is the health evidence
+                    # now; idle healthy keys are not re-confirmed.
+                    continue
                 if now_wall - belief.get("at", 0.0) >= _PROBE_CONFIRM_S:
                     due.append((2, r))  # idle healthy key: re-confirm
             else:
+                if slim and key_id in _last_probe_mono:
+                    # Stage 3b: an unknown-state key earns one probe,
+                    # not an endless cycle.
+                    continue
                 due.append((1, r))  # unknown state: find out off-path
         due.sort(key=lambda d: d[0])
         due = [r for _prio, r in due[:_PROBE_MAX_PER_CYCLE]]
+        if slim:
+            for r in due:
+                until = _parse_ts(r["quota_exhausted_until"])
+                if until:
+                    _probe_validated_until[r["id"]] = until
         # One probe task per due key against the primary model, plus —
         # only on cycles with nothing due — one readiness probe per
         # due non-primary chain model.
@@ -2814,6 +3113,12 @@ def _probe_cycle() -> int:
                     break
                 if now_mono - _model_probe_at.get(model, 0.0) \
                         < _PROBE_MODEL_INTERVAL_S:
+                    continue
+                if slim and not (
+                        _model_dead_until.get(model, 0.0) > now_wall
+                        or _model_hot_until.get(model, 0.0) > now_wall):
+                    # Stage 3b: fallback models are probed only while
+                    # they are actually in trouble (hot or dead).
                     continue
                 probe_row = _pick_model_probe_row_locked(rows)
                 if probe_row is None:
@@ -2886,6 +3191,163 @@ def _log_usage_conn(key_id: int | None, source: str, success: bool,
                        error_class)
         finally:
             conn.close()
+    except Exception:
+        pass
+
+
+# --- Stage 3 recording: burn counters + spend ledger -------------------------
+
+def _record_attempt_stats(key_id: int, model: str | None, source: str,
+                          ok: bool) -> None:
+    """One short transaction per attempt feeding the Stage-3 day
+    tables: gemini_key_model_day (burn) and gemini_source_day (spend
+    ledger). Best-effort like usage logging — accounting must never
+    break a call."""
+    if not (_burn_on() or _ledger_on()):
+        return
+    try:
+        day = _pt_day_str()
+        model = model or "(unknown)"
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            is_paid = 0
+            row = conn.execute(
+                "SELECT is_paid FROM gemini_keys WHERE id = ?",
+                (key_id,),
+            ).fetchone()
+            if row:
+                is_paid = 1 if row["is_paid"] else 0
+            if _burn_on():
+                conn.execute(
+                    """INSERT INTO gemini_key_model_day
+                           (pt_day, key_id, model, calls, ok, fail)
+                       VALUES (?, ?, ?, 1, ?, ?)
+                       ON CONFLICT(pt_day, key_id, model) DO UPDATE SET
+                           calls = calls + 1,
+                           ok = ok + excluded.ok,
+                           fail = fail + excluded.fail""",
+                    (day, key_id, model, 1 if ok else 0,
+                     0 if ok else 1),
+                )
+            if _ledger_on():
+                conn.execute(
+                    """INSERT INTO gemini_source_day
+                           (pt_day, source, calls, failures, paid_calls)
+                       VALUES (?, ?, 1, ?, ?)
+                       ON CONFLICT(pt_day, source) DO UPDATE SET
+                           calls = calls + 1,
+                           failures = failures + excluded.failures,
+                           paid_calls = paid_calls + excluded.paid_calls""",
+                    (day, source or "unknown", 0 if ok else 1, is_paid),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _learn_limit_from_rpd(key_id: int, model: str | None) -> None:
+    """An RPD park just landed for (key, model): today's burn count
+    for that pair is an OBSERVED daily-limit data point — store it
+    (keeping the smallest observation, the tightest truthful bound).
+    Only ever called with a real exhaustion event; published quota
+    numbers are never written here."""
+    if not _burn_on() or not model:
+        return
+    try:
+        day = _pt_day_str()
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            row = conn.execute(
+                """SELECT calls FROM gemini_key_model_day
+                   WHERE pt_day = ? AND key_id = ? AND model = ?""",
+                (day, key_id, model),
+            ).fetchone()
+            if not row or not row["calls"]:
+                return
+            observed = int(row["calls"])
+            conn.execute(
+                """INSERT INTO gemini_key_limits
+                       (key_id, model, daily_limit, learned_from,
+                        updated_at)
+                   VALUES (?, ?, ?, 'observed_rpd', datetime('now'))
+                   ON CONFLICT(key_id, model) DO UPDATE SET
+                       daily_limit = MIN(daily_limit,
+                                         excluded.daily_limit),
+                       learned_from = 'observed_rpd',
+                       updated_at = datetime('now')""",
+                (key_id, model, observed),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+# --- Stage 3 sticky sessions ---------------------------------------------------
+
+def _session_key_id(session_id: str | None) -> int | None:
+    if not session_id:
+        return None
+    now = time.monotonic()
+    with _lock:
+        entry = _sessions.get(session_id)
+        if entry is None:
+            return None
+        if entry["expires"] <= now:
+            _sessions.pop(session_id, None)
+            return None
+        return entry["key_id"]
+
+
+def _pin_session(session_id: str, key_id: int) -> None:
+    with _lock:
+        _sessions[session_id] = {
+            "key_id": key_id,
+            "expires": time.monotonic() + _SESSION_TTL_S,
+        }
+        # Opportunistic sweep so the map cannot grow unbounded.
+        if len(_sessions) > 512:
+            now = time.monotonic()
+            for sid in [s for s, e in _sessions.items()
+                        if e["expires"] <= now]:
+                _sessions.pop(sid, None)
+
+
+def _unpin_session(session_id: str) -> None:
+    with _lock:
+        _sessions.pop(session_id, None)
+
+
+def _pin_first(rows: list, key_id: int | None) -> list:
+    """Move the pinned key's row to the front of a candidate list
+    (in place, order otherwise preserved). Candidates are (id,
+    value) tuples or sqlite rows — both index [0] to the id."""
+    if not key_id or not rows:
+        return rows
+    for i, r in enumerate(rows):
+        if r[0] == key_id:
+            if i:
+                rows.insert(0, rows.pop(i))
+            break
+    return rows
+
+
+def _note_cached_tokens(data) -> None:
+    """Count cached-content tokens ONLY when the API actually
+    reports them (usageMetadata.cachedContentTokenCount). Observed
+    accounting — nothing is estimated or invented."""
+    global _cached_tokens_total
+    try:
+        meta = (data or {}).get("usageMetadata") or {}
+        n = meta.get("cachedContentTokenCount")
+        if isinstance(n, int) and n > 0:
+            with _lock:
+                _cached_tokens_total += n
     except Exception:
         pass
 

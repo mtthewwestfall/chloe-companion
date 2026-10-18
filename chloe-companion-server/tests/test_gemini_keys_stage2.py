@@ -59,6 +59,9 @@ class Stage2Base(unittest.TestCase):
         gemini_keys._model_belief.clear()
         gemini_keys._model_dead_until.clear()
         gemini_keys._storm_events.clear()
+        gemini_keys._probe_validated_until.clear()
+        gemini_keys._sessions.clear()
+        gemini_keys._cached_tokens_total = 0
         gemini_keys._storm_open_until = 0.0
         with gemini_keys._flight_lock:
             gemini_keys._flights.clear()

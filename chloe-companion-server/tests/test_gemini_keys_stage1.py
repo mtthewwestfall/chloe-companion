@@ -69,6 +69,9 @@ class Stage1Base(unittest.TestCase):
         gemini_keys._model_probe_at.clear()
         gemini_keys._model_belief.clear()
         gemini_keys._model_dead_until.clear()
+        gemini_keys._probe_validated_until.clear()
+        gemini_keys._sessions.clear()
+        gemini_keys._cached_tokens_total = 0
         self._env = {}
         for name in ("GEMINI_MAX_ATTEMPTS", "GEMINI_FAST_TIMEOUT_S",
                      "GEMINI_ATTEMPT_BUDGET_S", "GEMINI_HEDGE_AFTER_S",
