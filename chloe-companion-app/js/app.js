@@ -299,6 +299,7 @@
     $('chatName').textContent = girl.name;
     paintCharacterStatus();
     paintStreak();
+    paintAnniversary();
     clearPendingAttachments();
     // Owner media attachments work in every character thread.
     $('attachBtn').classList.remove('hidden'); updateBalance();
@@ -1341,6 +1342,28 @@ let presetSheetGirl = null;
   setTimeout(() => { if (messagesRemaining > 0) showPaywall(false); }, 1200);
 }
 let myStreaks = {};
+  let myAnniversaries = {};
+  function paintAnniversary() {
+    const days = myAnniversaries[currentGirl.id] || 0;
+    if (!days) return;
+    const dayKey = 'annivShown_' + currentGirl.id + '_' + days + '_' + new Date().toISOString().slice(0, 10);
+    try { if (localStorage.getItem(dayKey)) return; localStorage.setItem(dayKey, '1'); } catch (e) {}
+    setTimeout(() => {
+      addText('her', 'happy ' + days + ' days to us \uD83D\uDC9C I still remember our first conversation. celebrate with me tonight?', {}, currentGirl.name);
+      const card = document.createElement('div');
+      card.className = 'ref-ask-card';
+      const btn = document.createElement('button');
+      btn.className = 'btn-primary ref-ask-btn';
+      btn.textContent = '\uD83C\uDFAD Celebrate — start a scene';
+      btn.addEventListener('click', () => {
+        msgInput.value = 'role play — take me somewhere special for our ' + days + '-day anniversary \uD83D\uDC9C';
+        msgInput.focus();
+      });
+      card.appendChild(btn);
+      chatLog.appendChild(card);
+      scrollBottom();
+    }, 700);
+  }
   function paintStreak() {
     const chip = $('streakChip');
     if (!chip) return;
@@ -1400,6 +1423,7 @@ async function updateBalance() {
     try {
       const me = await ApiClient.me();
       if (me.streaks) { myStreaks = me.streaks; paintStreak(); }
+      if (me.anniversaries) { myAnniversaries = me.anniversaries; paintAnniversary(); }
       setMessagesRemaining(me.messages_remaining);
       if (typeof me.voice_notes_remaining === 'number') $('statVoice').textContent = me.voice_notes_remaining;
     } catch (e) {}

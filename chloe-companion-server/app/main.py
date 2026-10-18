@@ -3782,6 +3782,18 @@ def auth_me(request: Request):
                 (_mnow - _mtd(days=1)).strftime("%Y-%m-%d"))
         except Exception:
             summary["streaks"] = {}
+        try:
+            from datetime import datetime as _adt, timedelta as _atd
+            from zoneinfo import ZoneInfo as _AZI
+            try:
+                _atz = _AZI(user.get("timezone") or "America/New_York")
+            except Exception:
+                _atz = _AZI("America/New_York")
+            _atoday = _adt.now(_atz).strftime("%Y-%m-%d")
+            summary["anniversaries"] = store.anniversaries_for_user(
+                conn, user_id, _atoday)
+        except Exception:
+            summary["anniversaries"] = {}
         return summary
     finally:
         conn.close()

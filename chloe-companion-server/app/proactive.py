@@ -350,6 +350,19 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
         cid = character.get("id") or "chloe"
         seed = "good morning" if mtype == "morning" else "it's been a while"
         ctx = brain.build_brain_context(conn, user_id, user, seed, character)
+        anniv_clause = ""
+        try:
+            _alocal = _user_local_now(user.get("timezone"))
+            _adays = store.anniversary_today(
+                conn, user_id, character_id, _alocal.strftime("%Y-%m-%d"))
+            if _adays:
+                anniv_clause = (
+                    f" Today marks {_adays} days since you two met — "
+                    "make this message feel special: acknowledge the "
+                    "milestone warmly and suggest doing something "
+                    "together to celebrate.")
+        except Exception:
+            anniv_clause = ""
         streak_clause = ""
         if mtype == "morning":
             try:
@@ -376,13 +389,13 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
                     "hook about it and invite him into your day, like you "
                     "want him there with you. 2-3 short sentences. "
                     "Do not mention being an AI."
-                ) + streak_clause
+                ) + streak_clause + anniv_clause
             else:
                 prompt = (
                     "Write a brief, warm morning greeting to him, in your voice, "
                     "as if you're texting him first thing. 1-2 short sentences. "
                     "Do not mention being an AI."
-                ) + streak_clause
+                ) + streak_clause + anniv_clause
         else:
             prompt = (
                 "Write a brief, warm check-in to him — it's been a while since "
