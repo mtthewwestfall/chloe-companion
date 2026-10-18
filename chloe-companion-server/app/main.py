@@ -253,6 +253,7 @@ class CreditOverageIn(BaseModel):
 class GrantMessagesIn(BaseModel):
     user_id: str
     count: int = 100
+    source: str = ""
 
 
 class VoiceSayIn(BaseModel):
@@ -3667,7 +3668,7 @@ def admin_grant_messages(body: GrantMessagesIn, request: Request):
         row = conn.execute(
             "SELECT messages_remaining FROM users WHERE user_id = ?",
             (uid,)).fetchone()
-        if row:
+        if row and body.source != "event":
             try:
                 store.record_drawing_entry(conn, uid, "grant")
             except Exception:
