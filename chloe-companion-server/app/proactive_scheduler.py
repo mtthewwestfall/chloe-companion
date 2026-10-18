@@ -48,6 +48,11 @@ def _tick() -> None:
             elif proactive.should_send_nudge(conn, user_id, character_id):
                 proactive.deliver_proactive_message(conn, user_id,
                                                   character_id, "nudge")
+            elif proactive.should_send_ambient(conn, user_id,
+                                               character_id):
+                proactive.deliver_proactive_message(conn, user_id,
+                                                    character_id,
+                                                    "ambient")
         except Exception:
             print(f"[proactive-scheduler] pair failed "
                   f"{user_id}/{character_id}:", flush=True)

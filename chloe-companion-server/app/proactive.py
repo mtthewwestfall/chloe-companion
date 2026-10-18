@@ -52,7 +52,7 @@ from zoneinfo import ZoneInfo
 
 from . import brain, characters, config, db, store
 
-MESSAGE_TYPES = ("morning", "nudge")
+MESSAGE_TYPES = ("morning", "nudge", "ambient")
 
 # Per-user daily cap (mirrors scheduler.MAX_PROACTIVE_PER_DAY).
 MAX_PROACTIVE_PER_DAY = 2
@@ -99,6 +99,17 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (user_id, character_id)
         )"""
     )
+    # Ambient presence (Phase C, 2026-10-18): additive column for
+    # installs whose proactive_state predates it.
+    try:
+        _pcols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(proactive_state)").fetchall()]
+        if "last_ambient_date" not in _pcols:
+            conn.execute(
+                "ALTER TABLE proactive_state ADD COLUMN "
+                "last_ambient_date TEXT NOT NULL DEFAULT ''")
+    except Exception:
+        pass
     conn.execute(
         """CREATE TABLE IF NOT EXISTS push_subscriptions (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,7 +244,8 @@ def _proactive_state(conn: sqlite3.Connection, user_id: str,
     if row:
         return dict(row)
     return {"user_id": user_id, "character_id": character_id,
-            "last_morning_date": "", "last_nudge_at": ""}
+            "last_morning_date": "", "last_nudge_at": "",
+            "last_ambient_date": ""}
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -308,6 +320,40 @@ def should_send_nudge(conn: sqlite3.Connection, user_id: str,
     local = _user_local_now(user.get("timezone"), now)
     if state["last_morning_date"] == local.strftime("%Y-%m-%d"):
         return False
+    return True
+
+
+def should_send_ambient(conn: sqlite3.Connection, user_id: str,
+                        character_id: str,
+                        now: datetime | None = None) -> bool:
+    """Ambient presence (Phase C, 2026-10-18): due once a day when a
+    short in-the-moment text from her current Living World activity
+    would land — late morning to evening in the user's timezone, a
+    turn in the last 48h but none in the last hour (same activity
+    gates as the morning message), and never within 3h of a nudge.
+    The 2/day cap in deliver_proactive_message is the hard ceiling,
+    so a morning + ambient day never becomes a three-message day."""
+    _ensure_tables(conn)
+    user = _get_user(conn, user_id)
+    if not user_can_receive(conn, user_id, user):
+        return False
+    local = _user_local_now(user.get("timezone"), now)
+    if not (11 <= local.hour < 21):
+        return False
+    state = _proactive_state(conn, user_id, character_id)
+    if state.get("last_ambient_date") == local.strftime("%Y-%m-%d"):
+        return False
+    tick = now or datetime.now()
+    last_nudge = _parse_ts(state.get("last_nudge_at"))
+    if last_nudge and (tick - last_nudge) < timedelta(hours=3):
+        return False
+    last_turn = _last_user_turn_at(conn, user_id, character_id)
+    if last_turn is None:
+        return False
+    if (tick - last_turn) < timedelta(hours=1):
+        return False  # already chatting with her
+    if (tick - last_turn) > timedelta(hours=48):
+        return False  # lapsed — the nudge path owns re-engagement
     return True
 
 
@@ -396,6 +442,24 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
                     "as if you're texting him first thing. 1-2 short sentences. "
                     "Do not mention being an AI."
                 ) + streak_clause + anniv_clause
+        elif mtype == "ambient":
+            try:
+                from . import world as _world
+                _ws = _world.status_for(conn, character_id)
+                _act = _ws.get("activity") or "going about her day"
+                _place = _ws.get("place") or "out"
+                _mood = _ws.get("mood") or "thinking of him"
+            except Exception:
+                _act, _place, _mood = ("going about her day", "out",
+                                       "thinking of him")
+            prompt = (
+                "Write a brief, in-the-moment text to him, in your "
+                f"voice — right now you are {_act} at {_place}, "
+                f"feeling {_mood}. Text him like it just crossed your "
+                "mind: 1-2 short sentences about what you're doing "
+                "or feeling right now, with a little warmth or tease. "
+                "Do not mention being an AI."
+            ) + anniv_clause
         else:
             prompt = (
                 "Write a brief, warm check-in to him — it's been a while since "
@@ -540,6 +604,11 @@ def _record_sent(conn: sqlite3.Connection, user_id: str, character_id: str,
     if message_type == "morning":
         conn.execute(
             "UPDATE proactive_state SET last_morning_date = ? "
+            "WHERE user_id = ? AND character_id = ?",
+            (today_str, user_id, character_id))
+    elif message_type == "ambient":
+        conn.execute(
+            "UPDATE proactive_state SET last_ambient_date = ? "
             "WHERE user_id = ? AND character_id = ?",
             (today_str, user_id, character_id))
     else:
