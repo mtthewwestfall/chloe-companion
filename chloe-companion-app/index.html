@@ -58,6 +58,12 @@
           <p class="herday-sub">Type 'role play' in any chat and she'll switch into character. You set the scene, she brings it to life. Type 'end roleplay' to go back to normal. Available for all characters, 18+ only.</p>
         </div>
 
+        <!-- Duo chat -->
+        <div class="creator-cta">
+          <button id="duoBtn" class="btn-primary full">👯 Girls Together — Duo Chat</button>
+          <p class="creator-cta-sub">Pick two girls. One thread. They talk to you — and each other.</p>
+        </div>
+
         <!-- Create a companion -->
         <div class="creator-cta">
           <button id="createCompanionBtn" class="btn-primary full">✨ Create Your Own Companion</button>
@@ -204,6 +210,36 @@
         </footer>
       </div>
 
+      <!-- Duo chat view -->
+      <div id="duoView" class="chat-view hidden">
+        <header class="imsg-chat-header">
+          <button id="duoBackBtn" class="back-btn" aria-label="Back">Back</button>
+          <div class="chat-header-titles">
+            <div id="duoName" class="chat-name">Duo</div>
+            <div class="chat-sub">Whispr AiMessage</div>
+            <div class="msg-counter"><span id="duoCounterNum">–</span> messages left</div>
+          </div>
+        </header>
+        <main id="duoLog" class="chat-log" aria-live="polite"></main>
+        <footer class="composer">
+          <input id="duoInput" type="text" placeholder="Message them both…" autocomplete="off" enterkeyhint="send" maxlength="500">
+          <button id="duoSendBtn" class="icon-btn send" aria-label="Send">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </footer>
+      </div>
+
+    </div>
+
+    <!-- Duo picker sheet -->
+    <div id="duoSheet" class="sheet hidden">
+      <div class="sheet-card">
+        <div class="sheet-grab"></div>
+        <div class="sheet-head"><h2>Girls Together 👯</h2><button class="sheet-close" data-close="duoSheet">✕</button></div>
+        <p class="sheet-sub">Pick two — they'll share one thread with you, and yes, they talk to each other too.</p>
+        <div id="duoPickList" class="mem-list"></div>
+        <button id="duoStartBtn" class="btn-primary full" disabled>Pick 2 girls</button>
+      </div>
     </div>
 
     <div id="paywallModal" class="paywall-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="paywallTitle"><div class="paywall-card"><div class="paywall-emoji">💬</div><h2 id="paywallTitle">You're out of messages!</h2><p class="paywall-sub" id="paywallSub">She's waiting — top up to keep the conversation going.</p><div class="paywall-plans"><div class="paywall-plan"><div class="paywall-plan-name">Top up · one-time</div><div class="paywall-plan-price">$0.99 <span>· 100 messages</span></div><button class="btn-primary paywall-cta" data-plan="trial">Get 100 messages</button></div><div class="paywall-plan highlight"><div class="paywall-badge">Best value</div><div class="paywall-plan-name">Monthly</div><div class="paywall-plan-price">$9.99<span>/mo</span> <span>· 3,000 messages</span></div><button class="btn-primary paywall-cta" data-plan="basic">Go monthly</button></div></div><p class="paywall-note">Top up once — no subscription needed. Monthly renews until cancelled.</p><button id="paywallClose" class="btn-ghost hidden">Not now</button></div></div><div id="showsSheet" class="sheet hidden">

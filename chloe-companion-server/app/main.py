@@ -261,6 +261,12 @@ class VoiceSayIn(BaseModel):
     text: str = ""
 
 
+class DuoChatIn(BaseModel):
+    character_a: str = ""
+    character_b: str = ""
+    message: str = ""
+
+
 class GiftGiveIn(BaseModel):
     character_id: str = "chloe"
     gift_key: str = ""
@@ -2393,6 +2399,75 @@ def drawing_public():
     conn = _conn()
     try:
         return store.drawing_status(conn)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/chat/duo")
+def chat_duo(body: DuoChatIn, request: Request):
+    """Duo mode (2026-10-17): two companions, one thread. One message
+    charge per send; the pair's transcript lives under a duo: key."""
+    from . import duo as duo_mod
+    user_id = _current_user_id(request)
+    a = (body.character_a or "").strip().lower()
+    b = (body.character_b or "").strip().lower()
+    text = (body.message or "").strip()
+    if not a or not b or a == b:
+        raise HTTPException(status_code=400,
+                            detail="pick two different companions")
+    if not text:
+        raise HTTPException(status_code=400, detail="message required")
+    ga = duo_mod.girl_info(a)
+    gb = duo_mod.girl_info(b)
+    if not ga or not gb:
+        raise HTTPException(status_code=404, detail="unknown companion")
+    conn = _conn()
+    try:
+        user = store.get_or_create_user(conn, user_id)
+        is_owner = user_id in assist._owner_ids()
+        if not is_owner:
+            cur = conn.execute(
+                "UPDATE users SET messages_remaining = "
+                "messages_remaining - 1, updated_at = datetime('now') "
+                "WHERE user_id = ? AND messages_remaining > 0",
+                (user_id,))
+            conn.commit()
+            if not cur.rowcount:
+                raise HTTPException(status_code=402,
+                                    detail="out of messages")
+        key = duo_mod.duo_key(a, b)
+        store.log_turn(conn, user_id, "user", text, character_id=key)
+        msgs = duo_mod.generate_duo_reply(
+            conn, user_id, ga, gb, text, user.get("name") or "")
+        for mm in msgs:
+            store.log_turn(conn, user_id, "assistant",
+                           f"[{mm['name']}] {mm['text']}",
+                           character_id=key)
+        row = conn.execute(
+            "SELECT messages_remaining FROM users WHERE user_id = ?",
+            (user_id,)).fetchone()
+        return {"messages": msgs,
+                "messages_remaining":
+                    row["messages_remaining"] if row else None}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/chat/duo/history")
+def chat_duo_history(request: Request, character_a: str = "",
+                     character_b: str = "", limit: int = 30):
+    from . import duo as duo_mod
+    user_id = _current_user_id(request)
+    key = duo_mod.duo_key((character_a or "").strip().lower(),
+                          (character_b or "").strip().lower())
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT role, text FROM conversation WHERE user_id = ? "
+            "AND character_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, key, max(1, min(int(limit or 30), 60)))).fetchall()
+        return {"turns": [{"role": r["role"], "text": r["text"]}
+                          for r in reversed(rows)]}
     finally:
         conn.close()
 
