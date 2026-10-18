@@ -5327,6 +5327,35 @@ def proxy_pool_lease(body: dict, request: Request):
     return lease
 
 
+@app.get("/v1/pool/status")
+def proxy_pool_status(request: Request):
+    """Slim pool status for bulk callers (scan-economics, 2026-10-18):
+    the slice of the admin health payload a caller needs to size a
+    lease and to route between chain models — chain order, per-model
+    health, believed-healthy free keys, degraded/storm state, and the
+    Stage-3 burn forecast. Proxy-token auth, same as the lease route.
+    Read-only; costs zero Gemini calls."""
+    _require_proxy_token(request)
+    info = gemini_keys.degradation_info()
+    paid_ids = gemini_keys.paid_key_ids()
+    believed = info.get("believed_healthy_key_ids") or []
+    return {
+        "chain": gemini_keys.model_chain(),
+        "degraded": bool(info.get("degraded")),
+        "reserve_tapped": bool(info.get("reserve_tapped")),
+        "pool": info.get("pool") or {},
+        "believed_healthy_key_ids": believed,
+        "paid_key_ids": paid_ids,
+        "free_healthy": len([i for i in believed
+                             if i not in paid_ids]),
+        "models": info.get("models") or [],
+        "dead_models": info.get("dead_models") or [],
+        "storm": info.get("storm") or {},
+        "burn": {"forecast":
+                 (info.get("burn") or {}).get("forecast") or {}},
+    }
+
+
 
 def _default_safety_settings():
     """Default safety settings: sexually explicit unblocked, others at medium+."""

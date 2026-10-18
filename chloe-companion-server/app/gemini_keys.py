@@ -1364,6 +1364,23 @@ def _effective_per_key_rpm() -> int:
     return rpm
 
 
+def paid_key_ids() -> list[int]:
+    """Ids of the paid (fallback-tier) keys, so status consumers can
+    count FREE healthy keys out of the believed-healthy set."""
+    try:
+        with _lock:
+            conn = db.connect()
+            try:
+                _ensure_table(conn)
+                return [r["id"] for r in conn.execute(
+                    "SELECT id FROM gemini_keys WHERE is_paid = 1"
+                ).fetchall()]
+            finally:
+                conn.close()
+    except Exception:
+        return []
+
+
 def degradation_info() -> dict:
     """Machine-readable pool health for adaptive throttling by callers."""
     rpm = _per_key_rpm()
