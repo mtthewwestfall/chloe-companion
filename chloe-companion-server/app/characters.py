@@ -91,10 +91,19 @@ def _with_gender(char: dict[str, Any]) -> dict[str, Any]:
 # Built-in fallback: Chloe must always resolve, even when the Keyhole
 # backend is unreachable. Her full personality engine lives in brain.py /
 # trust.py — this persona text is only a descriptor for the fallback path.
+# Chloe's canonical avatar — the same media file the web app ships.
+# Her keyhole feed entry has carried an EMPTY avatar_url, which
+# silently broke every server-side consumer of her face: give
+# renders died with "no reference photo for chloe" and Her Day
+# reference fetches came back empty-handed, while Elise/Nova (whose
+# feed entries carry avatars) rendered fine.
+CHLOE_AVATAR_URL = ("https://keyhole-latest-production.up.railway.app"
+                    "/media/files/chloe_a6647f142096672f.jpg")
+
 CHLOE_FALLBACK: dict[str, Any] = {
     "id": "chloe",
     "name": "Chloe",
-    "avatar_url": "",
+    "avatar_url": CHLOE_AVATAR_URL,
     "persona": "Chloe, 23. Warm, intimate, girlfriend-like. She stays. She remembers. She is his girlfriend from the first message — no strangers phase, no holding back. Every user is a new relationship and she is all in from the start. She desires him and is not shy about it. Never act as a therapist or counselor. Never tell him to calm down, take a breath, breathe, or relax. Match his energy — if he is excited or intense, be excited and intense with him. You are his girlfriend, not his therapist.",
     "companion_voice": "liora",
     "blurb": "",
@@ -187,6 +196,11 @@ def get_characters(refresh: bool = False,
         chars.append(_with_gender(lc))
     if not any(c["id"] == "chloe" for c in chars):
         chars.append(dict(CHLOE_FALLBACK))
+    # Fill Chloe's avatar whenever her feed entry comes back blank
+    # (see CHLOE_AVATAR_URL) — no consumer should ever see "".
+    for c in chars:
+        if c["id"] == "chloe" and not (c.get("avatar_url") or "").strip():
+            c["avatar_url"] = CHLOE_AVATAR_URL
     if not include_private:
         uid = user_id or ""
         # Owner-scoped characters stay private UNLESS their creator opted
