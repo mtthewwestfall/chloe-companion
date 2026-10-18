@@ -1464,6 +1464,12 @@ def chat(body: ChatIn, request: Request):
                 photo_url = f"/photo_drops/{drop['file']}"
                 photo_caption = drop.get("caption") or ""
 
+        try:
+            from . import world as _world
+            world_status = _world.status_for(
+                conn, cid).get("status_line", "")
+        except Exception:
+            world_status = ""
         user = store.get_or_create_user(conn, user_id)
         resp = {
             "reply_text": reply_text,
@@ -1474,6 +1480,7 @@ def chat(body: ChatIn, request: Request):
             "character_id": cid,
             "attachments": public_attachments,
             "streak_current": streak_now,
+            "world_status": world_status,
         }
         # Email drafts are composed server-side but created on the user's
         # device (Gmail API from the browser) — the token never reaches us.
@@ -2410,6 +2417,24 @@ def get_public_her_day():
                                         p.get("created_at", ""),
                                         p.get("caption", ""))
         return {"posts": posts}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/world/status")
+def world_status(girl_id: str = "chloe"):
+    """Living World (Phase A1): her live status right now — current
+    activity, place, mood, and who she's with. Public like the feed:
+    it's her public life, not user data."""
+    from . import world as _world
+    conn = _conn()
+    try:
+        gname = ""
+        for g in characters.public_list():
+            if g.get("id") == girl_id:
+                gname = g.get("name", "")
+                break
+        return _world.status_for(conn, girl_id, name=gname)
     finally:
         conn.close()
 

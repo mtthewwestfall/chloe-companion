@@ -646,6 +646,13 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                                   f"mention it if it fits.").strip()
                 except Exception:
                     pass
+            try:
+                from . import world as _world
+                _wf = _world.her_day_flavor(conn, gid, date_str, pids)
+                if _wf:
+                    _story = (_story + " " + _wf).strip()
+            except Exception:
+                pass
             caption = _generate_caption(girl_name, moment_key, desc,
                                         pnames, cache_key, story=_story)
             if post_type == "voice":

@@ -1067,6 +1067,9 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     digest = (context.get("rolling_summary") or "").strip()
     if digest:
         parts.append(f"What you carry between visits:\n{digest}")
+    _wl = (context.get("world_line") or "").strip()
+    if _wl:
+        parts.append(_wl)
     mems = [m for m in (context.get("relevant_memories") or []) if m]
     if mems:
         parts.append(
@@ -1929,6 +1932,17 @@ def _advance_scene_state(
     return (None, "", False, False)
 
 
+def _world_line(conn, cid: str, char) -> str:
+    """Living World (Phase A1): her current activity/mood line for
+    the system text. Fail-open: no world, no line."""
+    try:
+        from . import world as _world
+        return _world.context_line(
+            conn, cid, (char or {}).get("name") or "")
+    except Exception:
+        return ""
+
+
 def build_brain_context(
     conn: sqlite3.Connection,
     user_id: str,
@@ -1983,6 +1997,7 @@ def build_brain_context(
             store.recall_memories(conn, user_id, limit=8, character_id=cid)
         ],
         "recent": store.recent_turns(conn, user_id, limit=6, character_id=cid),
+        "world_line": _world_line(conn, cid, char),
         "character": char,
         "character_name": char.get("name") or "Chloe",
         "roleplay_locked": roleplay_locked,
