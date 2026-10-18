@@ -1147,12 +1147,25 @@ let presetSheetGirl = null;
 
   /* ---------- pricing ---------- */
 
+  /* Conversion fix Item C (2026-10-18): funnel moments the server
+     cannot see itself — fire-and-forget, never blocks the UI. */
+  function convEvent(kind, meta) {
+    try {
+      fetch(CONFIG.API_BASE_URL + '/api/v1/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (localStorage.getItem('whispr_token') || '') },
+        body: JSON.stringify(Object.assign({ kind: kind }, meta || {}))
+      }).catch(() => {});
+    } catch (e) {}
+  }
+
   async function loadPricing() {
     try {
       const res = await fetch(CONFIG.API_BASE_URL + '/api/v1/tiers');
       const data = await res.json();
       const wrap = $('pricingCards');
       wrap.innerHTML = '';
+      convEvent('plans_view');
       (data.plans || []).forEach((p) => {
         if (p.key === 'trial') return; // trial shown separately
         const el = document.createElement('div');
@@ -1163,7 +1176,7 @@ let presetSheetGirl = null;
           <div class="plan-price">$${p.price_usd}<span>/mo</span></div>`;
         el.style.cursor = 'pointer';
         el.addEventListener('click', () => {
-          if (p.checkout_url) window.open(p.checkout_url, '_blank');
+          if (p.checkout_url) { convEvent('checkout_started', { plan: p.key }); window.open(p.checkout_url, '_blank'); }
         });
         wrap.appendChild(el);
       });
@@ -1825,7 +1838,7 @@ let presetSheetGirl = null;
     }
   });
 
-  /* ---------- message counter + paywall (2026-10-16) ---------- */let messagesRemaining=null,paywallPlansLoaded=false;function setPaywallCopy(out){$('paywallTitle').textContent=out?"You're out of messages!":'Running low on messages';$('paywallSub').textContent=out?"She's waiting — top up to keep the conversation going.":'Top up now so the conversation never stops.';$('paywallClose').classList.toggle('hidden',out)}function showPaywall(out){setPaywallCopy(out);if(!paywallPlansLoaded)loadPaywallPlans();$('paywallModal').classList.remove('hidden')}function hidePaywall(){$('paywallModal').classList.add('hidden')}function setMessagesRemaining(n){if(typeof n!=='number'||!isFinite(n))return;messagesRemaining=n;const s=$('statMsgs');if(s)s.textContent=n;const c=$('msgCounterNum');if(c)c.textContent=n;const p=$('msgCounter');if(p)p.classList.toggle('low',n<=5);const b=$('lowMsgBanner');if(n<=0){if(b)b.classList.add('hidden');msgInput.disabled=true;$('sendBtn').disabled=true;showPaywall(true)}else{msgInput.disabled=false;$('sendBtn').disabled=false;hidePaywall();if(b){if(n<=5){$('lowMsgText').textContent='Only '+n+' message'+(n===1?'':'s')+' left';b.classList.remove('hidden')}else b.classList.add('hidden')}}}async function loadPaywallPlans(){const plans={trial:null,basic:null};let uid='';try{const mr=await fetch(CONFIG.API_BASE_URL+'/api/v1/auth/me',{headers:{'Authorization':'Bearer '+(localStorage.getItem('whispr_token')||'')}});if(mr.ok){const md=await mr.json();uid=md.user_id||''}}catch(e){}try{const r=await fetch(CONFIG.API_BASE_URL+'/api/v1/tiers');const d=await r.json();(d.plans||[]).forEach(pl=>{if(pl.key==='trial')plans.trial=pl;else if(pl.key==='basic')plans.basic=pl})}catch(e){}paywallPlansLoaded=true;document.querySelectorAll('.paywall-cta').forEach(btn=>{const pl=plans[btn.dataset.plan];let url=(pl&&pl.checkout_url)||(btn.dataset.plan==='basic'?'https://buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c':'https://buy.stripe.com/3cI14ggTpfVtbdJ4bDdjO0f');if(uid)url+=(url.includes('?')?'&':'?')+'client_reference_id='+encodeURIComponent(uid);btn.onclick=()=>window.open(url,'_blank','noopener')})}loadPaywallPlans();$('lowMsgCta').addEventListener('click',()=>showPaywall(false));$('paywallClose').addEventListener('click',hidePaywall);function maybePeakPaywall(res, userText) {
+  /* ---------- message counter + paywall (2026-10-16) ---------- */let messagesRemaining=null,paywallPlansLoaded=false;function setPaywallCopy(out){$('paywallTitle').textContent=out?"You're out of messages!":'Running low on messages';$('paywallSub').textContent=out?"She's waiting — top up to keep the conversation going.":'Top up now so the conversation never stops.';$('paywallClose').classList.toggle('hidden',out)}function showPaywall(out){convEvent('plans_view');setPaywallCopy(out);if(!paywallPlansLoaded)loadPaywallPlans();$('paywallModal').classList.remove('hidden')}function hidePaywall(){$('paywallModal').classList.add('hidden')}function setMessagesRemaining(n){if(typeof n!=='number'||!isFinite(n))return;messagesRemaining=n;const s=$('statMsgs');if(s)s.textContent=n;const c=$('msgCounterNum');if(c)c.textContent=n;const p=$('msgCounter');if(p)p.classList.toggle('low',n<=5);const b=$('lowMsgBanner');if(n<=0){if(b)b.classList.add('hidden');msgInput.disabled=true;$('sendBtn').disabled=true;showPaywall(true)}else{msgInput.disabled=false;$('sendBtn').disabled=false;hidePaywall();if(b){if(n<=5){$('lowMsgText').textContent='Only '+n+' message'+(n===1?'':'s')+' left';b.classList.remove('hidden')}else b.classList.add('hidden')}}}async function loadPaywallPlans(){const plans={trial:null,basic:null};let uid='';try{const mr=await fetch(CONFIG.API_BASE_URL+'/api/v1/auth/me',{headers:{'Authorization':'Bearer '+(localStorage.getItem('whispr_token')||'')}});if(mr.ok){const md=await mr.json();uid=md.user_id||''}}catch(e){}try{const r=await fetch(CONFIG.API_BASE_URL+'/api/v1/tiers');const d=await r.json();(d.plans||[]).forEach(pl=>{if(pl.key==='trial')plans.trial=pl;else if(pl.key==='basic')plans.basic=pl})}catch(e){}paywallPlansLoaded=true;document.querySelectorAll('.paywall-cta').forEach(btn=>{const pl=plans[btn.dataset.plan];let url=(pl&&pl.checkout_url)||(btn.dataset.plan==='basic'?'https://buy.stripe.com/9B67sE9qXeRp3Lh4bDdjO0c':'https://buy.stripe.com/3cI14ggTpfVtbdJ4bDdjO0f');if(uid)url+=(url.includes('?')?'&':'?')+'client_reference_id='+encodeURIComponent(uid);btn.onclick=()=>{convEvent('checkout_started',{plan:btn.dataset.plan});window.open(url,'_blank','noopener')}})}loadPaywallPlans();$('lowMsgCta').addEventListener('click',()=>showPaywall(false));$('paywallClose').addEventListener('click',hidePaywall);function maybePeakPaywall(res, userText) {
   // Value-moment paywall (2026-10-17): the counter alone converts
   // frustration; a peak converts desire. After she sends a voice note
   // or a photo, or a roleplay scene starts, and the bank is getting

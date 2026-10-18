@@ -79,7 +79,7 @@ from . import assist, auth, brain, characters, config, creator, custom_video, db
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import push_routes, sims_saves
 from . import assist, auth, brain, characters, config, creator, custom_video, db, gemini_keys, give_gen, onboarding, her_day, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
-from . import assist, auth, brain, characters, character_trust, config, creator, custom_video, db, gemini_keys, give_gen, her_day, her_day_delete, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
+from . import assist, auth, brain, characters, character_trust, config, creator, custom_video, db, events, gemini_keys, give_gen, her_day, her_day_delete, roleplay_handler, live_give, media_gen, photos, shows, sims, store, submit, trust, voice
 from . import sims_saves
 
 app = FastAPI(title="Chloe Companion API", version="0.4.0-auth")
@@ -1343,6 +1343,11 @@ def chat(body: ChatIn, request: Request):
         if is_owner:
             store.note_message_sent(conn, user_id)
         elif not store.consume_message(conn, user_id):
+            # Conversion fix Item C (2026-10-18): the wall used to be
+            # invisible — record every hit from here on.
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "out_of_messages",
+                                 "character_id": cid})
             return _empty_bank_reply(user, character,
                                      unpaid=not store.has_paid(conn, user_id))
 
@@ -1606,6 +1611,8 @@ def create_media_request(body: MediaRequestIn, request: Request):
             # Regular (custom) requests: 1 per month hard cap (2026-10-08).
             if (not is_owner and
                     store.regular_requests_used_this_month(conn, user_id) >= 1):
+                events.record_event(conn, user_id, "wall_hit",
+                                    {"wall": "monthly_regular_cap"})
                 raise HTTPException(status_code=402,
                                     detail="monthly_regular_cap")
             # Daily cap (anti-farming) still applies to regular requests.
@@ -1652,6 +1659,8 @@ def create_media_request(body: MediaRequestIn, request: Request):
             else:
                 pool = store.consume_request(conn, user_id, kind)
                 if pool is None:
+                    events.record_event(conn, user_id, "wall_hit",
+                                        {"wall": "no_requests_left"})
                     raise HTTPException(status_code=402,
                                         detail="no_requests_left")
 
@@ -2615,6 +2624,9 @@ def chat_duo(body: DuoChatIn, request: Request):
                 (user_id,))
             conn.commit()
             if not cur.rowcount:
+                events.record_event(conn, user_id, "wall_hit",
+                                    {"wall": "out_of_messages",
+                                     "surface": "duo"})
                 raise HTTPException(status_code=402,
                                     detail="out of messages")
         key = duo_mod.duo_key(a, b)
@@ -2673,6 +2685,8 @@ def voice_say(body: VoiceSayIn, request: Request):
         is_owner = user_id in assist._owner_ids()
         has_quota = is_owner or (user.get("voice_notes_remaining") or 0) > 0
         if not has_quota:
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "voice_cap"})
             raise HTTPException(status_code=402,
                                 detail="no voice notes remaining")
         url = voice.maybe_generate_voice_note(
@@ -2719,6 +2733,8 @@ def gifts_give(body: GiftGiveIn, request: Request):
             (g["msg_cost"], user_id, g["msg_cost"]))
         conn.commit()
         if not cur.rowcount:
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "gift_cost"})
             raise HTTPException(status_code=402,
                                 detail="not enough messages")
         out = store.give_gift(conn, user_id, cid, body.gift_key,
@@ -3347,6 +3363,40 @@ async def admin_accounts_list(request: Request):
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Conversion fix Item C (2026-10-18): funnel event intake (client-side
+# moments the server cannot see itself) + the admin daily-counts read.
+# ---------------------------------------------------------------------------
+class ConversionEventIn(BaseModel):
+    kind: str
+    plan: str = ""
+
+
+@app.post("/api/v1/events")
+def conversion_event(body: ConversionEventIn, request: Request):
+    user_id = _current_user_id(request)
+    kind = (body.kind or "").strip()
+    if kind not in events.CLIENT_KINDS:
+        raise HTTPException(status_code=400, detail="unknown event kind")
+    conn = _conn()
+    try:
+        meta = {"plan": body.plan} if body.plan else {}
+        events.record_event(conn, user_id, kind, meta)
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/admin/conversion-events")
+def admin_conversion_events(request: Request, days: int = 14):
+    _require_admin(request)
+    conn = _conn()
+    try:
+        return events.daily_counts(conn, days=max(1, min(days, 90)))
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/admin/grant-month")
 async def admin_grant_month(body: GrantMonthIn, request: Request):
     """Grant a free month at any plan level."""
@@ -3609,6 +3659,8 @@ def assist_search(body: AssistSearchIn, request: Request):
         if not q:
             raise HTTPException(status_code=400, detail="empty_query")
         if not assist.use_search(conn, user_id, caps):
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "lookups_exhausted"})
             raise HTTPException(status_code=402, detail="lookups_exhausted")
         res = assist.web_search(q)
         if not res:
@@ -3633,6 +3685,8 @@ def assist_create_reminder(body: AssistReminderIn, request: Request):
     try:
         caps = assist.caps_for(user.get("tier") or "free")
         if assist.active_reminder_count(conn, user_id) >= caps["reminders"]:
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "reminders_full"})
             raise HTTPException(status_code=402, detail="reminders_full")
         remind_at = (body.remind_at or "").strip()
         text = (body.text or "").strip()
@@ -3744,6 +3798,8 @@ def create_submission(body: SubmissionIn, request: Request):
     try:
         user = store.get_or_create_user(conn, user_id)
         if (user.get("tier") or "free") != "basic":
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "paid_tier_required"})
             raise HTTPException(status_code=402,
                                 detail="paid_tier_required")
         try:
@@ -3766,6 +3822,8 @@ def create_companion(body: CompanionCreateIn, request: Request):
     try:
         user = store.get_or_create_user(conn, user_id)
         if (user.get("tier") or "free") != "basic":
+            events.record_event(conn, user_id, "wall_hit",
+                                {"wall": "paid_tier_required"})
             raise HTTPException(status_code=402,
                                 detail="paid_tier_required")
         try:
@@ -4783,6 +4841,11 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
             store.record_drawing_entry(conn, ref, "stripe_sub")
         except Exception:
             pass
+        # Conversion fix Item C (2026-10-18): completed checkouts are
+        # the funnel's other half — record them so checkout_abandoned
+        # can be computed against checkout_started.
+        events.record_event(conn, ref, "checkout_completed",
+                            {"plan": tier, "via": "stripe"})
         return {"ok": True, "user_id": ref, "tier": tier, "action": "subscribed"}
     if mode == "payment":
         # One-time $0.99 trial -> 100 messages, one per customer (no tier change).
@@ -4791,6 +4854,8 @@ def _on_checkout_completed(conn: Any, obj: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": True, "ignored": "trial link but buyer unresolved"}
             granted = store.grant_trial_messages(conn, ref, config.TRIAL_MESSAGES)
             if granted:
+                events.record_event(conn, ref, "checkout_completed",
+                                    {"plan": "trial", "via": "stripe"})
                 try:
                     store.record_drawing_entry(conn, ref, "stripe_trial")
                 except Exception:
