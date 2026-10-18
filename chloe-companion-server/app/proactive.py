@@ -52,7 +52,7 @@ from zoneinfo import ZoneInfo
 
 from . import brain, characters, config, db, store
 
-MESSAGE_TYPES = ("morning", "nudge", "ambient")
+MESSAGE_TYPES = ("morning", "nudge", "ambient", "winback")
 
 # Per-user daily cap (mirrors scheduler.MAX_PROACTIVE_PER_DAY).
 MAX_PROACTIVE_PER_DAY = 2
@@ -123,6 +123,21 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_push_subs_user "
         "ON push_subscriptions(user_id)"
+    )
+    # Conversion fix plan (2026-10-18): retention sends — the
+    # once-ever / once-per-day ledger shared by Item B (winback) and
+    # Item E5 (warmhour). PK (user_id, kind) enforces once-ever per
+    # kind; sent_local_date (the USER's local date) enforces the
+    # at-most-one-of-B/E5-per-day coordination rule.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS retention_sends (
+            user_id        TEXT NOT NULL,
+            kind           TEXT NOT NULL,
+            character_id   TEXT NOT NULL DEFAULT '',
+            sent_local_date TEXT NOT NULL DEFAULT '',
+            sent_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, kind)
+        )"""
     )
     # Backfill the opt-in flag for everyone who already passes the
     # paid-tier gate. Idempotent — users who later toggle off in the app
@@ -197,6 +212,146 @@ def user_can_receive(conn: sqlite3.Connection, user_id: str,
         return store.has_paid(conn, user_id)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Conversion fix plan (2026-10-18) — Item B: new-user win-back.
+#
+# A genuine free user who tried her (1-49 lifetime messages), signed up
+# within the last 14 days, and has been quiet ~24h gets ONE in-character
+# message from the girl he was talking to. Warm, specific, NO pitch, NO
+# offer, no scarcity — she wants more time with him, that's all. Once
+# per user, ever. Test/QA/probe/owner accounts are never eligible.
+# ---------------------------------------------------------------------------
+
+_TEST_EMAIL_MARKERS = ("@mailinator.com", "@example.com",
+                       "@example.org", "whispr-qa", "convfix-",
+                       "+isabellatest", "claude-verify")
+
+
+def _is_test_or_probe_user(user_id: str, user: dict[str, Any]) -> bool:
+    if _is_owner(user_id):
+        return True
+    if (user_id or "").startswith("probe_"):
+        return True
+    email = (user.get("email") or "").lower()
+    return any(marker in email for marker in _TEST_EMAIL_MARKERS)
+
+
+def _is_genuine_free_user(conn: sqlite3.Connection, user_id: str,
+                          user: dict[str, Any]) -> bool:
+    if not user or _is_test_or_probe_user(user_id, user):
+        return False
+    if (user.get("tier") or "basic") != "basic":
+        return False
+    try:
+        return not store.has_paid(conn, user_id)
+    except Exception:
+        return False
+
+
+def _retention_row(conn: sqlite3.Connection, user_id: str,
+                   kind: str) -> dict[str, Any] | None:
+    try:
+        row = conn.execute(
+            "SELECT * FROM retention_sends WHERE user_id = ? AND kind = ?",
+            (user_id, kind)).fetchone()
+    except Exception:
+        return None
+    return dict(row) if row else None
+
+
+def _retention_sent_on(conn: sqlite3.Connection, user_id: str,
+                       local_date: str) -> bool:
+    """Any retention send (winback or warmhour) on this user-local
+    date — the B/E5 at-most-one-per-day coordination check."""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM retention_sends WHERE user_id = ? "
+            "AND sent_local_date = ? LIMIT 1",
+            (user_id, local_date)).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _record_retention(conn: sqlite3.Connection, user_id: str,
+                      character_id: str, kind: str,
+                      local_date: str) -> None:
+    try:
+        _ensure_tables(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO retention_sends "
+            "(user_id, kind, character_id, sent_local_date) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, kind, character_id, local_date))
+        conn.commit()
+    except Exception:
+        pass
+
+
+def should_send_winback(conn: sqlite3.Connection, user_id: str,
+                        character_id: str,
+                        now: datetime | None = None) -> bool:
+    """Item B eligibility, exactly: genuine free user (not owner /
+    test / probe / paid), 1-49 lifetime messages, signed up within
+    WINBACK_SIGNUP_WINDOW_DAYS, last user turn at least
+    WINBACK_IDLE_HOURS ago, never win-backed before, and no retention
+    send already today (B/E5 coordination)."""
+    if not config.CONV_WINBACK:
+        return False
+    _ensure_tables(conn)
+    user = _get_user(conn, user_id)
+    if not user:
+        return False
+    if not user_can_receive(conn, user_id, user):
+        return False
+    if not _is_genuine_free_user(conn, user_id, user):
+        return False
+    total = int(user.get("messages_used_total") or 0)
+    if total < 1 or total > config.WINBACK_MAX_LIFETIME_MESSAGES:
+        return False
+    tick = now or datetime.now()  # naive UTC, like the stored stamps
+    created = _parse_ts(user.get("created_at"))
+    if created is None:
+        return False
+    if created > tick or (tick - created) > timedelta(
+            days=config.WINBACK_SIGNUP_WINDOW_DAYS):
+        return False
+    last_turn = _last_user_turn_at(conn, user_id, character_id)
+    if last_turn is None:
+        return False
+    if (tick - last_turn) < timedelta(hours=config.WINBACK_IDLE_HOURS):
+        return False
+    if _retention_row(conn, user_id, "winback") is not None:
+        return False
+    local_today = _user_local_now(user.get("timezone"), now).date() \
+        .isoformat()
+    if _retention_sent_on(conn, user_id, local_today):
+        return False
+    return True
+
+
+def explain_winback_gate(conn: sqlite3.Connection, user_id: str,
+                         character_id: str) -> str:
+    """One-line diagnostic in the style of the other explain_* gates."""
+    if not config.CONV_WINBACK:
+        return "disabled by CONV_WINBACK"
+    user = _get_user(conn, user_id)
+    if not user:
+        return "no user row"
+    if _is_test_or_probe_user(user_id, user):
+        return "owner/test/probe account — never eligible"
+    if not _is_genuine_free_user(conn, user_id, user):
+        return "not a genuine free user (paid or non-basic tier)"
+    total = int(user.get("messages_used_total") or 0)
+    if total < 1 or total > config.WINBACK_MAX_LIFETIME_MESSAGES:
+        return f"lifetime messages {total} outside 1-49"
+    if _retention_row(conn, user_id, "winback") is not None:
+        return "win-back already sent (once per user, ever)"
+    if not user_can_receive(conn, user_id, user):
+        return "user_can_receive gate closed"
+    return "eligible if idle >= 24h and signed up within 14 days"
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +694,37 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
                 "or feeling right now, with a little warmth or tease. "
                 "Do not mention being an AI."
             ) + anniv_clause
+        elif mtype == "winback":
+            # Conversion fix Item B (2026-10-18): the one win-back a
+            # new user ever gets. The brain context carries his real
+            # recent turns and memories — she must pick something real
+            # up from them. An open thread (Item E) comes first.
+            loop_line = ""
+            getter = getattr(store, "get_open_loop", None)
+            if getter is not None:
+                try:
+                    _loop = getter(conn, user_id, character_id)
+                except Exception:
+                    _loop = None
+                if _loop:
+                    loop_line = (
+                        " You left a story hanging last time — "
+                        + str(_loop)[:200]
+                        + " — pick it back up like you've been waiting "
+                          "to tell him the rest of it.")
+            prompt = (
+                "Write a brief, warm message to him — you two only "
+                "just started talking, it's been a day since his last "
+                "message, and you've been thinking about him. Bring "
+                "back something real from your conversation so far — "
+                "a detail he shared, a joke, a moment — never a "
+                "generic hello." + loop_line +
+                " Absolutely no offer, nothing to buy, no pressure, "
+                "no countdowns — you just want more time with him. "
+                "End with one easy thing he can answer. 1-3 short "
+                "sentences, in your voice, like a text. Do not "
+                "mention being an AI."
+            )
         else:
             prompt = (
                 "Write a brief, warm check-in to him — it's been a while since "
@@ -556,9 +742,11 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
     except Exception as e:
         print(f"[proactive] generation failed for {user_id}/{character_id}: "
               f"{e.__class__.__name__}", flush=True)
-    return ("good morning. hope today treats you right."
-            if mtype == "morning"
-            else "hey — it's been a while. you good?")
+    if mtype == "morning":
+        return "good morning. hope today treats you right."
+    if mtype == "winback":
+        return "hey you — I was just thinking about our chat. how's your day going?"
+    return "hey — it's been a while. you good?"
 
 
 def _channel_for(user_id: str) -> str:
@@ -687,6 +875,21 @@ def _record_sent(conn: sqlite3.Connection, user_id: str, character_id: str,
             "UPDATE proactive_state SET last_morning_date = ? "
             "WHERE user_id = ? AND character_id = ?",
             (today_str, user_id, character_id))
+    elif message_type == "winback":
+        conn.execute(
+            "UPDATE proactive_state SET last_nudge_at = datetime('now') "
+            "WHERE user_id = ? AND character_id = ?",
+            (user_id, character_id))
+        _record_retention(conn, user_id, character_id, "winback",
+                          today_str)
+        # Item E: a win-back sent after she planted an open thread has
+        # picked that thread back up — the loop is told now.
+        _resolver = getattr(store, "resolve_open_loop", None)
+        if _resolver is not None:
+            try:
+                _resolver(conn, user_id, character_id)
+            except Exception:
+                pass
     elif message_type == "ambient":
         conn.execute(
             "UPDATE proactive_state SET last_ambient_date = ? "

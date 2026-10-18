@@ -45,6 +45,14 @@ def _tick() -> None:
                                                     character_id):
                 proactive.deliver_proactive_message(conn, user_id,
                                                   character_id, "morning")
+            elif proactive.should_send_winback(conn, user_id,
+                                               character_id):
+                # Conversion fix Item B (2026-10-18): for a new user
+                # in the win-back window, her one win-back preempts
+                # the generic nudge — it is the better message
+                # (specific callback, once ever).
+                proactive.deliver_proactive_message(conn, user_id,
+                                                  character_id, "winback")
             elif proactive.should_send_nudge(conn, user_id, character_id):
                 proactive.deliver_proactive_message(conn, user_id,
                                                   character_id, "nudge")
