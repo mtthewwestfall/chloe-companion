@@ -484,6 +484,27 @@ def _startup():
             conn.close()
     except Exception as e:  # noqa: BLE001 — never block boot on it
         print(f"[assist] boot scrub skipped: {e.__class__.__name__}")
+    # Conversion fix Item A (2026-10-18): one-time backfill — accounts
+    # stranded at a 0 message bank by the old verify-gated flow receive
+    # the standard free-signup grant. Idempotent (free_grants ledger),
+    # so running it every boot is a no-op after the first pass.
+    if config.CONV_BACKFILL_ZERO_BANK:
+        try:
+            conn = db.connect()
+            try:
+                granted = store.backfill_zero_bank_grants(
+                    conn, config.FREE_SIGNUP_MESSAGES,
+                    config.FREE_SIGNUP_CAP)
+                if granted:
+                    print(f"[conv] Item A backfill: free-signup grant "
+                          f"to {len(granted)} zero-bank account(s): "
+                          f"{[g['user_id'] for g in granted]}",
+                          flush=True)
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001 — never block boot on it
+            print(f"[conv] Item A backfill skipped: "
+                  f"{e.__class__.__name__}", flush=True)
     # Background Gemini key prober: keeps the believed-healthy pool view
     # fresh off the request path (see app/gemini_keys.py). Disable with
     # GEMINI_PROBER=0.
@@ -4188,6 +4209,32 @@ def auth_signup(body: SignupIn, request: Request):
         user_id = "cm_" + auth.new_token(12).replace("-", "").replace("_", "")[:16]
         user = store.create_user_with_email(conn, user_id, email,
                                             auth.hash_password(body.password), name)
+        # Conversion fix Item A (2026-10-18): the free-signup grant
+        # lands NOW, at creation — not at email verification — and the
+        # signup returns a session, so his first conversation is never
+        # gated on the verification click. The verification email is
+        # still sent: it remains the account-recovery anchor and gates
+        # referral activation. The verify endpoint keeps its own grant
+        # call, which is a ledger no-op once granted here. Flag off =
+        # the pre-Item-A behavior, byte for byte.
+        if config.CONV_SIGNUP_GRANT:
+            store.grant_free_signup_messages(
+                conn, user_id, config.FREE_SIGNUP_MESSAGES,
+                config.FREE_SIGNUP_CAP)
+            user = store.get_or_create_user(conn, user_id)
+            if user.get("email"):
+                store.apply_jvzoo_pending(conn, user_id, user["email"])
+            _send_verify_email(conn, user)
+            # Same welcome greeting the verify path seeds, so a
+            # pre-verify first open already has her line waiting.
+            if not store.recent_turns(conn, user_id, 1, "chloe"):
+                store.log_turn(conn, user_id, "chloe", onboarding.greeting_line({"id": "chloe", "name": "Chloe"}), "chloe")
+            session = auth.new_token()
+            store.create_session(conn, user_id, session)
+            summary = _user_summary(user)
+            summary.update({"ok": True, "verify_sent": True,
+                            "token": session, "email_verified": False})
+            return summary
         _send_verify_email(conn, user)
         return {"ok": True, "verify_sent": True}
     except sqlite3.IntegrityError:
@@ -4315,6 +4362,10 @@ async def auth_reset_password(body: ResetPasswordIn):
         conn.execute(
             "UPDATE users SET password_hash = ? WHERE user_id = ?",
             (auth.hash_password(body.new_password), row["user_id"]))
+        # Conversion fix Item A (2026-10-18): completing a reset proves
+        # control of the mailbox — that IS email verification doing its
+        # recovery job, so mark the account verified here.
+        store.set_email_verified(conn, row["user_id"])
         conn.execute(
             "UPDATE password_reset_tokens SET used = 1 WHERE token = ?",
             (body.token,))
@@ -4335,12 +4386,15 @@ def auth_login(body: LoginIn, request: Request):
         if not user or not user.get("password_hash") or not auth.verify_password(
                 body.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="wrong_email_or_password")
-        if not user.get("email_verified_at"):
-            raise HTTPException(status_code=403, detail="email_unverified")
+        # Conversion fix Item A (2026-10-18): login no longer hard-
+        # blocks unverified accounts — chat is not gated on the
+        # verification click. The flag rides along so the app can still
+        # nudge him to verify (recovery anchor + referral gate).
         session = auth.new_token()
         store.create_session(conn, user["user_id"], session)
         summary = _user_summary(user)
-        summary.update({"ok": True, "token": session})
+        summary.update({"ok": True, "token": session,
+                        "email_verified": bool(user.get("email_verified_at"))})
         return summary
     finally:
         conn.close()

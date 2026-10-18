@@ -213,6 +213,33 @@ def free_spots_left(conn: sqlite3.Connection, cap: int) -> int:
     return max(0, cap - (row["c"] if row else 0))
 
 
+def backfill_zero_bank_grants(conn: sqlite3.Connection, n: int,
+                              cap: int) -> list[dict[str, Any]]:
+    """Conversion fix Item A (2026-10-18): every existing account that
+    sits at a 0 message bank with no paid tier — basic tier, never paid
+    anything, and never received the free grant — gets the standard
+    free-signup grant (n messages, once, cap-respecting, via the same
+    free_grants ledger as signup/verification). These are the accounts
+    the old verify-gated flow stranded: they signed up, never clicked
+    the email, and could not send a single message. Returns the granted
+    accounts (user_id, email, name) so the caller can report them.
+    Idempotent: granted users land in free_grants and are never
+    re-granted."""
+    rows = conn.execute(
+        """SELECT user_id, email, name FROM users
+           WHERE messages_remaining = 0 AND tier = 'basic'
+             AND user_id NOT IN (SELECT user_id FROM free_grants)
+           ORDER BY created_at""").fetchall()
+    granted: list[dict[str, Any]] = []
+    for r in rows:
+        if has_paid(conn, r["user_id"]):
+            continue
+        if grant_free_signup_messages(conn, r["user_id"], n, cap):
+            granted.append({"user_id": r["user_id"], "email": r["email"],
+                            "name": r["name"]})
+    return granted
+
+
 def downgrade_to_basic(conn: sqlite3.Connection, user_id: str) -> None:
     """Subscription ended: tier back to the default; remaining banks drain
     naturally instead of being zeroed."""
@@ -309,9 +336,12 @@ def create_user_with_email(conn: sqlite3.Connection, user_id: str, email: str,
     """Create a new account row for an email signup (unverified). Raises
     sqlite3.IntegrityError when the email is already taken.
 
-    New accounts start with EMPTY banks: 0 messages, 0 voice notes. Nothing
-    is free — the $0.99 trial grants 100 messages via grant_trial_messages()
-    and a subscription fills the paid bank via set_tier()."""
+    The row itself starts with EMPTY banks: 0 messages, 0 voice notes.
+    Since 2026-10-18 (conversion fix Item A) the signup endpoint applies
+    the free-signup grant immediately after creating the row, so a new
+    account can chat before email verification; the $0.99 trial grants
+    100 messages via grant_trial_messages() and a subscription fills
+    the paid bank via set_tier()."""
     conn.execute(
         """INSERT INTO users (user_id, name, email, password_hash, tier,
                               messages_remaining, voice_notes_remaining,

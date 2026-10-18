@@ -97,6 +97,47 @@ TRIAL_MESSAGES = 100
 FREE_SIGNUP_MESSAGES = 50
 FREE_SIGNUP_CAP = 200
 
+# Conversion fix plan (2026-10-18) — Item A: unlock the web door. The
+# free-signup grant lands at account creation (not at email
+# verification) and signup returns a session, so the first conversation
+# is never gated on the verification click. Verification stays the
+# account-recovery anchor (a completed password reset marks the email
+# verified) and still gates referral activation. CONV_BACKFILL_ZERO_BANK
+# runs the one-time grant backfill for pre-existing zero-bank accounts
+# at startup (idempotent via the free_grants table).
+CONV_SIGNUP_GRANT = os.environ.get("CONV_SIGNUP_GRANT", "1") == "1"
+CONV_BACKFILL_ZERO_BANK = os.environ.get(
+    "CONV_BACKFILL_ZERO_BANK", "1") == "1"
+
+# Conversion fix plan — Item B: new-user win-back nudge (one per user,
+# genuine free users only, in character, no pitch).
+CONV_WINBACK = os.environ.get("CONV_WINBACK", "1") == "1"
+WINBACK_MAX_LIFETIME_MESSAGES = 49
+WINBACK_SIGNUP_WINDOW_DAYS = 14
+WINBACK_IDLE_HOURS = 24
+
+# Conversion fix plan — Item C: funnel event recording + admin counts.
+CONV_EVENTS = os.environ.get("CONV_EVENTS", "1") == "1"
+
+# Conversion fix plan — Item D: the $0.99 trial offered in character
+# when a free user's lifetime message count crosses TRIAL_OFFER_AT
+# (Telegram first; one gentle repeat after TRIAL_OFFER_REPEAT_DAYS).
+CONV_TRIAL_OFFER = os.environ.get("CONV_TRIAL_OFFER", "1") == "1"
+TRIAL_OFFER_AT = int(os.environ.get("TRIAL_OFFER_AT", "30"))
+TRIAL_OFFER_REPEAT_DAYS = 7
+
+# Conversion fix plan — Item E: first-session package. While a user's
+# lifetime count is under FIRST_SESSION_MESSAGES his generations get
+# priority treatment and she leads; inside the first
+# FIRST_SESSION_NOCANNED_MESSAGES the canned fallback is never served
+# (retry/wait instead).
+CONV_FIRST_SESSION = os.environ.get("CONV_FIRST_SESSION", "1") == "1"
+FIRST_SESSION_MESSAGES = 15
+FIRST_SESSION_NOCANNED_MESSAGES = 10
+# Warm-hour nudge (Item E5): a first-day user who goes quiet 60-120
+# minutes after his last message gets one same-day in-character nudge.
+CONV_WARMHOUR = os.environ.get("CONV_WARMHOUR", "1") == "1"
+
 # ---------------------------------------------------------------------------
 # JVZoo affiliate channel (2026-09-30). JVZIPN v2 posts order events to
 # POST /api/v1/jvzoo/ipn; each post carries cverify =

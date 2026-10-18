@@ -1759,6 +1759,30 @@ let presetSheetGirl = null;
         // Will link after login
         localStorage.setItem('whispr_pending_ref', refCode);
       }
+      // Conversion fix Item A (2026-10-18): signup now returns a
+      // session + the free grant, so he lands straight in the app —
+      // the verification email still arrives, but the first
+      // conversation no longer waits on the click.
+      if (data.token) {
+        setToken(data.token);
+        const pendingRef = localStorage.getItem('whispr_pending_ref') || localStorage.getItem('whispr_ref');
+        if (pendingRef) {
+          try {
+            await fetch(CONFIG.API_BASE_URL + '/api/v1/referral/track', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + data.token },
+              body: JSON.stringify({ referral_code: pendingRef })
+            });
+            localStorage.removeItem('whispr_pending_ref');
+          } catch (e) {}
+        }
+        closeSheet('authSheet');
+        showToast('Welcome! 💛');
+        updateBalance();
+        loadLandingReferral();
+        loadRoster();
+        return;
+      }
       $('authVerifyMsg').classList.remove('hidden');
       $('authSignupForm').classList.add('hidden');
     } catch (e) {
