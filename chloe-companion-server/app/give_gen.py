@@ -684,23 +684,40 @@ def _wait_out_live_render() -> None:
         waited += _LIVE_PAUSE_POLL_S
 
 
+def _give_gen_focus_girl() -> str:
+    """Owner focus override (GIVE_GEN_FOCUS_GIRL env var): while it
+    names a girl, the daily-queue claim below only takes HER rows —
+    every other girl's queued gives pause in place (rows stay
+    pending, untouched) until she is caught up and the var is unset.
+    Read per claim so the focus can move with an env change alone.
+    The priority lane is untouched: a live chat render still passes,
+    as designed — that lane is a person waiting, not the backlog."""
+    return (os.environ.get("GIVE_GEN_FOCUS_GIRL") or "").strip().lower()
+
+
 def _claim_next_queued_give_id(exclude: set[int]) -> int | None:
     """Oldest unrendered queued generation (status 'pending' with no
     result url yet), skipping ids this processor run already handled,
-    or None when nothing is left to drain."""
+    or None when nothing is left to drain. While GIVE_GEN_FOCUS_GIRL
+    is set, only that girl's rows are claimable."""
+    focus = _give_gen_focus_girl()
+    girl_clause = "AND girl_id = ? " if focus else ""
     conn = db.connect()
     try:
         if exclude:
             marks = ",".join("?" for _ in exclude)
+            params = ((focus,) if focus else ()) + tuple(exclude)
             row = conn.execute(
                 "SELECT id FROM give_generations WHERE status = 'pending' "
-                "AND (url IS NULL OR url = '') AND id NOT IN (" + marks + ") "
-                "ORDER BY id ASC LIMIT 1", tuple(exclude)).fetchone()
+                "AND (url IS NULL OR url = '') " + girl_clause
+                + "AND id NOT IN (" + marks + ") "
+                "ORDER BY id ASC LIMIT 1", params).fetchone()
         else:
+            params = ((focus,) if focus else ())
             row = conn.execute(
                 "SELECT id FROM give_generations WHERE status = 'pending' "
-                "AND (url IS NULL OR url = '') "
-                "ORDER BY id ASC LIMIT 1").fetchone()
+                "AND (url IS NULL OR url = '') " + girl_clause
+                + "ORDER BY id ASC LIMIT 1", params).fetchone()
         return int(row[0]) if row else None
     finally:
         conn.close()
