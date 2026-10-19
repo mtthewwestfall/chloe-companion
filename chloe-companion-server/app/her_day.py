@@ -326,6 +326,8 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
                         scene: str, date_str: str) -> str:
     """Generate (or reuse today's cached) SFW image via the plan session.
 
+    Sogni first; when Sogni is throttled, dead, or out of capacity the
+    Gemini image fallback (assist.gemini_image_render) renders instead.
     Returns the /generated/... url, or "" on any failure — the caller
     renders a styled text card instead.
     """
@@ -336,19 +338,18 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
         session = _plan_session()
     except Exception as e:  # noqa: BLE001
         print(f"[her_day] plan session lookup failed: {e}", flush=True)
-        return ""
-    if not session:
-        print("[her_day] no Sogni plan session, text card fallback",
-              flush=True)
-        return ""
+        session = None
     ref_path = None
     try:
+        from . import assist
         from .media_gen import _fetch_reference
 
         ref_path = _fetch_reference(avatar_url or "")
-        outcome = _render_image_plan(
-            session, _sfw_prompt(names, scene), ref_path)
-        if outcome.get("status") == "session_dead" \
+        outcome = None
+        if session:
+            outcome = _render_image_plan(
+                session, _sfw_prompt(names, scene), ref_path)
+        if outcome and outcome.get("status") == "session_dead" \
                 and not outcome.get("seam_healed"):
             # Non-destructive recovery, same as give_gen: re-read the
             # newest stored pair and retry once with it when another
@@ -373,9 +374,25 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
             if recovered:
                 outcome = _render_image_plan(
                     recovered, _sfw_prompt(names, scene), ref_path)
-        if outcome.get("status") != "done" or not outcome.get("path"):
+        if not outcome or outcome.get("status") != "done" \
+                or not outcome.get("path"):
+            # Sogni throttled / dead / out of capacity (4089): render
+            # through the Gemini image fallback instead of posting a
+            # text card (2026-10-19 — Sogni's outage emptied the feed
+            # two days running).
+            sogni_status = (outcome or {}).get("status") or "no_session"
+            fb = assist.gemini_image_render(
+                _sfw_prompt(names, scene), ref_path)
+            if fb.get("status") == "done" and fb.get("path"):
+                print(f"[her_day] sfw image via Gemini fallback "
+                      f"({moment_key}); Sogni: {sogni_status}",
+                      flush=True)
+                outcome = fb
+        if not outcome or outcome.get("status") != "done" \
+                or not outcome.get("path"):
             print(f"[her_day] sfw image failed ({moment_key}): "
-                  f"{outcome.get('status')}: {outcome.get('detail')}",
+                  f"{(outcome or {}).get('status')}: "
+                  f"{(outcome or {}).get('detail')}",
                   flush=True)
             return ""
         os.makedirs(config.GENERATED_DIR, exist_ok=True)
