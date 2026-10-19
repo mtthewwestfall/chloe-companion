@@ -1615,7 +1615,14 @@ def update_custom_request(conn: sqlite3.Connection, request_id: int,
 
 # ---------------------------------------------------------------------------
 # Her Day feed (2026-10-07): Instagram-stories-style daily posts per girl.
+#
+# Global posts (2026-10-19): a moment posted "to everyone" lives ONCE
+# under HER_DAY_GLOBAL_USER and every user's feed read includes it —
+# no more one-copy-per-account fan-out on inject, and a delete by
+# media_url removes the single row.
 # ---------------------------------------------------------------------------
+
+HER_DAY_GLOBAL_USER = ""
 
 def save_her_day_post(conn: "sqlite3.Connection", user_id: str, girl_id: str,
                       post_type: str = "image", media_url: str = "",
@@ -1642,9 +1649,16 @@ def get_her_day_posts(conn: "sqlite3.Connection", user_id: str,
                       girl_id: str | None = None,
                       include_expired: bool = False) -> list[dict]:
     """Get active Her Day posts for a user (optionally filtered by girl),
-    newest first. Expired posts are excluded unless include_expired."""
-    query = "SELECT * FROM her_day_posts WHERE user_id = ?"
-    params: list = [user_id]
+    newest first. Expired posts are excluded unless include_expired.
+
+    Global posts (user_id = HER_DAY_GLOBAL_USER) are included for
+    every user — one shared feed. When the user also has a personal
+    row for the same girl + media (a leftover fan-out copy), the
+    personal row wins and the global duplicate is dropped.
+    """
+    query = ("SELECT * FROM her_day_posts"
+             " WHERE (user_id = ? OR user_id = ?)")
+    params: list = [user_id, HER_DAY_GLOBAL_USER]
     if girl_id:
         query += " AND girl_id = ?"
         params.append(girl_id.strip().lower())
@@ -1654,7 +1668,12 @@ def get_her_day_posts(conn: "sqlite3.Connection", user_id: str,
         # created_at slot arrives.
         query += " AND created_at <= datetime('now')"
     query += " ORDER BY created_at DESC"
-    return [dict(r) for r in conn.execute(query, params).fetchall()]
+    rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+    own = {(r.get("girl_id"), r.get("media_url")) for r in rows
+           if r.get("user_id") == user_id}
+    return [r for r in rows
+            if r.get("user_id") == user_id
+            or (r.get("girl_id"), r.get("media_url")) not in own]
 
 
 def set_her_day_post_times(conn: "sqlite3.Connection", post_id: int,
