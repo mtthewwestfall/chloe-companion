@@ -1940,10 +1940,18 @@ def create_media_request(body: MediaRequestIn, request: Request):
             store.record_give_send(conn, user_id, cid, clip["id"])
             store.set_media_request_status(conn, req["id"], "ready",
                                            result_url=clip["url"], cost_usd=0)
-            return {"id": req["id"], "status": "ready",
+            resp = {"id": req["id"], "status": "ready",
                     "result_url": clip["url"], "media": media,
                     "character_id": cid,
                     "balance": _request_balance(conn, user_id, cid)}
+            # Improvement #3: her line with the give, referencing the
+            # conversation — the same helper the preset path uses.
+            caption = live_give.give_caption(
+                conn, user_id, cid,
+                kind="video" if media == "video" else "image")
+            if caption:
+                resp["caption"] = caption
+            return resp
 
         # Regular: async generation. She acknowledges in character; the app
         # polls GET /api/v1/media-requests/{id} until ready.
@@ -2074,8 +2082,14 @@ async def preset_video(body: PresetVideoIn, request: Request):
                 "SELECT gives_received FROM user_give_progress WHERE user_id = ? AND girl_id = ?",
                 (user_id, key[0])).fetchone()
             gives = prog["gives_received"] if prog else 0
-            # Rotation: stages cycle 1-9, each rotation serves fresh clips
-            stage = (gives % cap) + 1
+            # Rotation: stages cycle 1-9, each rotation serves fresh clips.
+            # Improvement #3: when the conversation is somewhere — an
+            # active roleplay scene, or his recent turns naming a stage
+            # act — the give continues THAT moment instead of the bare
+            # counter; the hint clamps to the same cap as every walk
+            # below, so group/event accounts still serve <= stage 3.
+            hint = live_give.scene_stage_hint(conn, user_id, key[0])
+            stage = min(hint, cap) if hint else (gives % cap) + 1
             seen_rows = conn.execute(
                 "SELECT media_id FROM user_give_seen WHERE user_id = ? AND girl_id = ?",
                 (user_id, key[0])).fetchall()
@@ -2200,8 +2214,26 @@ async def preset_video(body: PresetVideoIn, request: Request):
             pass
         finally:
             conn.close()
-    return {"video_url": clip["url"], "media_type": clip["media_type"],
+    resp = {"video_url": clip["url"], "media_type": clip["media_type"],
             "preset": body.preset, "girl_id": body.girl_id, "stage": stage}
+    # Improvement #3: her line with the clip, referencing the
+    # conversation it lands in — DM surfaces (the app, the bot) show
+    # it as the caption. Identified users only; the helper declines
+    # synthetic group-event accounts (shared surface) and any
+    # conversation too thin to reference, and never raises.
+    if user_id:
+        try:
+            conn = _conn()
+            try:
+                caption = live_give.give_caption(
+                    conn, user_id, key[0], kind=clip["media_type"])
+            finally:
+                conn.close()
+            if caption:
+                resp["caption"] = caption
+        except Exception:
+            pass
+    return resp
 
 
 
