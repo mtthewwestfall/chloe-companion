@@ -12,6 +12,7 @@ import random
 import re
 import sqlite3
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 from . import config, db
@@ -1624,6 +1625,21 @@ def update_custom_request(conn: sqlite3.Connection, request_id: int,
 
 HER_DAY_GLOBAL_USER = ""
 
+# ---------------------------------------------------------------------------
+# Her Day reuse rotation (owner direction, 2026-10-19): a pictured
+# moment whose most recent showing was at least REUSE_MIN_AGE_DAYS ago
+# can be re-issued as a fresh post, so good moments come back every
+# couple of weeks and a girl's feed never sits empty on a day whose
+# generation produced no picture. Sources are restricted to clean
+# renders: admin-injected moments (media_url contains
+# 'herday_inject_', any date) and moments whose latest showing is
+# on/after REUSE_CLEAN_CUTOFF — the day the clean-photo prompt fix
+# (PR #79) landed. Older auto renders may carry fabricated
+# Instagram-story frames and are NEVER recycled.
+# ---------------------------------------------------------------------------
+REUSE_MIN_AGE_DAYS = 14
+REUSE_CLEAN_CUTOFF = "2026-10-19"
+
 def save_her_day_post(conn: "sqlite3.Connection", user_id: str, girl_id: str,
                       post_type: str = "image", media_url: str = "",
                       voice_url: str = "", caption: str = "") -> dict:
@@ -1742,11 +1758,108 @@ def set_her_day_post_media(conn: "sqlite3.Connection", post_id: int,
 
 
 def cleanup_expired_her_day(conn: "sqlite3.Connection") -> int:
-    """Delete expired Her Day posts. Returns count deleted."""
+    """Delete expired Her Day posts. Returns count deleted.
+
+    Reuse rotation (2026-10-19): the newest pictured row of each
+    reusable moment survives expiry — it is the rotation's memory of
+    that moment (its last showing and caption). A pictured row is
+    preserved only while it is the latest showing of its
+    (girl_id, media_url) AND the moment is a reuse source (an
+    admin-injected file, any date, or a post created on/after
+    REUSE_CLEAN_CUTOFF). Preserved rows stay expired, so no feed ever
+    shows them; they only feed find_reusable_her_day_post. Once a
+    newer showing of the same moment exists, the older row is
+    deleted as usual, keeping the table bounded by the number of
+    distinct moments.
+    """
     cur = conn.execute(
-        "DELETE FROM her_day_posts WHERE expires_at <= datetime('now')")
+        "DELETE FROM her_day_posts"
+        " WHERE expires_at <= datetime('now')"
+        " AND NOT ("
+        "   TRIM(COALESCE(media_url, '')) != ''"
+        "   AND (media_url LIKE '%herday_inject_%'"
+        "        OR date(created_at) >= ?)"
+        "   AND NOT EXISTS ("
+        "       SELECT 1 FROM her_day_posts n"
+        "       WHERE n.girl_id = her_day_posts.girl_id"
+        "         AND n.media_url = her_day_posts.media_url"
+        "         AND (n.created_at > her_day_posts.created_at"
+        "              OR (n.created_at = her_day_posts.created_at"
+        "                  AND n.id > her_day_posts.id)))"
+        " )",
+        (REUSE_CLEAN_CUTOFF,))
     conn.commit()
     return cur.rowcount
+
+
+def her_day_pictured_today(conn: "sqlite3.Connection", user_id: str,
+                           girl_id: str,
+                           today_str: str | None = None) -> bool:
+    """True when this user's feed already has a pictured post for the
+    girl today. Global posts count — they are part of every user's
+    feed, so the pair is covered even with no personal row. A post
+    slotted for later today counts too: it will show today.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM her_day_posts"
+        " WHERE girl_id = ? AND (user_id = ? OR user_id = ?)"
+        " AND TRIM(COALESCE(media_url, '')) != ''"
+        " AND date(created_at) = COALESCE(?, date('now')) LIMIT 1",
+        ((girl_id or "").strip().lower(), user_id, HER_DAY_GLOBAL_USER,
+         today_str),
+    ).fetchone()
+    return row is not None
+
+
+def find_reusable_her_day_post(conn: "sqlite3.Connection", girl_id: str,
+                               now: datetime | None = None
+                               ) -> dict | None:
+    """A girl's longest-overdue reusable pictured moment, or None.
+
+    A moment (one media_url for this girl) is reusable when its most
+    recent showing — max created_at over ALL posts carrying that
+    media, any user — was at least REUSE_MIN_AGE_DAYS before `now`,
+    and the moment is a clean source: an admin-injected file
+    (media_url contains 'herday_inject_', any date) or a moment whose
+    latest showing is on/after REUSE_CLEAN_CUTOFF. Because the latest
+    showing must be at least REUSE_MIN_AGE_DAYS old, a moment shown
+    today is never a candidate. Returns {media_url, caption,
+    post_type, last_shown} with caption/type taken from the most
+    recent showing; among several candidates the least-recently-shown
+    (longest overdue) wins.
+    """
+    gid = (girl_id or "").strip().lower()
+    if not gid:
+        return None
+    now = now or datetime.utcnow()
+    threshold = (now - timedelta(days=REUSE_MIN_AGE_DAYS)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    row = conn.execute(
+        "SELECT media_url, MAX(created_at) AS last_shown"
+        " FROM her_day_posts"
+        " WHERE girl_id = ? AND TRIM(COALESCE(media_url, '')) != ''"
+        " GROUP BY media_url"
+        " HAVING last_shown <= ?"
+        " AND (media_url LIKE '%herday_inject_%'"
+        "      OR date(last_shown) >= ?)"
+        " ORDER BY last_shown ASC LIMIT 1",
+        (gid, threshold, REUSE_CLEAN_CUTOFF),
+    ).fetchone()
+    if row is None:
+        return None
+    latest = conn.execute(
+        "SELECT caption, post_type FROM her_day_posts"
+        " WHERE girl_id = ? AND media_url = ?"
+        " ORDER BY created_at DESC, id DESC LIMIT 1",
+        (gid, row["media_url"]),
+    ).fetchone()
+    post_type = (latest["post_type"] if latest else "") or "image"
+    if post_type not in ("image", "video"):
+        post_type = "image"
+    return {"media_url": row["media_url"],
+            "caption": (latest["caption"] if latest else "") or "",
+            "post_type": post_type,
+            "last_shown": row["last_shown"]}
 
 
 def get_public_her_day_posts(conn: "sqlite3.Connection",

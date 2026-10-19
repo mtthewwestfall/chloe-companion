@@ -38,7 +38,7 @@ import os
 import random
 import shutil
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from . import config, db, store
@@ -738,6 +738,59 @@ def generate_for_all_girls(user_id: str) -> int:
     return total
 
 
+def reuse_fill_for_pair(user_id: str, girl_id: str,
+                        now: datetime | None = None) -> dict[str, Any] | None:
+    """Re-issue a girl's longest-overdue reusable moment for one user.
+
+    Reuse rotation (owner direction, 2026-10-19): when a (user, girl)
+    pair ends the daily flow with NO pictured post for today — image
+    generation failed, the provider was down, or the plan produced
+    none — the pair still gets a post: an eligible past pictured
+    moment of hers comes back as a fresh post (new row for this
+    user+girl, created_at now, expires_at +1 day, the original
+    media_url and caption). Eligibility and choice live in
+    store.find_reusable_her_day_post (>=14 days since the moment's
+    most recent showing, clean sources only, longest-overdue first).
+
+    A pair that already has a pictured post today — personal or
+    global — is never touched, so reuse never displaces or duplicates
+    a fresh post. Returns the new post row, or None when the pair was
+    already covered or no moment is eligible.
+    """
+    gid = (girl_id or "").strip().lower()
+    if not gid:
+        return None
+    now = now or datetime.utcnow()
+    conn = db.connect()
+    try:
+        if store.her_day_pictured_today(conn, user_id, gid,
+                                        today_str=now.strftime("%Y-%m-%d")):
+            return None
+        src = store.find_reusable_her_day_post(conn, gid, now=now)
+        if not src:
+            return None
+        post = store.save_her_day_post(
+            conn, user_id, gid, post_type=src["post_type"],
+            media_url=src["media_url"], caption=src["caption"])
+        # Stamp the re-issue from the same clock the eligibility
+        # check used: live now, expiring +1 day like any fresh post.
+        post = store.set_her_day_post_times(
+            conn, post["id"], now.strftime("%Y-%m-%d %H:%M:%S"),
+            (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"))
+        try:
+            age_days = (now - datetime.strptime(
+                src["last_shown"], "%Y-%m-%d %H:%M:%S")).days
+            age_txt = f"{age_days}d old"
+        except Exception:  # noqa: BLE001
+            age_txt = "age unknown"
+        print(f"[her_day] reuse: {gid} for user {user_id}: re-issued "
+              f"{src['media_url']} (last shown {src['last_shown']}, "
+              f"{age_txt})", flush=True)
+        return post
+    finally:
+        conn.close()
+
+
 def generate_daily() -> dict[str, Any]:
     """Generate Whispr Feed posts for all users x all girls.
 
@@ -759,6 +812,23 @@ def generate_daily() -> dict[str, Any]:
                 report["skipped"] += 1
         except Exception as e:  # noqa: BLE001
             report["errors"].append(f"{uid}: {e}")
+    # Reuse rotation (2026-10-19): any (user, girl) pair that still
+    # has no pictured post today gets the girl's longest-overdue
+    # reusable moment re-issued, so the feed never sits empty and
+    # good moments come back on a ~two-week rotation.
+    report["reused"] = 0
+    try:
+        reuse_girl_ids = [g["id"] for g in _get_all_girls()]
+    except Exception as e:  # noqa: BLE001
+        report["errors"].append(f"reuse girl list: {e}")
+        reuse_girl_ids = []
+    for uid in users:
+        for gid in reuse_girl_ids:
+            try:
+                if reuse_fill_for_pair(uid, gid):
+                    report["reused"] += 1
+            except Exception as e:  # noqa: BLE001
+                report["errors"].append(f"reuse {uid}/{gid}: {e}")
     return report
 
 
