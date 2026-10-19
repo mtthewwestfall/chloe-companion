@@ -90,8 +90,18 @@ TEXT_MOMENTS = {
 }
 
 # Hard SFW tail appended to every Whispr Feed image prompt.
+# The image must be a CLEAN PHOTOGRAPH (owner direction, 2026-10-19):
+# the old tail said "like a normal Instagram story" and the renderer
+# took that literally — moments came back dressed as story
+# screenshots with fabricated UI chrome and invented usernames
+# (a Regan moment stamped "regan_lom"). Never frame these as
+# social-media posts; the app supplies its own chrome.
 SFW_TAIL = ("photorealistic, fully clothed, everyday normal activity, "
-            "non-sexual, wholesome, like a normal Instagram story, "
+            "non-sexual, wholesome, a clean standalone photograph, "
+            "not a social media post or screenshot: no app interface, "
+            "no story frame or story UI elements, no text overlays, "
+            "no captions or stickers in the image, no usernames or "
+            "handles, no watermarks, no logos, "
             "clean high-quality photo, natural light, coherent background")
 
 # In-memory caption cache for batch runs: (girl_id, date, moment, partners)

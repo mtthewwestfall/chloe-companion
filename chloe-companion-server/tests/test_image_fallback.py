@@ -180,5 +180,28 @@ class HerDayFallbackWiringTest(unittest.TestCase):
         self.assertEqual(self._call(), "")
 
 
+class SfwPromptCleanPhotoTest(unittest.TestCase):
+    """The SFW image prompt must demand a clean photograph, never a
+    social-media screenshot (2026-10-19: an "Instagram story" tail
+    made the renderer fabricate story UI and invented handles like
+    "regan_lom" on Her Day moments)."""
+
+    def test_prompt_demands_clean_photograph(self):
+        p = her_day._sfw_prompt(["Regan"], "having coffee at a cafe").lower()
+        self.assertNotIn("instagram", p)
+        for phrase in ("clean standalone photograph",
+                       "not a social media post",
+                       "no story frame",
+                       "no text overlays",
+                       "no usernames",
+                       "no watermarks"):
+            self.assertIn(phrase, p)
+
+    def test_prompt_stays_sfw(self):
+        p = her_day._sfw_prompt(["Regan"], "at the gym").lower()
+        self.assertIn("fully clothed", p)
+        self.assertIn("non-sexual", p)
+
+
 if __name__ == "__main__":
     unittest.main()
