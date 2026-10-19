@@ -2774,6 +2774,59 @@ def admin_public_ip_status(body: PublicIpStatusIn, request: Request):
         conn.close()
 
 
+class PublicIpImageIn(BaseModel):
+    girl_id: str
+    date: str = ""
+
+
+@app.post("/api/v1/admin/public-ip/generate-image")
+def admin_public_ip_generate_image(body: PublicIpImageIn,
+                                   request: Request):
+    """Render the package's image brief into a real picture (Gemini
+    image machinery seeded with her avatar, via public_ip) and store
+    the media_url on the package. Latest render wins; a failed render
+    returns an error and keeps the previous image."""
+    _require_admin(request)
+    from . import public_ip as _pip
+    d = body.date or _pip_today()
+    conn = _conn()
+    try:
+        out = _pip.generate_package_image(conn, body.girl_id, d)
+    finally:
+        conn.close()
+    if not out.get("ok"):
+        raise HTTPException(out.get("code", 400),
+                            out.get("error") or "render failed")
+    return out
+
+
+@app.post("/api/v1/admin/public-ip/post-to-feed")
+def admin_public_ip_post_to_feed(body: PublicIpImageIn,
+                                 request: Request):
+    """Post an APPROVED package's rendered picture to the feed as a
+    global Her Day moment (blank user_id) with the package's feed
+    caption, through the existing Her Day inject endpoint. Explicit
+    admin click only — nothing posts itself."""
+    _require_admin(request)
+    from . import public_ip as _pip
+    d = body.date or _pip_today()
+    conn = _conn()
+    try:
+        prep = _pip.feed_post_payload(conn, body.girl_id, d)
+        if not prep.get("ok"):
+            raise HTTPException(400,
+                                prep.get("error") or "cannot post")
+        out = admin_her_day_inject(HerDayInjectIn(
+            girl_id=prep["girl_id"], caption=prep["caption"],
+            image_b64=prep["image_b64"], filename=prep["filename"],
+            user_id=""), request)
+        store.set_public_package_status(conn, prep["girl_id"], d,
+                                        "published")
+        return out
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/admin/public-ip/weekly")
 def admin_public_ip_weekly(request: Request, start: str = ""):
     """The weekly show outline, assembled from the world's canon."""

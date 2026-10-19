@@ -27,12 +27,15 @@ never empty and never blocked on the model.
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
+import shutil
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import characters, gemini_keys, her_day, store, world
+from . import characters, config, gemini_keys, her_day, store, world
 
 TZ = ZoneInfo("America/New_York")
 _URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
@@ -188,6 +191,141 @@ def ensure_daily_packages(conn, date_str: str) -> list[dict[str, Any]]:
         if pkg:
             out.append(pkg)
     return out
+
+
+# ---------- Package images (2026-10-19) ----------
+# The approval queue used to be text-only: a human approved a package,
+# copied the caption out, and made the picture elsewhere. Now the
+# package's image brief renders right here, through the same Gemini
+# image machinery the Her Day fallback uses (assist.gemini_image_render
+# seeded with her avatar, media_gen._fetch_reference to load it), and
+# an approved package with a picture can post itself to the feed via
+# the Her Day inject path — but only on an explicit admin click.
+# Nothing renders or posts on its own.
+
+# Style-neutral on purpose: a few cast members (Rina, Sabrina) are
+# illustrated characters — their briefs carry their own style language
+# and the avatar seed reinforces it. Never add photoreal wording here.
+_IMAGE_TAIL = ("fully clothed, everyday normal activity, non-sexual, "
+               "wholesome, a clean standalone image, not a social "
+               "media post or screenshot: no app interface, no story "
+               "frame or story UI elements, no text overlays, no "
+               "captions or stickers in the image, no usernames or "
+               "handles, no watermarks, no logos, clean high-quality "
+               "image, natural light, coherent background")
+
+
+def _image_prompt(name: str, brief: str) -> str:
+    return f"{name}, {brief}, {_IMAGE_TAIL}"
+
+
+def generate_package_image(conn, girl_id: str,
+                           date_str: str) -> dict[str, Any]:
+    """Render a package's image brief and store the media_url on the
+    package record (pkg["image_url"]; latest render wins).
+
+    Returns {"ok": True, "media_url": ...} or {"ok": False, "error":
+    ..., "code": <http status>} — input problems are 400, render
+    failures 502. On any failure the package keeps its previous image.
+    Never raises."""
+    gid = (girl_id or "").strip().lower()
+    rec = store.get_public_package(conn, gid, date_str)
+    if not rec:
+        return {"ok": False, "code": 400,
+                "error": "no package for that girl/date"}
+    pkg = rec.get("package") or {}
+    brief = (pkg.get("image_brief") or "").strip()
+    if not brief:
+        return {"ok": False, "code": 400,
+                "error": "package has no image brief"}
+    girl = girl_info(gid)
+    if not girl:
+        return {"ok": False, "code": 400, "error": "unknown girl"}
+    avatar_url = ""
+    try:
+        ch = characters.get_character(gid) or {}
+        avatar_url = ch.get("avatar_url") or ""
+    except Exception:  # noqa: BLE001
+        avatar_url = ""
+    from . import assist
+    from .media_gen import _fetch_reference
+
+    ref_path = None
+    try:
+        ref_path = _fetch_reference(avatar_url)
+        outcome = assist.gemini_image_render(
+            _image_prompt(girl["name"], brief), ref_path)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "code": 502,
+                "error": f"render error: {e}"[:200]}
+    finally:
+        if ref_path:
+            try:
+                os.unlink(ref_path)
+            except OSError:
+                pass
+    if not outcome or outcome.get("status") != "done" \
+            or not outcome.get("path"):
+        status = (outcome or {}).get("status") or "failed"
+        detail = (outcome or {}).get("detail") or ""
+        return {"ok": False, "code": 502,
+                "error": f"render {status}: {detail}"[:200]}
+    ext = os.path.splitext(outcome["path"])[1].lower() or ".png"
+    if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+        ext = ".png"
+    fname = f"publicip_{gid}_{date_str}{ext}"
+    try:
+        os.makedirs(config.GENERATED_DIR, exist_ok=True)
+        dest = os.path.join(config.GENERATED_DIR, fname)
+        shutil.copyfile(outcome["path"], dest)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "code": 502,
+                "error": f"render save failed: {e}"[:200]}
+    finally:
+        try:
+            os.unlink(outcome["path"])
+        except OSError:
+            pass
+    media_url = "/generated/" + fname
+    pkg["image_url"] = media_url
+    store.save_public_package(conn, gid, date_str, pkg)
+    return {"ok": True, "media_url": media_url}
+
+
+def feed_post_payload(conn, girl_id: str,
+                      date_str: str) -> dict[str, Any]:
+    """Gate + payload for posting a package's picture to the feed.
+
+    Only an APPROVED package with a rendered image whose file is
+    still on disk may post. Returns {"ok": True, girl_id, caption,
+    filename, image_b64} for the caller to hand to the Her Day inject
+    endpoint, or {"ok": False, "error": ...}. Never raises."""
+    gid = (girl_id or "").strip().lower()
+    rec = store.get_public_package(conn, gid, date_str)
+    if not rec:
+        return {"ok": False, "error": "no package for that girl/date"}
+    if rec.get("status") != "approved":
+        return {"ok": False,
+                "error": "package is not approved yet"}
+    pkg = rec.get("package") or {}
+    media_url = (pkg.get("image_url") or "").strip()
+    if not media_url:
+        return {"ok": False,
+                "error": "package has no image yet — generate one first"}
+    fname = media_url.rsplit("/", 1)[-1]
+    path = os.path.join(config.GENERATED_DIR, fname)
+    if not os.path.isfile(path):
+        return {"ok": False,
+                "error": "rendered image file is missing from disk"}
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"image unreadable: {e}"[:200]}
+    return {"ok": True, "girl_id": gid,
+            "caption": pkg.get("feed_caption") or "",
+            "filename": fname,
+            "image_b64": base64.b64encode(raw).decode("ascii")}
 
 
 def weekly_show(conn, start_date: str) -> dict[str, Any]:

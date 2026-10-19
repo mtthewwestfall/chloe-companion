@@ -193,7 +193,7 @@
 
   <div id="tab-public-ip" class="hidden">
     <h3 style="margin:6px 0">🌍 Public IP — daily content packages</h3>
-    <p class="sub">One ready-to-post package per girl per day, generated from her Living World day (activities, mood, shared moments) and story arc. Approve what you like, copy it out, post it. Nothing posts itself.</p>
+    <p class="sub">One ready-to-post package per girl per day, generated from her Living World day (activities, mood, shared moments) and story arc. Generate her picture from the brief right here, approve the package, then post it to the feed with one click — or copy the text out. Nothing posts itself.</p>
     <div style="margin:10px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <span id="pipDate" class="sub"></span>
       <button onclick="generatePipAll(this)">Generate / refresh all</button>
@@ -328,12 +328,20 @@ function renderPip() {
     const vid = k.video || {};
     const vidText = 'Hook: ' + (vid.hook || '') + '\n' + (vid.beats || []).map((b, i) => (i + 1) + '. ' + b).join('\n') + '\nCaption: ' + (vid.caption || '');
     const pill = { pending: '🕓 pending', approved: '✅ approved', published: '🚀 published', skipped: '⏭ skipped' }[p.status] || p.status;
+    const imgUrl = k.image_url || '';
+    const imgBlock = '<div style="margin:10px 0">' +
+      (imgUrl ? '<img src="' + escapeHtml(API + imgUrl) + '" style="max-width:230px;border-radius:10px;border:1px solid #2c2c35;display:block" alt="">' : '') +
+      '<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button onclick="generatePipImage(\'' + gid + '\', this)">' + (imgUrl ? 'Regenerate image' : 'Generate image') + '</button>' +
+      ((imgUrl && p.status === 'approved') ? '<button onclick="postPipToFeed(\'' + gid + '\', this)">Post to feed</button>' : '') +
+      '</div></div>';
     return '<div class="card" style="margin:10px 0"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="text-transform:capitalize">' +
       escapeHtml(gid) + '</b><span class="sub">' + pill + ' · source: ' + escapeHtml(k.source || '') + '</span>' +
       '<button onclick="setPipStatus(\'' + gid + '\', \'approved\')">Approve</button>' +
       '<button onclick="setPipStatus(\'' + gid + '\', \'published\')">Mark published</button>' +
       '<button onclick="setPipStatus(\'' + gid + '\', \'skipped\')">Skip</button>' +
       '<button onclick="generatePip(\'' + gid + '\', this, true)">Regenerate</button></div>' +
+      imgBlock +
       pipField('Feed caption', k.feed_caption) +
       pipField('Image brief', k.image_brief) +
       pipField('Story frames', frames) +
@@ -355,6 +363,26 @@ async function generatePipAll(btn) {
 }
 async function setPipStatus(gid, status) {
   await api('POST', '/api/v1/admin/public-ip/status', { girl_id: gid, date: pipData.date, status });
+  await loadPublicIp();
+}
+async function generatePipImage(gid, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Rendering…'; }
+  const r = await api('POST', '/api/v1/admin/public-ip/generate-image', { girl_id: gid, date: pipData.date });
+  if (!r || !r.ok) {
+    alert('Image render failed: ' + ((r && (r.detail || r.error)) || 'unknown error'));
+    if (btn) { btn.disabled = false; btn.textContent = 'Generate image'; }
+  }
+  await loadPublicIp();
+}
+async function postPipToFeed(gid, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Posting…'; }
+  const r = await api('POST', '/api/v1/admin/public-ip/post-to-feed', { girl_id: gid, date: pipData.date });
+  if (!r || !r.ok) {
+    alert('Post to feed failed: ' + ((r && (r.detail || r.error)) || 'unknown error'));
+    if (btn) { btn.disabled = false; btn.textContent = 'Post to feed'; }
+  } else {
+    alert('Posted to the feed ✓ — ' + (r.media_url || ''));
+  }
   await loadPublicIp();
 }
 async function loadPipWeekly(btn) {
