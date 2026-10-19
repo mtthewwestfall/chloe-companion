@@ -452,7 +452,32 @@ def _empty_bank_reply(user: dict[str, Any], character: dict[str, Any] | None = N
         "photo_url": None,
         "messages_remaining": 0,
         "character_id": char_id,
+        # Improvement #7 (2026-10-19): the cliffhanger signal for the
+        # other surfaces. True only for a never-paid account — the
+        # Telegram bot turns it into her in-character ask + the Stars
+        # buttons at the wall. Paid users who drained a monthly bank
+        # get the renewal line above and NO upsell, here or anywhere.
+        "paywall_due": unpaid,
     }
+
+
+def _entitlement_tease(character: dict[str, Any] | None, code: str) -> str:
+    """Her in-character line for an entitlement refusal (improvement
+    #7, 2026-10-19). A media-pool refusal used to die as a bare
+    machine string ("no_requests_left"); now the refusal names what
+    she's holding back, in her voice — the same cliffhanger shape as
+    the chat wall. The upgrade path itself rides the client's normal
+    paywall, exactly like the web chat wall."""
+    char_id = (character or {}).get("id", "chloe")
+    if code == "monthly_regular_cap":
+        held = "the custom one you just dreamed up"
+    else:  # no_requests_left
+        held = "the next one I was about to make just for you"
+    if char_id == "chloe":
+        return (f"mmm, I want to, babe — but {held} is on the other "
+                f"side of my plan. unlock it and it's yours \U0001F49C")
+    return (f"I want to — but {held} is on the other side of my plan. "
+            f"unlock it and it's yours \U0001F49C")
 
 
 # ---------------------------------------------------------------------------
@@ -1842,8 +1867,12 @@ def create_media_request(body: MediaRequestIn, request: Request):
                     store.regular_requests_used_this_month(conn, user_id) >= 1):
                 events.record_event(conn, user_id, "wall_hit",
                                     {"wall": "monthly_regular_cap"})
-                raise HTTPException(status_code=402,
-                                    detail="monthly_regular_cap")
+                raise HTTPException(
+                    status_code=402,
+                    detail={"code": "monthly_regular_cap",
+                            "tease": _entitlement_tease(
+                                character, "monthly_regular_cap"),
+                            "character_id": cid})
             # Daily cap (anti-farming) still applies to regular requests.
             cap = config.DAILY_REQUEST_CAPS.get(tier, 3)
             if not is_owner and store.requests_used_today(conn, user_id) >= cap:
@@ -1890,8 +1919,12 @@ def create_media_request(body: MediaRequestIn, request: Request):
                 if pool is None:
                     events.record_event(conn, user_id, "wall_hit",
                                         {"wall": "no_requests_left"})
-                    raise HTTPException(status_code=402,
-                                        detail="no_requests_left")
+                    raise HTTPException(
+                        status_code=402,
+                        detail={"code": "no_requests_left",
+                                "tease": _entitlement_tease(
+                                    character, "no_requests_left"),
+                                "character_id": cid})
 
         req = store.create_media_request(
             conn, user_id, cid, kind, media, body.prompt,
@@ -2909,8 +2942,15 @@ def chat_duo(body: DuoChatIn, request: Request):
                 events.record_event(conn, user_id, "wall_hit",
                                     {"wall": "out_of_messages",
                                      "surface": "duo"})
-                raise HTTPException(status_code=402,
-                                    detail="out of messages")
+                # Improvement #7: structured detail — paywall_due is
+                # the never-paid signal the Telegram bot turns into
+                # her cliffhanger ask + Stars buttons. The web duo
+                # client keys on the 402 status alone (unchanged).
+                raise HTTPException(
+                    status_code=402,
+                    detail={"code": "out_of_messages",
+                            "paywall_due": not store.has_paid(
+                                conn, user_id)})
         key = duo_mod.duo_key(a, b)
         store.log_turn(conn, user_id, "user", text, character_id=key)
         msgs = duo_mod.generate_duo_reply(
