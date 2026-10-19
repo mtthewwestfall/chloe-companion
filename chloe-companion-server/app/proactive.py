@@ -57,6 +57,12 @@ MESSAGE_TYPES = ("morning", "nudge", "ambient", "winback", "warmhour")
 # Per-user daily cap (mirrors scheduler.MAX_PROACTIVE_PER_DAY).
 MAX_PROACTIVE_PER_DAY = 2
 
+# Non-morning sends only land in reasonable local hours — never at
+# midnight (2026-10-19: two nudges fired at 00:00 local and ate the
+# whole daily cap before the owner's morning window even opened).
+AMBIENT_EARLIEST_HOUR = 9
+AMBIENT_LATEST_HOUR = 21
+
 
 def _owner_ids() -> set[str]:
     raw = os.environ.get("ASSIST_OWNER_IDS", "")
@@ -681,12 +687,15 @@ def _abs_media(media_url: str) -> str:
     return config.PUBLIC_APP_URL + "/" + url.lstrip("/")
 
 
-def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
-                               character_id: str, message_type: str) -> str:
-    """Generate one opener in character via brain.py's live Gemini
-    (initiation instruction, same audit pipeline as normal replies).
-    Never raises — falls back to a safe generic line so the scheduler
-    never dies on generation."""
+def _generate_proactive_message_live(conn: sqlite3.Connection,
+                                     user_id: str, character_id: str,
+                                     message_type: str) -> str | None:
+    """One opener in character via brain.py's live Gemini (initiation
+    instruction, same audit pipeline as normal replies; the Gemini
+    call itself runs the chat side's key rotation + model-fallback
+    chain). Returns None when no live text could be produced — the
+    caller decides whether a generic line will do or the send should
+    be retried later. Never raises."""
     mtype = message_type if message_type in MESSAGE_TYPES else "nudge"
     try:
         user = store.get_or_create_user(conn, user_id)
@@ -820,13 +829,33 @@ def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
     except Exception as e:
         print(f"[proactive] generation failed for {user_id}/{character_id}: "
               f"{e.__class__.__name__}", flush=True)
-    if mtype == "morning":
-        return "good morning. hope today treats you right."
-    if mtype == "winback":
-        return "hey you — I was just thinking about our chat. how's your day going?"
-    if mtype == "warmhour":
-        return "hey — I keep thinking about what you said earlier. tell me more?"
-    return "hey — it's been a while. you good?"
+    return None
+
+
+# Safe generic lines, used when the live model is unavailable.
+_FALLBACK_LINES = {
+    "morning": "good morning. hope today treats you right.",
+    "winback": "hey you — I was just thinking about our chat. "
+               "how's your day going?",
+    "warmhour": "hey — I keep thinking about what you said earlier. "
+                "tell me more?",
+}
+_FALLBACK_DEFAULT = "hey — it's been a while. you good?"
+
+
+def generate_proactive_message(conn: sqlite3.Connection, user_id: str,
+                               character_id: str,
+                               message_type: str) -> str:
+    """Generate one opener in character via brain.py's live Gemini
+    (initiation instruction, same audit pipeline as normal replies).
+    Never raises — falls back to a safe generic line so the scheduler
+    never dies on generation."""
+    text = _generate_proactive_message_live(conn, user_id, character_id,
+                                            message_type)
+    if text:
+        return text
+    mtype = message_type if message_type in MESSAGE_TYPES else "nudge"
+    return _FALLBACK_LINES.get(mtype, _FALLBACK_DEFAULT)
 
 
 def _channel_for(user_id: str) -> str:
@@ -1038,10 +1067,36 @@ def record_proactive_sent(user_id: str, character_id: str,
             conn.close()
 
 
+def _morning_sent_count(conn: sqlite3.Connection, user_id: str,
+                        today_str: str) -> int:
+    """How many morning messages this user has been sent today (at
+    most one per character pair — last_morning_date is per pair).
+    Morning bookkeeping lives in proactive_state, separate from the
+    users-table daily counter, so the morning class and the
+    ambient class can be capped independently."""
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM proactive_state "
+            "WHERE user_id = ? AND last_morning_date = ?",
+            (user_id, today_str)).fetchone()
+        return int(row["c"]) if row else 0
+    except Exception:
+        return 0
+
+
 def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
                               character_id: str, message_type: str) -> bool:
     """Generate + deliver one proactive message. Returns True when the
-    message was generated and handed to a delivery path."""
+    message was generated and handed to a delivery path.
+
+    Priority rules (2026-10-19): the morning message has first claim
+    on the day — it is exempt from the ambient-class daily ceiling
+    (its own per-user ceiling applies) and ambient-class sends wait
+    while today's morning window is open and no morning message has
+    been delivered yet. Non-morning sends only land 09:00-21:00 in
+    the user's timezone. A failed generation or send never records
+    the day as sent, so a due morning message retries on later
+    scheduler ticks inside its window."""
     _ensure_tables(conn)
     mtype = message_type if message_type in MESSAGE_TYPES else "nudge"
     user = _get_user(conn, user_id)
@@ -1058,10 +1113,62 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
             pass
         user["proactive_day"] = today_str
         user["proactive_sent_today"] = 0
-    if (user.get("proactive_sent_today") or 0) >= MAX_PROACTIVE_PER_DAY:
-        return False
+    window_end = local.replace(hour=config.PROACTIVE_MORNING_HOUR,
+                               minute=0, second=0, microsecond=0) \
+        + timedelta(hours=2)
+    morning_today = _morning_sent_count(conn, user_id, today_str)
+    if mtype == "morning":
+        # Morning priority: NOT subject to the ambient-class ceiling
+        # below — two midnight nudges once ate the whole daily cap
+        # and the 8am message never fired. The morning class has its
+        # own per-user ceiling instead.
+        if morning_today >= MAX_PROACTIVE_PER_DAY:
+            return False
+    else:
+        # Reasonable hours: nudges/ambient never land at midnight or
+        # late at night in HIS timezone.
+        if mtype in ("nudge", "ambient") and not (
+                AMBIENT_EARLIEST_HOUR <= local.hour
+                < AMBIENT_LATEST_HOUR):
+            print(f"[proactive] held {mtype} for "
+                  f"{user_id}/{character_id}: outside reasonable "
+                  f"hours (local {local:%H:%M})", flush=True)
+            return False
+        # Morning reservation: while today's morning window is still
+        # open and no morning message has reached this user yet,
+        # ambient-class sends wait — the morning message gets first
+        # claim on the day.
+        if local < window_end and morning_today == 0:
+            print(f"[proactive] held {mtype} for "
+                  f"{user_id}/{character_id}: today's morning message "
+                  f"has not been delivered yet", flush=True)
+            return False
+        # Ambient-class daily ceiling: at most MAX_PROACTIVE_PER_DAY
+        # non-morning sends a day; morning sends don't consume it.
+        ambient_today = (user.get("proactive_sent_today") or 0) \
+            - morning_today
+        if ambient_today >= MAX_PROACTIVE_PER_DAY:
+            return False
 
-    text = generate_proactive_message(conn, user_id, character_id, mtype)
+    if mtype == "morning":
+        # In-window retry: a failed live generation (Gemini 503/429
+        # storm) must not burn the day — no outbox row, no sent
+        # state, so the next scheduler tick inside the window tries
+        # again. Only in the window's last minutes do we fall back
+        # to the generic line, so a storm can delay the morning
+        # message but never silence it entirely.
+        text = _generate_proactive_message_live(
+            conn, user_id, character_id, mtype)
+        if text is None:
+            if local < window_end - timedelta(minutes=6):
+                print(f"[proactive] morning generation unavailable "
+                      f"for {user_id}/{character_id}; will retry "
+                      f"within the window", flush=True)
+                return False
+            text = _FALLBACK_LINES["morning"]
+    else:
+        text = generate_proactive_message(conn, user_id, character_id,
+                                          mtype)
     channel = _channel_for(user_id)
     msg = queue_proactive_message(conn, user_id, character_id, mtype, text,
                                   channel)
@@ -1101,6 +1208,14 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
             # The turn lands in her chat history so every client sees it.
             store.log_turn(conn, user_id, character_id, text, character_id)
         conn.commit()
+        if not ok:
+            # A failed send must not burn the day: no _record_sent,
+            # so a due morning message stays due and the next
+            # scheduler tick inside the window retries it.
+            print(f"[proactive] {mtype} delivery failed for "
+                  f"{user_id}/{character_id}; not recorded as sent",
+                  flush=True)
+            return False
     else:
         # Website: stays 'pending' until the PWA polls + acks it (the ack
         # writes the turn into history). Best-effort push right now.
