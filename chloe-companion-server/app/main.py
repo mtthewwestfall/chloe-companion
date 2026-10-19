@@ -3257,8 +3257,10 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
 
     Body: girl_id, caption, video_b64 (base64 mp4) OR image_b64 (base64
     webp/jpg/png), filename, user_id (empty = all users). Saves the file
-    under GENERATED_DIR and creates one post per target user. Used to
-    load hand-made Whispr Feed moments without Sogni generation.
+    under GENERATED_DIR and creates one post for the target user — or,
+    when user_id is empty, ONE global post every user's feed reads
+    (2026-10-19: no more one-copy-per-account fan-out). Used to load
+    hand-made Whispr Feed moments without Sogni generation.
     """
     _require_admin(request)
     import base64 as _b64
@@ -3293,18 +3295,18 @@ def admin_her_day_inject(body: HerDayInjectIn, request: Request):
     conn = _conn()
     try:
         if body.user_id:
-            user_ids = [body.user_id]
-        else:
-            user_ids = [r[0] for r in conn.execute(
-                "SELECT user_id FROM users").fetchall()]
-        created = 0
-        for uid in user_ids:
             store.save_her_day_post(
-                conn, uid, gid, post_type=kind,
+                conn, body.user_id, gid, post_type=kind,
                 media_url=media_url, caption=body.caption or "")
-            created += 1
-        return {"ok": True, "created": created, "media_url": media_url,
-                "users": len(user_ids)}
+            return {"ok": True, "created": 1, "media_url": media_url,
+                    "users": 1}
+        # One feed (2026-10-19): a post to everyone is a single global
+        # row that every user's feed read includes — not 88 copies.
+        store.save_her_day_post(
+            conn, store.HER_DAY_GLOBAL_USER, gid, post_type=kind,
+            media_url=media_url, caption=body.caption or "")
+        return {"ok": True, "created": 1, "media_url": media_url,
+                "users": "all"}
     finally:
         conn.close()
 
