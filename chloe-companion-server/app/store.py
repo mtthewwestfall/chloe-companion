@@ -1755,29 +1755,43 @@ def get_public_her_day_posts(conn: "sqlite3.Connection",
 
     Display rules (owner direction, 2026-10-17): the public feed shows
     only posts that carry a picture (non-empty media_url), and at most
-    ONE post per character per day — the earliest pictured post of her
-    day. Picture-less posts stay in the table (the per-user feed and
-    the media backfill still use them); they just never surface here.
+    ONE post per character per day. Picture-less posts stay in the
+    table (the per-user feed and the media backfill still use them);
+    they just never surface here.
+
+    Slot winner (owner direction, 2026-10-19): a global post — one the
+    admin posted to everyone (user_id = HER_DAY_GLOBAL_USER) — wins
+    her day's slot over auto-generated per-user renders; the earliest
+    global post of her day takes it. With no global post, the
+    earliest pictured post of her day wins, as before.
 
     Returns non-expired posts (no user_id exposed), newest first.
     Used by GET /api/v1/her-day/public and GET /today — no auth required.
     """
     rows = conn.execute(
         "SELECT girl_id, post_type, media_url, voice_url, caption,"
-        " created_at FROM her_day_posts"
+        " created_at, user_id FROM her_day_posts"
         " WHERE expires_at > datetime('now')"
         " AND created_at <= datetime('now')"
         " AND TRIM(COALESCE(media_url, '')) != ''"
         " ORDER BY created_at ASC, caption ASC",
     ).fetchall()
-    seen: set[tuple[str, str]] = set()
-    kept: list[dict] = []
+    winners: dict[tuple[str, str], dict] = {}
     for r in rows:
         d = dict(r)
         key = (d.get("girl_id") or "", (d.get("created_at") or "")[:10])
-        if key in seen:
-            continue
-        seen.add(key)
+        cur = winners.get(key)
+        if cur is None:
+            winners[key] = d
+        elif cur.get("user_id") != HER_DAY_GLOBAL_USER \
+                and d.get("user_id") == HER_DAY_GLOBAL_USER:
+            # A global (admin-posted) moment outranks the auto render
+            # currently holding the slot; later globals do not replace
+            # the earliest global.
+            winners[key] = d
+    kept = []
+    for d in winners.values():
+        d.pop("user_id", None)
         kept.append(d)
     kept.sort(key=lambda d: d.get("created_at") or "", reverse=True)
     return kept[:limit]
