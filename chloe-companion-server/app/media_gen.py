@@ -286,6 +286,31 @@ _FACE_CHECK_PROMPT = (
     "{\"same_person\": \"uncertain\"} if the second image has no "
     "clearly visible face."
 )
+_FACE_CHECK_PROMPT_NEUTRAL = (
+    "You are verifying identity between two photos. The FIRST image is "
+    "the reference portrait of a person. The SECOND image is a newly "
+    "generated photo that should depict the SAME person. Compare facial "
+    "features, face shape, eyes, nose, lips and hair — ignore clothing, "
+    "background, lighting and pose. Respond with ONLY this JSON: "
+    "{\"same_person\": \"yes\"} if it is clearly the same person, "
+    "{\"same_person\": \"no\"} if it is clearly a different person, or "
+    "{\"same_person\": \"uncertain\"} if the second image has no "
+    "clearly visible face."
+)
+_FACE_CHECK_PROMPT_ANIME = (
+    "You are verifying identity between two images of an anime-style "
+    "illustrated character. The FIRST image is the reference "
+    "illustration of the character. The SECOND image is a newly "
+    "generated illustration that should depict the SAME character. "
+    "Compare the character's identity features — hair color, hair "
+    "style and length, eye color and shape, face shape, and any "
+    "distinctive markings — ignore clothing, background, pose, and "
+    "minor differences in illustration rendering. Respond with ONLY "
+    "this JSON: {\"same_person\": \"yes\"} if it is clearly the same "
+    "character, {\"same_person\": \"no\"} if it is clearly a different "
+    "character, or {\"same_person\": \"uncertain\"} if the second "
+    "image has no clearly visible face."
+)
 _FACE_MAX_BYTES = 4_000_000
 
 
@@ -330,6 +355,38 @@ def _reference_bytes(avatar_url: str) -> tuple[bytes, str] | None:
     return None
 
 
+def _vision_verdict(ref: tuple[bytes, str], gen_raw: bytes,
+                    prompt: str) -> str:
+    """One vision identity call through the Gemini key pool.
+
+    Returns 'yes' | 'no' | 'uncertain', or 'error' when the call
+    itself failed or answered unusably. Exceptions propagate."""
+    import base64 as _b64
+    parts = [
+        {"text": prompt},
+        {"inline_data": {"mime_type": ref[1],
+                         "data": _b64.b64encode(ref[0]).decode()}},
+        {"inline_data": {"mime_type": "image/jpeg",
+                         "data": _b64.b64encode(gen_raw).decode()}},
+    ]
+    data = gemini_keys.post_json(
+        _FACE_GEMINI_URL,
+        {"contents": [{"role": "user", "parts": parts}],
+         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 100}},
+        timeout=45, source="whispr-facecheck")
+    if not data:
+        return "error"
+    text = "".join(p.get("text", "") for p in
+                   data["candidates"][0]["content"]["parts"]).strip()
+    if text.startswith("```"):
+        import re as _re
+        text = _re.sub(r"^```\w*\n?", "", text)
+        text = _re.sub(r"\n?```$", "", text)
+    import json as _json
+    verdict = str(_json.loads(text).get("same_person", "")).lower()
+    return verdict if verdict in ("yes", "no", "uncertain") else "error"
+
+
 def _face_verdict(girl: dict[str, Any], result_url: str) -> str:
     """'yes' | 'no' | 'uncertain' | 'unavailable'. Never raises."""
     try:
@@ -343,34 +400,53 @@ def _face_verdict(girl: dict[str, Any], result_url: str) -> str:
             gen_raw = f.read(_FACE_MAX_BYTES + 1)
         if not gen_raw or len(gen_raw) > _FACE_MAX_BYTES:
             return "unavailable"
-        import base64 as _b64
-        parts = [
-            {"text": _FACE_CHECK_PROMPT},
-            {"inline_data": {"mime_type": ref[1],
-                             "data": _b64.b64encode(ref[0]).decode()}},
-            {"inline_data": {"mime_type": "image/jpeg",
-                             "data": _b64.b64encode(gen_raw).decode()}},
-        ]
-        data = gemini_keys.post_json(
-            _FACE_GEMINI_URL,
-            {"contents": [{"role": "user", "parts": parts}],
-             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 100}},
-            timeout=45, source="whispr-facecheck")
-        if not data:
-            return "unavailable"
-        text = "".join(p.get("text", "") for p in
-                       data["candidates"][0]["content"]["parts"]).strip()
-        if text.startswith("```"):
-            import re as _re
-            text = _re.sub(r"^```\w*\n?", "", text)
-            text = _re.sub(r"\n?```$", "", text)
-        import json as _json
-        verdict = str(_json.loads(text).get("same_person", "")).lower()
-        return verdict if verdict in ("yes", "no", "uncertain") else "unavailable"
+        verdict = _vision_verdict(ref, gen_raw, _FACE_CHECK_PROMPT)
+        return "unavailable" if verdict == "error" else verdict
     except Exception as e:  # noqa: BLE001
         print(f"[media_gen] face check unavailable: {e.__class__.__name__}",
               flush=True)
         return "unavailable"
+
+
+def likeness_verdict(girl: dict[str, Any], result_url: str) -> str:
+    """Style-aware identity verdict for the Her Day likeness lock.
+
+    'yes' | 'no' | 'uncertain' | 'no_reference' | 'error'. Never
+    raises. Unlike _face_verdict (the chat gate, which fails open),
+    this distinguishes WHY no verdict exists: 'no_reference' means
+    the character has no readable avatar to compare against, while
+    'error' means the check itself failed — the Her Day gate treats
+    the first as uncheckable and the second as fail-closed.
+
+    Anime-illustrated characters are judged as illustrations
+    (identity features, not photorealism); male characters get the
+    gender-neutral photo prompt.
+    """
+    try:
+        ref = _reference_bytes(girl.get("avatar_url") or "")
+        if not ref:
+            return "no_reference"
+        gen_path = _local_media_file(result_url)
+        if not gen_path:
+            return "error"
+        with open(gen_path, "rb") as f:
+            gen_raw = f.read(_FACE_MAX_BYTES + 1)
+        if not gen_raw or len(gen_raw) > _FACE_MAX_BYTES:
+            return "error"
+        from . import characters
+        gid = str(girl.get("id") or "").strip().lower()
+        if characters.character_is_anime(gid):
+            prompt = _FACE_CHECK_PROMPT_ANIME
+        elif characters.character_gender(
+                gid, str(girl.get("persona") or "")) == "male":
+            prompt = _FACE_CHECK_PROMPT_NEUTRAL
+        else:
+            prompt = _FACE_CHECK_PROMPT
+        return _vision_verdict(ref, gen_raw, prompt)
+    except Exception as e:  # noqa: BLE001
+        print(f"[media_gen] likeness check error: {e.__class__.__name__}",
+              flush=True)
+        return "error"
 
 
 def run_generation(request_id: int) -> None:

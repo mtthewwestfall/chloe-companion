@@ -55,6 +55,17 @@ _FEMALE_CHARACTER_IDS = frozenset({
     "chloe", "mara", "isabella", "regan", "brooklyn", "hannah", "mia",
     "jordan", "brittany", "nova", "elise",
 })
+# Anime-illustrated characters: renders and identity checks must
+# judge them as illustrations (character identity features), never
+# as photographs.
+_ANIME_CHARACTER_IDS = frozenset({"rina", "sabrina"})
+
+
+def character_is_anime(character_id: str | None = None) -> bool:
+    """True when the character is an anime-style illustration."""
+    return (character_id or "").strip().lower() in _ANIME_CHARACTER_IDS
+
+
 _MALE_PERSONA_RE = re.compile(
     r"\b(?:you are\s+[^.!?\n]{0,80}?\ba man\b|a male companion|"
     r"her boyfriend|your boyfriend|he/him)\b",

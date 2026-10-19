@@ -331,6 +331,159 @@ def _render_image_plan(session: dict, prompt: str,
             pass
 
 
+def _render_herday_once(session: dict | None, names: list[str],
+                        scene: str, ref_path: str | None,
+                        moment_key: str) -> dict | None:
+    """One Her Day render attempt: Sogni plan session first (with the
+    session-dead recovery), Gemini image fallback when Sogni is
+    throttled, dead, or out of capacity. Returns the done outcome
+    dict, or None after logging the failure."""
+    from . import assist
+
+    outcome = None
+    if session:
+        outcome = _render_image_plan(
+            session, _sfw_prompt(names, scene), ref_path)
+    if outcome and outcome.get("status") == "session_dead" \
+            and not outcome.get("seam_healed"):
+        # Non-destructive recovery, same as give_gen: re-read the
+        # newest stored pair and retry once with it when another
+        # feature already refreshed the shared login; assist
+        # clears the pair (and tombstones the env seed) only when
+        # it is confirmed dead and a re-login has also failed.
+        # Skipped when the seam already healed and re-ran this
+        # render (outcome["seam_healed"] — _render_image_plan goes
+        # through assist._locked_render, which owns the heal).
+        recovered = None
+        try:
+            conn = db.connect()
+            try:
+                recovered = assist.resolve_dead_sogni_session(
+                    conn, session, caller="her_day")
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            recovered = None
+        if recovered:
+            outcome = _render_image_plan(
+                recovered, _sfw_prompt(names, scene), ref_path)
+    if not outcome or outcome.get("status") != "done" \
+            or not outcome.get("path"):
+        # Sogni throttled / dead / out of capacity (4089): render
+        # through the Gemini image fallback instead of posting a
+        # text card (2026-10-19 — Sogni's outage emptied the feed
+        # two days running).
+        sogni_status = (outcome or {}).get("status") or "no_session"
+        fb = assist.gemini_image_render(
+            _sfw_prompt(names, scene), ref_path)
+        if fb.get("status") == "done" and fb.get("path"):
+            print(f"[her_day] sfw image via Gemini fallback "
+                  f"({moment_key}); Sogni: {sogni_status}",
+                  flush=True)
+            outcome = fb
+    if not outcome or outcome.get("status") != "done" \
+            or not outcome.get("path"):
+        print(f"[her_day] sfw image failed ({moment_key}): "
+              f"{(outcome or {}).get('status')}: "
+              f"{(outcome or {}).get('detail')}",
+              flush=True)
+        return None
+    return outcome
+
+
+# ---------------------------------------------------------------------------
+# Likeness lock (2026-10-19, improvement #1): a Her Day image is only
+# ever attached to a post after a vision check confirms it actually
+# depicts the character(s) it claims to — checked against each
+# participant's canonical avatar, the same reference the generation
+# face-locks to. The chat photo gate (media_gen, PR #52) never
+# covered this pipeline: on 2026-10-19 a wrong-face render reached
+# every account because nothing checked Her Day output at all.
+#
+# Outcomes per candidate image:
+#   pass     — every participant verified ("yes"), or a participant
+#              has no readable reference to check against
+#              ("no_reference": uncheckable, the media_gen gate's
+#              availability stance — a girl with no avatar cannot
+#              be face-locked at render time either).
+#   mismatch — a participant is clearly someone else ("no") or has
+#              no clearly visible face ("uncertain": a Her Day
+#              moment is a portrait; an unverifiable face is not a
+#              pass). Fresh renders regenerate ONCE with the same
+#              prompt; a second mismatch is dropped, never posted.
+#   error    — the CHECK itself failed (vision pool down, bad
+#              reply). Fail-closed: the image is NOT posted
+#              unchecked, and no regeneration is burned on a dead
+#              checker. A pre-existing cache/pool file is left on
+#              disk in this case (a later run can verify it); a
+#              fresh render is deleted so an unverified file never
+#              sits at the canonical cache path.
+#
+# Verdicts are memoized per file (path + mtime + size) for the life
+# of the process — generate_daily re-enters per user, and the same
+# shared render must not be re-checked 88 times. 'error' verdicts
+# are NOT memoized (a recovered checker should re-verify).
+# Ops escape hatch: HER_DAY_LIKENESS=off restores pre-lock behavior.
+# ---------------------------------------------------------------------------
+_LIKENESS_MEMO: dict[str, str] = {}
+
+
+def _likeness_disabled() -> bool:
+    return os.environ.get("HER_DAY_LIKENESS", "").strip().lower() == "off"
+
+
+def _likeness_gate(participant_ids: list[str],
+                   girl_map: dict[str, dict[str, Any]],
+                   image_path: str, moment_key: str) -> str:
+    """'pass' | 'mismatch' | 'error' for a candidate Her Day image."""
+    from . import media_gen
+
+    try:
+        st = os.stat(image_path)
+        key = f"{image_path}|{st.st_mtime_ns}|{st.st_size}"
+    except OSError:
+        return "error"
+    if key in _LIKENESS_MEMO:
+        return _LIKENESS_MEMO[key]
+    result = "pass"
+    url = "/generated/" + os.path.basename(image_path)
+    for pid in participant_ids:
+        girl = girl_map.get(pid) or {"id": pid, "avatar_url": ""}
+        verdict = media_gen.likeness_verdict(girl, url)
+        if verdict in ("no", "uncertain"):
+            print(f"[likeness] rejected {pid} {moment_key} "
+                  f"(verdict: {verdict})", flush=True)
+            result = "mismatch"
+            break
+        if verdict == "error":
+            print(f"[likeness] check unavailable for {pid} "
+                  f"{moment_key}; failing closed", flush=True)
+            result = "error"
+            break
+        if verdict == "no_reference":
+            print(f"[likeness] no reference for {pid}; {moment_key} "
+                  f"posts unchecked", flush=True)
+    if result != "error":
+        _LIKENESS_MEMO[key] = result
+    return result
+
+
+def _likeness_gate_for(participant_ids: list[str], avatar_url: str,
+                       image_path: str, moment_key: str) -> str:
+    """Gate from _generate_sfw_image's arguments: the primary girl is
+    participant_ids[0] and her avatar is the one the caller resolved;
+    partners (group moments) resolve from the roster."""
+    girl_map: dict[str, dict[str, Any]] = {}
+    if participant_ids:
+        girl_map[participant_ids[0]] = {
+            "id": participant_ids[0], "avatar_url": avatar_url or ""}
+    if len(participant_ids) > 1:
+        for g in _get_all_girls():
+            girl_map.setdefault(g["id"], g)
+    return _likeness_gate(participant_ids, girl_map, image_path,
+                          moment_key)
+
+
 def _generate_sfw_image(names: list[str], avatar_url: str,
                         participant_ids: list[str], moment_key: str,
                         scene: str, date_str: str) -> str:
@@ -338,12 +491,31 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
 
     Sogni first; when Sogni is throttled, dead, or out of capacity the
     Gemini image fallback (assist.gemini_image_render) renders instead.
-    Returns the /generated/... url, or "" on any failure — the caller
-    renders a styled text card instead.
+    Every candidate — fresh render (either path) or today's cached
+    file — passes the likeness lock before it is returned. Returns
+    the /generated/... url, or "" on any failure — the caller renders
+    a styled text card instead.
     """
     dest = _herday_image_path(participant_ids, moment_key, date_str)
+    url = "/generated/" + os.path.basename(dest)
     if os.path.exists(dest):
-        return "/generated/" + os.path.basename(dest)
+        if _likeness_disabled():
+            return url
+        gate = _likeness_gate_for(participant_ids, avatar_url, dest,
+                                  moment_key)
+        if gate == "pass":
+            return url
+        if gate == "error":
+            # Unverified files are never served; the file stays on
+            # disk so a later run can verify it once the checker
+            # recovers.
+            return ""
+        # Mismatch: a poisoned cache file (e.g. rendered before the
+        # lock existed). Drop it and render fresh below.
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
     try:
         session = _plan_session()
     except Exception as e:  # noqa: BLE001
@@ -351,63 +523,34 @@ def _generate_sfw_image(names: list[str], avatar_url: str,
         session = None
     ref_path = None
     try:
-        from . import assist
         from .media_gen import _fetch_reference
 
         ref_path = _fetch_reference(avatar_url or "")
-        outcome = None
-        if session:
-            outcome = _render_image_plan(
-                session, _sfw_prompt(names, scene), ref_path)
-        if outcome and outcome.get("status") == "session_dead" \
-                and not outcome.get("seam_healed"):
-            # Non-destructive recovery, same as give_gen: re-read the
-            # newest stored pair and retry once with it when another
-            # feature already refreshed the shared login; assist
-            # clears the pair (and tombstones the env seed) only when
-            # it is confirmed dead and a re-login has also failed.
-            # Skipped when the seam already healed and re-ran this
-            # render (outcome["seam_healed"] — _render_image_plan goes
-            # through assist._locked_render, which owns the heal).
-            recovered = None
+        for _attempt in range(2):
+            outcome = _render_herday_once(
+                session, names, scene, ref_path, moment_key)
+            if not outcome:
+                return ""
+            os.makedirs(config.GENERATED_DIR, exist_ok=True)
+            shutil.copyfile(outcome["path"], dest)
+            if _likeness_disabled():
+                return url
+            gate = _likeness_gate_for(participant_ids, avatar_url,
+                                      dest, moment_key)
+            if gate == "pass":
+                return url
+            # Never leave an unverified/rejected file at the
+            # canonical cache path.
             try:
-                from . import assist
-
-                conn = db.connect()
-                try:
-                    recovered = assist.resolve_dead_sogni_session(
-                        conn, session, caller="her_day")
-                finally:
-                    conn.close()
-            except Exception:  # noqa: BLE001
-                recovered = None
-            if recovered:
-                outcome = _render_image_plan(
-                    recovered, _sfw_prompt(names, scene), ref_path)
-        if not outcome or outcome.get("status") != "done" \
-                or not outcome.get("path"):
-            # Sogni throttled / dead / out of capacity (4089): render
-            # through the Gemini image fallback instead of posting a
-            # text card (2026-10-19 — Sogni's outage emptied the feed
-            # two days running).
-            sogni_status = (outcome or {}).get("status") or "no_session"
-            fb = assist.gemini_image_render(
-                _sfw_prompt(names, scene), ref_path)
-            if fb.get("status") == "done" and fb.get("path"):
-                print(f"[her_day] sfw image via Gemini fallback "
-                      f"({moment_key}); Sogni: {sogni_status}",
-                      flush=True)
-                outcome = fb
-        if not outcome or outcome.get("status") != "done" \
-                or not outcome.get("path"):
-            print(f"[her_day] sfw image failed ({moment_key}): "
-                  f"{(outcome or {}).get('status')}: "
-                  f"{(outcome or {}).get('detail')}",
-                  flush=True)
-            return ""
-        os.makedirs(config.GENERATED_DIR, exist_ok=True)
-        shutil.copyfile(outcome["path"], dest)
-        return "/generated/" + os.path.basename(dest)
+                os.unlink(dest)
+            except OSError:
+                pass
+            if gate == "error":
+                return ""
+            if _attempt == 0:
+                print(f"[likeness] regenerating {moment_key} once "
+                      f"after mismatch", flush=True)
+        return ""
     except Exception as e:  # noqa: BLE001
         print(f"[her_day] sfw image failed ({moment_key}): {e}", flush=True)
         return ""
@@ -926,6 +1069,16 @@ def backfill_today_media(date_str: str | None = None,
                 # today's cache name so the row references today's
                 # dated file like a fresh render would.
                 pool_src = _pool_file_for(participants, moment_key)
+                if pool_src and not _likeness_disabled() \
+                        and _likeness_gate(
+                            participants, girl_map, pool_src,
+                            moment_key) != "pass":
+                    # Likeness lock: a pooled render is verified
+                    # before it is attached to today's posts, same
+                    # as a fresh render. A rejected (or unverifiable)
+                    # pool file falls through to a fresh gated
+                    # render below.
+                    pool_src = None
                 if pool_src:
                     dest = _herday_image_path(participants, moment_key,
                                                date_str)
