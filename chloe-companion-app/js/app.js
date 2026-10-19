@@ -307,6 +307,12 @@
     const girl = CHARACTERS.find((c) => c.id === girlId) || CHARACTERS[1];
     currentGirl = girl;
     $('chatName').textContent = girl.name;
+    // A sheet opened in another girl's chat must never fire into this
+    // one (2026-10-19): close open sheets and forget their girl.
+    ['presetSheet', 'customVideoSheet'].forEach((sid) => {
+      try { closeSheet(sid); } catch (e) {}
+    });
+    presetSheetGirl = null;
     paintCharacterStatus();
     paintStreak();
     paintWorld();
@@ -1118,13 +1124,18 @@ let presetSheetGirl = null;
   }
 
   async function sendPresetVideo(presetName) {
+    // The girl is ALWAYS the one whose chat is open at tap time
+    // (2026-10-19). A preset sheet built in another girl's chat is
+    // stale the moment the chat switches; trusting its captured girl
+    // let one girl's clips land in another girl's thread (a Chloe
+    // clip served, captioned "Chloe", inside Brooklyn's chat).
+    const girl = { id: currentGirl.id, name: currentGirl.name };
     addText('him', `send me a ${presetName} video`);
     typingRow.classList.remove('hidden');
     scrollBottom();
     await new Promise((r) => setTimeout(r, 1200));
     typingRow.classList.add('hidden');
     try {
-  const girl = presetSheetGirl || { id: currentGirl.id, name: currentGirl.name };
   const res = await ApiClient.requestPreset(girl.id, presetName);
       // Girl switch while the clip was being fetched: her media never
       // lands in another girl's chat (2026-10-18).
@@ -1135,8 +1146,8 @@ let presetSheetGirl = null;
         addText('her', 'let me find that for you… one sec', {}, girl.name);
       }
     } catch (e) {
-      if (currentGirl && presetSheetGirl && currentGirl.id === presetSheetGirl.id) {
-        addText('her', 'hmm, couldn\'t pull that one up. try again?', {}, presetSheetGirl.name);
+      if (currentGirl && currentGirl.id === girl.id) {
+        addText('her', 'hmm, couldn\'t pull that one up. try again?', {}, girl.name);
       }
     }
   }
