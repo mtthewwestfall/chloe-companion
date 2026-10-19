@@ -281,6 +281,131 @@ def stage_for_ask_text(text: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Gives follow the conversation (improvement #3, 2026-10-19): a give
+# lands mid-conversation, so its stage and her line read the
+# conversation it lands in — the active roleplay scene (brain's
+# documented read interface, brain.get_scene_state) and his recent
+# turns — instead of the progression counter and a generic label
+# alone. The stage read runs through the ONE ask->stage mapping
+# above; scene/caption reads never raise and never gate a give.
+# ---------------------------------------------------------------------------
+
+def _his_recent_texts(conn: Any, user_id: str, girl_id: str,
+                      limit: int = 6) -> list[str]:
+    """His recent turn texts, oldest first. The stage vocabulary is
+    read over HIS words (plus the scene brief, which is his casting)
+    — never over hers, so her own lines can't escalate a pick."""
+    try:
+        return [(t.get("text") or "")
+                for t in store.recent_turns(conn, user_id, limit, girl_id)
+                if t.get("role") == "user"]
+    except Exception:  # noqa: BLE001 — a context read must never break a give
+        return []
+
+
+def _active_scene_brief(conn: Any, user_id: str, girl_id: str) -> str:
+    """The active scene's brief (his casting, verbatim), or "" when
+    no scene is active. brain is imported lazily: it documents
+    get_scene_state as the read interface for other features, and a
+    lazy import keeps this module's import graph unchanged."""
+    try:
+        from . import brain
+        scene = brain.get_scene_state(conn, user_id, girl_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    if scene and scene.get("state") == "active":
+        return (scene.get("brief") or "").strip()
+    return ""
+
+
+def scene_stage_hint(conn: Any, user_id: str, girl_id: str,
+                     extra_text: str = "") -> int | None:
+    """The stage the current conversation is at, or None when it
+    names none: the active scene brief and his recent turns read
+    through stage_for_ask_text. Callers clamp to
+    store.give_stage_cap — this hint never widens anyone's ceiling,
+    so a heated scene in a group/event chat still serves <= stage 3."""
+    texts = []
+    brief = _active_scene_brief(conn, user_id, girl_id)
+    if brief:
+        texts.append(brief)
+    if extra_text:
+        texts.append(extra_text)
+    texts.extend(_his_recent_texts(conn, user_id, girl_id))
+    if not texts:
+        return None
+    return stage_for_ask_text(" \n".join(texts))
+
+
+def _is_event_account(user_id: str | None) -> bool:
+    """Synthetic Telegram group/event account (the shared surface
+    behind store.give_stage_cap's stage-3 rule)."""
+    uid = (user_id or "").strip()
+    return uid.startswith("tg_") and store.give_stage_cap(uid) == 3
+
+
+def give_caption(conn: Any, user_id: str, girl_id: str, *,
+                 kind: str = "video",
+                 fallback: str | None = None) -> str | None:
+    """One short in-character line to land WITH a give, referencing
+    what they were just talking about: the active scene when there
+    is one, else the recent turns riding in the generation context.
+    Generated through brain.gemini_generate (the chat model seam)
+    and speech-policed like every other generated line. ANY failure
+    — synthetic event account (shared surface; its caption stays the
+    plain label), no conversation to reference, model down, policed
+    or overlong line — returns `fallback`, so every caller keeps its
+    existing line verbatim. Never raises."""
+    try:
+        if not user_id or _is_event_account(user_id):
+            return fallback
+        brief = _active_scene_brief(conn, user_id, girl_id)
+        try:
+            turns = store.recent_turns(conn, user_id, 6, girl_id)
+        except Exception:  # noqa: BLE001
+            turns = []
+        if not brief and not turns:
+            return fallback
+        from . import brain
+        character = characters.get_character(girl_id, user_id=user_id) or {}
+        name = character.get("name") or girl_id
+        context = {
+            "character": character,
+            "character_name": name,
+            "recent": [{"role": t.get("role"),
+                        "text": t.get("text") or ""} for t in turns],
+        }
+        noun = "picture" if kind == "image" else "video"
+        if brief:
+            ask = (f"You two are in the middle of a scene he set: {brief}"
+                   f"\n\nWrite ONE short line in your voice to send him "
+                   f"with this {noun} of you — it continues that scene, "
+                   f"so reference what you two were just doing and "
+                   f"talking about. Pick the moment up, don't restart "
+                   f"it. Warm and wanting, one line, no quotation "
+                   f"marks, no labels.")
+        else:
+            ask = (f"Write ONE short line in your voice to send him "
+                   f"with this {noun} of you. Reference what you two "
+                   f"were just talking about in the messages above — "
+                   f"pick the moment up, don't restart it or change "
+                   f"the subject. Warm and wanting, one line, no "
+                   f"quotation marks, no labels.")
+        line = brain.gemini_generate(ask, context, girl_id)
+        if line:
+            line = " ".join(line.strip().strip('"').split())
+            if line and len(line) <= 220 \
+                    and not brain._polices_his_speech(line):
+                print(f"[give_follow] caption girl={girl_id} "
+                      f"user={user_id}", flush=True)
+                return line
+    except Exception as e:  # noqa: BLE001 — a caption must never break a give
+        print(f"[give_follow] caption failed for {girl_id}: {e}",
+              flush=True)
+    return fallback
+
+
+# ---------------------------------------------------------------------------
 # Per-(user, girl) state: in-flight flag + cooldown clocks. In-process,
 # like main's _LAST_PRESET_SENT — a chat-speed feature, not a queue.
 # ---------------------------------------------------------------------------
@@ -305,7 +430,13 @@ def _reset_state_for_tests() -> None:
 
 def _next_stage(conn: Any, user_id: str, girl_id: str) -> int:
     """Her next give-escalation stage for this user — the same
-    progression the preset endpoint serves: (gives % 9) + 1."""
+    progression the preset endpoint serves: (gives % 9) + 1. When
+    the conversation is somewhere (scene_stage_hint), the render
+    continues THAT stage instead — clamped to the same cap."""
+    cap = store.give_stage_cap(user_id)
+    hint = scene_stage_hint(conn, user_id, girl_id)
+    if hint is not None:
+        return min(int(hint), cap)
     try:
         row = conn.execute(
             "SELECT gives_received FROM user_give_progress "
@@ -314,7 +445,7 @@ def _next_stage(conn: Any, user_id: str, girl_id: str) -> int:
         gives = int(row[0]) if row else 0
     except Exception:  # noqa: BLE001 — progression is a nicety here
         gives = 0
-    return (gives % store.give_stage_cap(user_id)) + 1
+    return (gives % cap) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -530,9 +661,13 @@ def _deliver_preset(conn: Any, user_id: str, girl_id: str,
         attachment["size"] = size
     attachments = [attachment]
     if line is None:
-        line = ("here, babe — hold onto this one while I make your new one."
-                if during_render else
-                "here, babe — one of mine, just for you.")
+        default = ("here, babe — hold onto this one while I make your "
+                   "new one." if during_render else
+                   "here, babe — one of mine, just for you.")
+        # Improvement #3: her line references the conversation when
+        # it can; the standing lines remain the fallback verbatim.
+        line = give_caption(conn, user_id, girl_id, kind=kind,
+                            fallback=default)
     store.log_turn(conn, user_id, girl_id, line, girl_id, attachments)
     if preset.get("id"):
         try:
@@ -685,6 +820,9 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
     want_stage = stage_for_ask_text(trigger_text)
     try:
         conn = db.connect()
+        if want_stage is None:
+            # The ask named no stage; the scene/recent turns may.
+            want_stage = scene_stage_hint(conn, user_id, girl_id)
         girl = characters.get_character(girl_id, user_id=user_id)
         scene = _build_scene(conn, user_id, girl_id, stage, trigger_text)
         outcome = _render_fresh(conn, girl, kind, scene, stage)
@@ -702,7 +840,9 @@ def _run_live_give_job(user_id: str, girl_id: str, kind: str,
                 "name": f"{girl_id}-{kind}.{ext}",
                 "size": size,
             }]
-            store.log_turn(conn, user_id, girl_id, _delivery_line(kind),
+            line = give_caption(conn, user_id, girl_id, kind=kind,
+                                fallback=_delivery_line(kind))
+            store.log_turn(conn, user_id, girl_id, line,
                            girl_id, attachments)
             delivered = True
             print(f"[live_give] {girl_id} {kind} delivered for "
@@ -857,7 +997,8 @@ def maybe_start_live_give(conn: Any, user_id: str, girl_id: str,
                 action = "start"
         if action == "preset":
             preset = _pick_preset(conn, user_id, gid, det["kind"],
-                                  stage_for_ask_text(text))
+                                  stage_for_ask_text(text)
+                                  or scene_stage_hint(conn, user_id, gid))
             if not preset:
                 _log_eval(gid, user_id, det, assist_claimed,
                           "holdover_no_preset")
