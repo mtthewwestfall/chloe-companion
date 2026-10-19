@@ -6807,6 +6807,105 @@ async def await_sogni_client(session: dict):
     return await _create_plan_client(session)
 
 
+# ---------------------------------------------------------------------------
+# Gemini image fallback (2026-10-19). When the Sogni plan session is
+# throttled, dead, or out of monthly fair-use capacity (error 4089),
+# image surfaces can still render through the Gemini image model on
+# the shared key pool — the exact recipe the Prompt Studio ships
+# (app/studio.py): model gemini-2.5-flash-image, generateContent, the
+# reference image as an inlineData part, BLOCK_NONE safety settings.
+# Returns the Sogni outcome shape ({"status", "path", "detail"}) so a
+# caller can swap it in for a failed Sogni outcome. The rendered file
+# is a temp file the caller owns (copy it, like a Sogni outcome path).
+# Disable with IMAGE_FALLBACK=off.
+# ---------------------------------------------------------------------------
+_IMAGE_MODEL = "gemini-2.5-flash-image"
+_IMAGE_URL = ("https://generativelanguage.googleapis.com/v1beta/models/"
+              + _IMAGE_MODEL + ":generateContent")
+_IMAGE_SAFETY = [
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+     "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+     "threshold": "BLOCK_NONE"},
+]
+_IMAGE_MIMES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".webp": "image/webp"}
+_IMAGE_EXTS = {"image/jpeg": ".jpg", "image/png": ".png",
+               "image/webp": ".webp"}
+
+
+def _image_fallback_enabled() -> bool:
+    return os.environ.get("IMAGE_FALLBACK", "gemini").strip().lower() \
+        not in ("off", "0", "none", "no")
+
+
+def gemini_image_render(prompt: str, ref_path: str | None = None) -> dict:
+    """One Gemini image render. Outcome dict like _sogni_plan_render's:
+    {"status": "done", "path": <temp file>, "detail": ...} on success,
+    a non-done status with a detail otherwise. Never raises."""
+    if not _image_fallback_enabled():
+        return {"status": "fallback_off",
+                "detail": "IMAGE_FALLBACK is off"}
+    parts: list[dict] = [{"text": prompt}]
+    if ref_path:
+        try:
+            with open(ref_path, "rb") as f:
+                ref_bytes = f.read()
+            ext = os.path.splitext(ref_path)[1].lower()
+            parts.append({"inlineData": {
+                "mimeType": _IMAGE_MIMES.get(ext, "image/png"),
+                "data": base64.b64encode(ref_bytes).decode("ascii")}})
+        except Exception as e:  # noqa: BLE001 — render text-only instead
+            print(f"[image_fallback] reference unreadable ({e}); "
+                  "rendering without it", flush=True)
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        "safetySettings": [dict(s) for s in _IMAGE_SAFETY],
+    }
+    try:
+        data = gemini_keys.post_json(_IMAGE_URL, payload, timeout=120,
+                                     source="image-fallback")
+    except Exception as e:  # noqa: BLE001
+        return {"status": "pool_error", "detail": str(e)}
+    if not data:
+        return {"status": "pool_exhausted",
+                "detail": "gemini pool returned nothing"}
+    feedback = data.get("promptFeedback") or {}
+    if feedback.get("blockReason"):
+        return {"status": "refused",
+                "detail": str(feedback.get("blockReason"))}
+    for cand in data.get("candidates") or []:
+        text_bits: list[str] = []
+        for part in ((cand.get("content") or {}).get("parts")) or []:
+            inline = part.get("inlineData") or part.get("inline_data") \
+                or {}
+            if inline.get("data"):
+                mime = str(inline.get("mimeType") or "image/png")
+                try:
+                    raw = base64.b64decode(inline["data"])
+                    fd, path = tempfile.mkstemp(
+                        suffix=_IMAGE_EXTS.get(mime, ".png"),
+                        prefix="gemini_img_")
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(raw)
+                except Exception as e:  # noqa: BLE001
+                    return {"status": "write_failed", "detail": str(e)}
+                return {"status": "done", "path": path,
+                        "detail": "gemini image fallback"}
+            if part.get("text"):
+                text_bits.append(str(part["text"]))
+        finish = str(cand.get("finishReason") or "")
+        if finish and finish != "STOP":
+            return {"status": "refused", "detail": finish}
+        if text_bits:
+            return {"status": "no_image",
+                    "detail": " ".join(text_bits)[:200]}
+    return {"status": "no_image", "detail": "no candidates"}
+
+
 def _locked_render(loop, session: dict, make_coro) -> tuple[dict, dict | None]:
     """One render at a time on the shared login, each starting from the
     newest stored pair and persisting the rotated pair before the next
