@@ -796,6 +796,26 @@ def _lease_default_calls() -> int:
         return 100000
 
 
+def _lease_truthful_cap_on() -> bool:
+    """Pool fix (2026-10-18): the per-source active-lease cap counts
+    only leases that can still represent real concurrency. Off (0)
+    restores the original Stage-2 accounting (every unexpired
+    'active' row counts, however dead its holder is)."""
+    return _flag("GEMINI_LEASE_TRUTHFUL_CAP", "1")
+
+
+def _lease_idle_reap_s() -> float:
+    """Seconds of charge silence after which an active lease is
+    treated as a dead holder (its scan finished, paused, or was
+    interrupted — continuations run under fresh job ids) and reaped
+    at the next issuance for the same source."""
+    try:
+        return max(60.0, float(os.environ.get(
+            "GEMINI_LEASE_IDLE_REAP_S", "1800")))
+    except (TypeError, ValueError):
+        return 1800.0
+
+
 def _lease_row_to_dict(r) -> dict:
     return {
         "lease_id": r["lease_id"],
@@ -853,22 +873,66 @@ def _issue_lease(source: str, job_id: str, calls: int,
                              or existing["budget_used"]
                              < existing["budget_total"]):
                 return _lease_row_to_dict(existing)
-            active = conn.execute(
-                """SELECT COUNT(*) AS n FROM gemini_leases
-                   WHERE source = ? AND status = 'active'
-                     AND (expires_at IS NULL OR expires_at > ?)""",
-                (source, now),
-            ).fetchone()["n"]
+            truthful = enforce_caps and _lease_truthful_cap_on()
+            if truthful:
+                # Pool fix (2026-10-18): reap this source's dead
+                # holders before counting. A lease silent for the
+                # idle window belongs to a scan that finished,
+                # paused, or died; its continuation runs under a
+                # fresh job id, so the row is not concurrency.
+                # Leases predating last_charge_at fall back to their
+                # created_at; an unparseable row is never reaped.
+                reaped = conn.execute(
+                    """UPDATE gemini_leases SET status = 'expired'
+                       WHERE source = ? AND status = 'active'
+                         AND (expires_at IS NULL OR expires_at > ?)
+                         AND COALESCE(last_charge_at,
+                                      CAST(strftime('%s', created_at)
+                                           AS REAL), ?)
+                             < ?""",
+                    (source, now, now,
+                     now - _lease_idle_reap_s()),
+                )
+                if reaped.rowcount:
+                    conn.commit()
+                    logger.warning(
+                        "gemini_keys: reaped %d idle lease(s) for "
+                        "source %s (silent > %ss) before cap check",
+                        reaped.rowcount, source,
+                        int(_lease_idle_reap_s()))
+            if truthful:
+                # The manager's own default accounting leases are
+                # issued cap-exempt by design and must not eat the
+                # source's explicit slots; an exhausted lease can
+                # never charge again, so it is not concurrency
+                # either. Both still count when the flag is off.
+                active = conn.execute(
+                    """SELECT COUNT(*) AS n FROM gemini_leases
+                       WHERE source = ? AND status = 'active'
+                         AND (expires_at IS NULL OR expires_at > ?)
+                         AND job_id NOT LIKE 'default:%'
+                         AND budget_used < budget_total""",
+                    (source, now),
+                ).fetchone()["n"]
+            else:
+                active = conn.execute(
+                    """SELECT COUNT(*) AS n FROM gemini_leases
+                       WHERE source = ? AND status = 'active'
+                         AND (expires_at IS NULL OR expires_at > ?)""",
+                    (source, now),
+                ).fetchone()["n"]
             if enforce_caps and active >= _lease_max_active_per_source():
                 return None
             lease_id = "lease_" + _secrets.token_hex(8)
             conn.execute(
                 """INSERT INTO gemini_leases
                        (lease_id, source, job_id, budget_total,
-                        budget_used, created_at, expires_at, status)
-                   VALUES (?, ?, ?, ?, 0, datetime('now'), ?, 'active')""",
+                        budget_used, created_at, expires_at, status,
+                        last_charge_at)
+                   VALUES (?, ?, ?, ?, 0, datetime('now'), ?, 'active',
+                           ?)""",
                 (lease_id, source, job_id, calls,
-                 now + max(60.0, float(ttl_s))),
+                 now + max(60.0, float(ttl_s)), now),
             )
             conn.commit()
             row = conn.execute(
@@ -921,13 +985,15 @@ def _lease_charge(lease_id: str) -> bool:
         conn = db.connect()
         try:
             _ensure_table(conn)
+            _now = time.time()
             cur = conn.execute(
                 """UPDATE gemini_leases
-                   SET budget_used = budget_used + 1
+                   SET budget_used = budget_used + 1,
+                       last_charge_at = ?
                    WHERE lease_id = ? AND status = 'active'
                      AND budget_used < budget_total
                      AND (expires_at IS NULL OR expires_at > ?)""",
-                (lease_id, time.time()),
+                (_now, lease_id, _now),
             )
             conn.commit()
             return (cur.rowcount or 0) > 0
@@ -1719,9 +1785,17 @@ def _ensure_table(conn) -> None:
             budget_used  INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL DEFAULT (datetime('now')),
             expires_at   REAL,
-            status       TEXT NOT NULL DEFAULT 'active'
+            status       TEXT NOT NULL DEFAULT 'active',
+            last_charge_at REAL
         )
     """)
+    # Pool fix (2026-10-18): per-lease last-charge timestamp so the
+    # active-lease cap can tell live concurrency from dead holders.
+    lcols = [r["name"] for r in
+             conn.execute("PRAGMA table_info(gemini_leases)").fetchall()]
+    if lcols and "last_charge_at" not in lcols:
+        conn.execute(
+            "ALTER TABLE gemini_leases ADD COLUMN last_charge_at REAL")
     # Stage 3: per-key/model daily burn counters (Pacific day),
     # learned per-key/model daily limits (observed exhaustion only),
     # and the per-source daily spend ledger (calls/failures/paid
