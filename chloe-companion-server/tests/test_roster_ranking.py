@@ -81,6 +81,7 @@ class RosterRankingTest(unittest.TestCase):
     def _say(self, user, girl, n, role="user"):
         conn = self._conn()
         try:
+            store.get_or_create_user(conn, user)
             for _ in range(n):
                 store.log_turn(conn, user, role, "hi", character_id=girl)
         finally:
@@ -89,6 +90,7 @@ class RosterRankingTest(unittest.TestCase):
     def _ask(self, user, girl, n):
         conn = self._conn()
         try:
+            store.get_or_create_user(conn, user)
             for _ in range(n):
                 store.create_media_request(conn, user, girl, "regular", "pic")
         finally:
