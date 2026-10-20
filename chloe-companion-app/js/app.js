@@ -265,8 +265,10 @@
   /* ---------- roster (server-driven picker) ---------- */
   // The picker list comes from GET /api/v1/characters (with the auth token
   // when signed in; owner-scoped characters appear only for their owner —
-  // the server decides). Curated cards keep their look/copy and come first;
-  // anything else on the roster (creations, future girls) is appended from
+  // the server decides). The SERVER's order is the display order (it ranks
+  // the roster by real engagement, improvement #10); curated cards only
+  // contribute their look/copy to the girl the server placed there.
+  // Anything else on the roster (creations, future girls) is built from
   // server fields. On any fetch failure the curated list stays as-is
   // (offline/demo fallback).
   async function loadRoster() {
@@ -279,13 +281,15 @@
       const data = await res.json();
       const roster = (data && data.characters) || [];
       if (!Array.isArray(roster) || !roster.length) return;
-      const onRoster = new Set(roster.map((c) => String(c.id || '').toLowerCase()));
-      const merged = CURATED_CHARACTERS.filter((c) => onRoster.has(c.id));
-      const known = new Set(merged.map((c) => c.id));
+      const curatedById = new Map(CURATED_CHARACTERS.map((c) => [c.id, c]));
+      const merged = [];
+      const known = new Set();
       roster.forEach((rc) => {
         const id = String(rc.id || '').toLowerCase();
         if (!id || known.has(id)) return;
         known.add(id);
+        const curated = curatedById.get(id);
+        if (curated) { merged.push(curated); return; }
         merged.push({
           id,
           name: rc.name || id,
