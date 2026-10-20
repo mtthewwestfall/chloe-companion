@@ -1757,6 +1757,89 @@ def set_her_day_post_media(conn: "sqlite3.Connection", post_id: int,
         "SELECT * FROM her_day_posts WHERE id = ?", (post_id,)).fetchone())
 
 
+def get_visible_her_day_post(conn: "sqlite3.Connection", post_id: int,
+                             user_id: str) -> dict | None:
+    """A Her Day row this user may act on: their own row, or the one
+    global row (HER_DAY_GLOBAL_USER — the one-feed row every user
+    sees). Another user's personal row is invisible here -> None."""
+    row = conn.execute(
+        "SELECT * FROM her_day_posts WHERE id = ?", (post_id,)).fetchone()
+    if row is None:
+        return None
+    d = dict(row)
+    if d.get("user_id") not in (user_id, HER_DAY_GLOBAL_USER):
+        return None
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Her Day chat seeds (improvement #4, 2026-10-19): tapping a Her Day
+# post's chat button parks a one-shot seed for (user, girl); her next
+# chat reply is generated with the tapped moment in context, so she
+# continues the moment instead of starting cold. One active seed per
+# pair — a newer tap supersedes an older one.
+# ---------------------------------------------------------------------------
+
+def _ensure_her_day_seed_table(conn: "sqlite3.Connection") -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS her_day_chat_seeds (
+               id           INTEGER PRIMARY KEY AUTOINCREMENT,
+               user_id      TEXT NOT NULL,
+               character_id TEXT NOT NULL DEFAULT 'chloe',
+               seed         TEXT NOT NULL DEFAULT '',
+               created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+               consumed_at  TEXT
+           )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_her_day_seeds_user "
+        "ON her_day_chat_seeds(user_id, character_id, consumed_at)")
+
+
+def save_her_day_chat_seed(conn: "sqlite3.Connection", user_id: str,
+                           girl_id: str, seed: str) -> None:
+    """Park the seed for his next chat with her. Any still-unconsumed
+    seed for the pair is superseded (consumed) — only the latest tap
+    counts."""
+    _ensure_her_day_seed_table(conn)
+    gid = (girl_id or "chloe").strip().lower()
+    conn.execute(
+        "UPDATE her_day_chat_seeds SET consumed_at = datetime('now') "
+        "WHERE user_id = ? AND character_id = ? AND consumed_at IS NULL",
+        (user_id, gid))
+    conn.execute(
+        "INSERT INTO her_day_chat_seeds (user_id, character_id, seed) "
+        "VALUES (?, ?, ?)",
+        (user_id, gid, (seed or "").strip()[:900]))
+    conn.commit()
+
+
+def pop_her_day_chat_seed(conn: "sqlite3.Connection", user_id: str,
+                          girl_id: str,
+                          max_age_hours: int = 12) -> str | None:
+    """The pending Her Day seed for this pair, consumed as it's read:
+    the newest unconsumed seed inside the freshness window, or None.
+    A stale seed is consumed too — it never fires late."""
+    _ensure_her_day_seed_table(conn)
+    gid = (girl_id or "chloe").strip().lower()
+    row = conn.execute(
+        "SELECT id, seed FROM her_day_chat_seeds "
+        "WHERE user_id = ? AND character_id = ? AND consumed_at IS NULL "
+        "ORDER BY id DESC LIMIT 1", (user_id, gid)).fetchone()
+    if row is None:
+        return None
+    fresh = conn.execute(
+        "SELECT 1 FROM her_day_chat_seeds WHERE id = ? "
+        "AND created_at >= datetime('now', ?)",
+        (row["id"], f"-{int(max_age_hours)} hours")).fetchone()
+    conn.execute(
+        "UPDATE her_day_chat_seeds SET consumed_at = datetime('now') "
+        "WHERE id = ?", (row["id"],))
+    conn.commit()
+    if not fresh:
+        return None
+    return (row["seed"] or "") or None
+
+
 def cleanup_expired_her_day(conn: "sqlite3.Connection") -> int:
     """Delete expired Her Day posts. Returns count deleted.
 

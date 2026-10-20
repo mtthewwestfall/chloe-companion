@@ -1206,6 +1206,22 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
         parts.append(
             "SOMETHING YOU JUST DID FOR HIM:\n" + assist_result + closer
         )
+    # Her Day tap-through (improvement #4, 2026-10-19): this chat was
+    # opened from her feed post, and the tapped moment rides in
+    # context for ONE reply (the chat endpoint pops the parked seed).
+    # She continues that exact moment instead of greeting him cold.
+    _hdm = (context.get("her_day_moment") or "").strip()
+    if _hdm:
+        parts.append(
+            "THIS CHAT WAS JUST OPENED FROM YOUR HER DAY POST — "
+            "continue that exact moment:\n" + _hdm
+            + "\n\nYou are still IN that moment as you answer: same "
+              "place, same mood, the same thing going on around you. "
+              "Talk about what you're doing there like it's "
+              "happening right now, and pull them into it — what "
+              "you see, what's next, what you want them to notice. "
+              "Don't recap the post like a photo they saw earlier; "
+              "live it.")
     return "\n\n".join(parts)
 
 
