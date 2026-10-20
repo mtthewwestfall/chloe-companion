@@ -36,6 +36,7 @@ import asyncio
 import hashlib
 import os
 import random
+import re
 import shutil
 import threading
 from datetime import datetime, timedelta
@@ -768,6 +769,158 @@ def _fallback_caption(girl_name: str, moment_key: str,
     return fallbacks.get(moment_key, f"thinking of you today")
 
 
+# ---------------------------------------------------------------------------
+# Voice notes with a memory (improvement #5, 2026-10-20): the day's
+# voice note is the one thing she proactively SAYS to him out loud, so
+# the words she speaks cite ONE real detail from their actual shared
+# history — the scene they're in, their streak, something he told
+# her, his name — read from the same stores the chat reads. Never
+# fabricated: no detail in the stores means no citation, and the
+# spoken text stays today's caption verbatim. The feed caption itself
+# is unchanged (it is shared across users); only the spoken words are
+# personal, per (user, girl).
+# ---------------------------------------------------------------------------
+
+def _is_synthetic_event_user(user_id: str | None) -> bool:
+    """Synthetic Telegram group/event account (a shared surface, not
+    a person): tg_ ids in the group range carry give_stage_cap 3 —
+    the same test live_give uses. Their voice notes are never
+    personalized."""
+    uid = (user_id or "").strip()
+    return uid.startswith("tg_") and store.give_stage_cap(uid) == 3
+
+
+_NAME_MEMORY_RE = re.compile(r"^his name is ([^.;]+)\.?$",
+                             re.IGNORECASE)
+
+# Stored memories are third-person statements (brain.extract_memories:
+# "He likes craft beer."). These prefixes rephrase truthfully into a
+# second-person fragment she can say to him out loud; anything that
+# does not match is skipped rather than mangled.
+_MEMORY_FRAGMENTS = (
+    ("he likes ", "how much you like "),
+    ("he loves ", "how much you love "),
+    ("he doesn't like ", "how you don't like "),
+    ("he does not like ", "how you don't like "),
+    ("he works as ", "you working as "),
+)
+
+_BAD_ACCOUNT_NAMES = {"", "user", "guest", "unknown", "telegram",
+                      "none", "null", "anon", "anonymous"}
+
+
+def _voice_memory_detail(conn, user_id: str,
+                         girl_id: str) -> tuple[str, str] | None:
+    """(kind, opener sentence) for the most salient TRUE detail of
+    this (user, girl) relationship, or None. Salience order: the
+    active roleplay scene, their streak, a stored memory fact, his
+    name. Every value is read from its store at call time; any read
+    failure just moves to the next source. Never raises."""
+    uid = (user_id or "").strip()
+    gid = (girl_id or "chloe").strip().lower() or "chloe"
+    if not uid or _is_synthetic_event_user(uid):
+        return None
+    # 1. The scene the two of them are in the middle of.
+    try:
+        from . import brain
+        scene = brain.get_scene_state(conn, uid, gid)
+        if scene and scene.get("state") == "active":
+            brief = " ".join((scene.get("brief") or "").split())[:90]
+            brief = brief.rstrip(".").strip()
+            if brief:
+                return ("scene",
+                        "I keep thinking about that scene of ours — "
+                        f"{brief}.")
+    except Exception:  # noqa: BLE001 — a detail read must never break a post
+        pass
+    user: dict[str, Any] = {}
+    try:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?",
+                           (uid,)).fetchone()
+        if row:
+            user = dict(row)
+    except Exception:  # noqa: BLE001
+        user = {}
+    # 2. Their streak — the count comes from the streak store itself,
+    #    on the same user-local dates the proactive system uses.
+    try:
+        from . import proactive as _pro
+        local = _pro._user_local_now(user.get("timezone"))
+        streak = store.get_streak(
+            conn, uid, gid, local.strftime("%Y-%m-%d"),
+            (local - timedelta(days=1)).strftime("%Y-%m-%d"))
+        if streak >= 3:
+            return ("streak",
+                    f"Day {streak} of us talking every single day — "
+                    "I'm still smiling about it.")
+    except Exception:  # noqa: BLE001
+        pass
+    # 3. Something he actually told her (stored per user+character).
+    #    A boundary is not small talk for a voice note; skip those.
+    name_from_memory = ""
+    try:
+        rows = store.recall_memories(conn, uid, character_id=gid,
+                                     limit=10)
+    except Exception:  # noqa: BLE001
+        rows = []
+    for mem in rows:
+        text = (mem.get("text") or "").strip()
+        if not text:
+            continue
+        m = _NAME_MEMORY_RE.match(text)
+        if m:
+            if not name_from_memory:
+                name_from_memory = m.group(1).strip()
+            continue
+        if (mem.get("mem_type") or "") in ("boundary", "tone"):
+            continue
+        low = text.lower()
+        if low.startswith("he shared: "):
+            rest = text[len("He shared: "):].strip().rstrip(".")
+            if rest:
+                return ("memory",
+                        "I keep thinking about what you told me — "
+                        f"{rest}.")
+        for prefix, spoken in _MEMORY_FRAGMENTS:
+            if low.startswith(prefix):
+                frag = spoken + text[len(prefix):].strip().rstrip(".")
+                return ("memory",
+                        f"I was just thinking about {frag}.")
+    # 4. His name — the one he told her beats the account name.
+    name = name_from_memory
+    if not name:
+        raw = (user.get("name") or "").strip()
+        if raw and "@" not in raw:
+            name = raw.split()[0]
+    name = (name or "").strip().strip(".,!")
+    if (name and name.lower() not in _BAD_ACCOUNT_NAMES
+            and len(name) <= 30
+            and any(c.isalpha() for c in name)):
+        return ("name", f"Hey {name}.")
+    return None
+
+
+def _voice_note_text(conn, user_id: str, girl_id: str,
+                     caption: str) -> str:
+    """The words she actually speaks for a Her Day voice post: the
+    caption, opened by one real shared detail when one exists for
+    this user. No detail (or a synthetic event account) → the caption
+    verbatim, exactly as before."""
+    base = (caption or "").strip()
+    if not base:
+        return base
+    try:
+        detail = _voice_memory_detail(conn, user_id, girl_id)
+    except Exception:  # noqa: BLE001
+        detail = None
+    if not detail:
+        return base
+    kind, opener = detail
+    print(f"[her_day] voice note for {user_id}/{girl_id} cites "
+          f"{kind}", flush=True)
+    return f"{opener} {base[0].upper()}{base[1:]}"
+
+
 def _get_all_girls() -> list[dict[str, Any]]:
     """All characters for Whispr Feed: [{id, name, avatar_url}]."""
     try:
@@ -886,8 +1039,14 @@ def generate_for_user_girl(user_id: str, girl_id: str,
             if post_type == "voice":
                 try:
                     from . import voice as _voice
+                    # Improvement #5: she speaks the caption opened
+                    # by one real shared detail (scene / streak /
+                    # memory / his name) when one exists for this
+                    # user — the feed caption itself stays as-is.
+                    spoken = _voice_note_text(conn, user_id, gid,
+                                              caption)
                     voice_url = (_voice.maybe_generate_voice_note(
-                        caption, user_id, character_id=gid) or "")
+                        spoken, user_id, character_id=gid) or "")
                     if not voice_url:
                         # Voice notes are an owner-approved paid-TTS
                         # feature (app/voice.py is stubbed until then);
