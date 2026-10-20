@@ -33,7 +33,7 @@
 <body>
 <header>
   <h1>💜 Mara Filter</h1>
-  <p>Live face morph v11 — Mara mirrors you: smile, talk, laugh and blink and she does it too. Runs entirely in your browser; nothing is uploaded.</p>
+  <p>Live face morph v12 — Mara mirrors you: smile, talk, laugh and blink and she does it too. Runs entirely in your browser; nothing is uploaded.</p>
 </header>
 
 <div id="stage">
@@ -243,7 +243,10 @@ function expTri(d) {
   const cx = (d[0].x + d[1].x + d[2].x) / 3, cy = (d[0].y + d[1].y + d[2].y) / 3;
   return d.map(p => {
     const vx = p.x - cx, vy = p.y - cy, L = Math.hypot(vx, vy) || 1;
-    const push = 0.05 * L + 0.8;
+    // CONSTANT 1px push. A proportional push (v11) stretched the long thin
+    // hair triangles into radiating streaks; 1px closes the hairline seam
+    // gaps without distorting any triangle's shape.
+    const push = 1.0;
     return { x: p.x + vx / L * push, y: p.y + vy / L * push };
   });
 }
