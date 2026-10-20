@@ -274,3 +274,100 @@ def her_day_flavor(conn, girl_id: str, date_str: str,
                 f"her posts today live in that mood.")
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Improvement #4 (2026-10-19): Her Day posts talk back. moment_hint maps
+# her world day onto Her Day moment keys so the feed's moment can BE a
+# moment from the day she's actually living; moment_context is the
+# structured form of her world state for one moment of one day — the
+# feed attaches it to posts, and a chat opened from a post is seeded
+# with it so she continues that moment.
+# ---------------------------------------------------------------------------
+
+_EVENT_GROUP_MOMENTS = {
+    "coffee": "coffee_date",
+    "gym": "gym_buddies",
+    "cooking": "cooking_together",
+}
+
+# (keywords in her planned activity/place, Her Day solo moment) —
+# checked in this order against the whole day's text.
+_SOLO_MOMENT_KEYWORDS = [
+    (("gym", "workout"), "gym"),
+    (("cooking", "recipe", "bakery", "baking"), "cooking"),
+    (("coffee", "market", "café", "cafe"), "morning_coffee"),
+    (("walk", "boardwalk", "errands", "thrift", "vintage", "gallery",
+      "museum", "photos", "run "), "out_and_about"),
+    (("getting ready", "music up loud", "dance"), "getting_ready"),
+    (("book", "winding down", "stargazing", "tea"), "bedtime"),
+]
+
+
+def moment_hint(girl_id: str, date_str: str) -> dict[str, str]:
+    """Which Her Day moment her world day points at, if any.
+
+    Pure and deterministic (reads plan_for/events_for, no store
+    writes): {"group_moment": key, "group_partner": girl_id} when she
+    shares a mappable event today, and/or {"solo_moment": key} when
+    one of her planned activities matches a solo moment. Empty dict
+    when her day maps to nothing — callers fall back to legacy picks.
+    """
+    gid = (girl_id or "chloe").strip().lower()
+    out: dict[str, str] = {}
+    try:
+        for ev in events_for(date_str):
+            if gid not in (ev["girl_a"], ev["girl_b"]):
+                continue
+            key = _EVENT_GROUP_MOMENTS.get(ev["kind"])
+            if key:
+                out["group_moment"] = key
+                out["group_partner"] = (
+                    ev["girl_b"] if ev["girl_a"] == gid else ev["girl_a"])
+            break
+        plan = plan_for(gid, date_str)
+        day_text = " ".join(
+            f"{a} {p}" for a, p in plan["blocks"]).lower()
+        for keywords, moment in _SOLO_MOMENT_KEYWORDS:
+            if any(k in day_text for k in keywords):
+                out["solo_moment"] = moment
+                break
+    except Exception:
+        return {}
+    return out
+
+
+def moment_context(conn, girl_id: str, date_str: str,
+                   block_idx: int | None = None) -> dict[str, Any]:
+    """Structured world state for one girl-day (optionally one block):
+    her mood, what she's doing and where in that block, and her
+    shared event today if she has one. Fail-open: {} on any error.
+    """
+    try:
+        gid = (girl_id or "chloe").strip().lower()
+        plan = ensure_day(conn, gid, date_str)
+        evs = _events(conn, date_str)
+        if block_idx is None:
+            block_idx = _block_index(datetime.now(TZ).hour)
+        block_idx = max(0, min(block_idx, len(BLOCKS) - 1))
+        activity, place = plan["blocks"][block_idx]
+        event_text = ""
+        for ev in evs:
+            if gid in (ev["girl_a"], ev["girl_b"]):
+                if ev["block_idx"] == block_idx:
+                    activity, place = ev["activity"], ev["place"]
+                event_text = ev["text"]
+                break
+        line = (f"she's feeling {plan['mood']}; in that part of her "
+                f"day she's {activity} at {place}")
+        if event_text:
+            line += (f"; also today: "
+                     f"{event_text[0].lower()}{event_text[1:]}")
+        return {
+            "girl_id": gid, "date": date_str, "mood": plan["mood"],
+            "activity": activity, "place": place,
+            "block": BLOCKS[block_idx][1], "event_text": event_text,
+            "line": line,
+        }
+    except Exception:
+        return {}

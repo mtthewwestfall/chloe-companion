@@ -1519,6 +1519,17 @@ def chat(body: ChatIn, request: Request):
             elif 1 <= lifetime_before <= 4:
                 context["plant_thread"] = True
 
+        # Her Day tap-through (improvement #4): if he opened this chat
+        # from one of her posts, the parked seed fires on THIS reply —
+        # she continues that exact moment (brain renders it as a
+        # continue-the-moment block). One-shot: the pop consumes it.
+        try:
+            _hd_seed = store.pop_her_day_chat_seed(conn, user_id, cid)
+        except Exception:
+            _hd_seed = None
+        if _hd_seed:
+            context["her_day_moment"] = _hd_seed
+
         # Live give creation — FIRST CLAIM on an explicit ask
         # (2026-10-14 routing fix): for the four private girls, an
         # owner's plain "make me a video of you ..." ask is evaluated
@@ -2685,6 +2696,39 @@ def browser_job_status(request: Request, job_id: str):
 # POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
 # POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls) (on-demand)
 # ---------------------------------------------------------------------------
+def _attach_world_mood(conn, posts: list) -> None:
+    """Improvement #4: every Her Day post carries her Living World
+    mood — and what she's doing in that part of her day — for the
+    post's own date, computed from the same deterministic world the
+    chat reads, so the feed and the chat never disagree about her
+    day. Fail-open per post: a world hiccup never breaks the feed."""
+    try:
+        from datetime import datetime as _wdt, timezone as _wtz
+        from . import world as _world
+    except Exception:
+        return
+    for p in posts:
+        try:
+            created = p.get("created_at") or ""
+            block_idx = None
+            try:
+                _dt = _wdt.strptime(
+                    created, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=_wtz.utc).astimezone(_world.TZ)
+                block_idx = _world._block_index(_dt.hour)
+            except Exception:
+                block_idx = None
+            ctx = _world.moment_context(
+                conn, p.get("girl_id") or "chloe", created[:10],
+                block_idx=block_idx)
+            if ctx:
+                p["world"] = {"mood": ctx["mood"],
+                              "activity": ctx["activity"],
+                              "place": ctx["place"]}
+        except Exception:
+            continue
+
+
 @app.get("/api/v1/her-day")
 def get_her_day(request: Request, girl_id: str = ""):
     user_id = _current_user_id(request)
@@ -2693,6 +2737,7 @@ def get_her_day(request: Request, girl_id: str = ""):
         store.cleanup_expired_her_day(conn)
         gid = (girl_id or "").strip().lower() or None
         posts = store.get_her_day_posts(conn, user_id, girl_id=gid)
+        _attach_world_mood(conn, posts)
         return {"posts": posts}
     finally:
         conn.close()
@@ -2708,6 +2753,7 @@ def get_unified_feed(request: Request):
     try:
         store.cleanup_expired_her_day(conn)
         posts = store.get_her_day_posts(conn, user_id, girl_id=None)
+        _attach_world_mood(conn, posts)
         # Attach girl info (owner-scoped girls resolve only for their owner)
         girl_map = {g["id"]: g for g in characters.public_list(user_id)}
         for p in posts:
@@ -2735,6 +2781,7 @@ def get_public_her_day():
     try:
         store.cleanup_expired_her_day(conn)
         posts = store.get_public_her_day_posts(conn, limit=24)
+        _attach_world_mood(conn, posts)
         girl_map = {g["id"]: g for g in characters.public_list()}
         for p in posts:
             g = girl_map.get(p.get("girl_id"), {})
@@ -3344,6 +3391,79 @@ def view_her_day(body: HerDayViewIn, request: Request):
     try:
         ok = store.mark_her_day_viewed(conn, body.post_id, user_id)
         return {"ok": ok}
+    finally:
+        conn.close()
+
+
+class HerDayOpenChatIn(BaseModel):
+    post_id: int = 0
+    slug: str = ""
+
+
+def _her_day_moment_seed(conn, post: dict) -> str:
+    """The chat seed for a tapped Her Day post: the moment itself
+    (caption, kind, day) plus her Living World state for that day —
+    mood, what she's doing in that part of her day, her shared event
+    — so her first reply continues the moment she's actually living,
+    not a generic greeting."""
+    gid = (post.get("girl_id") or "chloe").strip().lower()
+    date_str = (post.get("created_at") or "")[:10]
+    cap = (post.get("caption") or "").strip()
+    kind = {"image": "a photo moment", "voice": "a voice-note moment",
+            "video": "a video moment"}.get(
+                post.get("post_type") or "", "a text moment")
+    seed = (f"Her Day post from {date_str}: {kind} — "
+            f"her caption on it: \"{cap}\"")
+    try:
+        from datetime import datetime as _hdt, timezone as _htz
+        from . import world as _world
+        block_idx = None
+        try:
+            _dt = _hdt.strptime(
+                post.get("created_at") or "",
+                "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=_htz.utc).astimezone(_world.TZ)
+            block_idx = _world._block_index(_dt.hour)
+        except Exception:
+            block_idx = None
+        ctx = _world.moment_context(conn, gid, date_str,
+                                    block_idx=block_idx)
+        if ctx:
+            seed += f". In her world that day, {ctx['line']}."
+    except Exception:
+        pass
+    return seed
+
+
+@app.post("/api/v1/her-day/open-chat")
+def her_day_open_chat(body: HerDayOpenChatIn, request: Request):
+    """Feed -> chat bridge (improvement #4): park a one-shot seed so
+    her first reply in the chat opened from this post continues the
+    tapped moment. Resolves his own rows and the one global feed row
+    by post_id, and public moments by slug (the public feed carries
+    no row id). Another user's personal post is a 404, never a seed.
+    """
+    user_id = _current_user_id(request)
+    conn = _conn()
+    try:
+        post = None
+        if body.post_id:
+            post = store.get_visible_her_day_post(
+                conn, body.post_id, user_id)
+        if post is None and body.slug:
+            post = store.find_public_post_by_slug(conn, body.slug)
+        if post is None:
+            raise HTTPException(status_code=404,
+                                detail="post_not_found")
+        gid = (post.get("girl_id") or "chloe").strip().lower()
+        # Resolve through the character gate like the chat endpoint:
+        # unknown or not-his private ids fall back to Chloe, so a seed
+        # can only ever land on a girl he can actually chat with.
+        character = characters.get_character(gid, user_id)
+        gid = character["id"]
+        store.save_her_day_chat_seed(
+            conn, user_id, gid, _her_day_moment_seed(conn, post))
+        return {"ok": True, "girl_id": gid}
     finally:
         conn.close()
 

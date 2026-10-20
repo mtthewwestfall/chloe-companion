@@ -196,19 +196,48 @@ def validate_her_day_media_url(conn, url: str) -> str | None:
     return None
 
 
+def _world_hints(date_str: str,
+                 girl_ids: list[str]) -> dict[str, dict]:
+    """Improvement #4: world.moment_hint per girl — which moment her
+    Living World day points at. Fail-open: any world failure means no
+    hints and the legacy seeded picks, exactly as before."""
+    try:
+        from . import world as _world
+        return {gid: _world.moment_hint(gid, date_str)
+                for gid in girl_ids}
+    except Exception:
+        return {}
+
+
 def _plan_day(girl_id: str, date_str: str,
-              all_girls: list[dict[str, Any]]) -> list[tuple]:
+              all_girls: list[dict[str, Any]],
+              hint: dict | None = None) -> list[tuple]:
     """One moment per girl per day (owner direction, 2026-10-17).
 
     Returns a single [(moment_key, is_group, partner_ids, partner_names)].
     Seeded by girl_id + date: reproducible, different per girl, different
     per day. Mix: mostly solo visual moments, some group moments, the
     occasional voice rant or text thought.
+
+    Improvement #4: when the Living World gives her a hint for today
+    (world.moment_hint), the pick IS that moment — her one post comes
+    from the day she's actually living: a shared event becomes the
+    group post with that partner; a world activity matching a solo
+    moment becomes that moment. No hint -> the legacy seeded pick,
+    byte-for-byte.
     """
     seed = int(hashlib.md5(
         f"{girl_id}|{date_str}|herday-v3".encode()).hexdigest()[:8], 16)
     rng = random.Random(seed)
     others = [g for g in all_girls if g["id"] != girl_id]
+    hint = hint or {}
+
+    gkey = hint.get("group_moment") or ""
+    gpartner = hint.get("group_partner") or ""
+    if gkey in GROUP_MOMENTS and gpartner:
+        partner = next((g for g in others if g["id"] == gpartner), None)
+        if partner is not None:
+            return [(gkey, True, [partner["id"]], [partner["name"]])]
 
     roll = rng.random()
     if others and roll < 0.20:
@@ -222,21 +251,30 @@ def _plan_day(girl_id: str, date_str: str,
         return [("voice_rant", False, [], [])]
     if roll < 0.40:
         return [(rng.choice(["shower_thought", "craving"]), False, [], [])]
+    skey = hint.get("solo_moment") or ""
+    if skey in SOLO_MOMENTS:
+        return [(skey, False, [], [])]
     solo_pool = ["morning_coffee", "gym", "cooking", "out_and_about",
                  "getting_ready", "bedtime"]
     return [(rng.choice(solo_pool), False, [], [])]
 
 
 def _build_all_plans(all_girls: list[dict[str, Any]],
-                     date_str: str) -> dict[str, list[tuple]]:
+                     date_str: str,
+                     hints: dict | None = None) -> dict[str, list[tuple]]:
     """Build the day's one-moment plans, making group moments symmetric
     WITHOUT giving anyone a second post.
 
     If A's one moment is a group moment with B, it becomes B's one post
     too (same image, B's own caption) — unless B already kept a group
     moment of her own or was already claimed by an earlier group moment.
+
+    hints (improvement #4): per-girl world.moment_hint results, passed
+    through to _plan_day so a girl's moment can come from her world day.
     """
-    plans = {g["id"]: _plan_day(g["id"], date_str, all_girls)
+    hints = hints or {}
+    plans = {g["id"]: _plan_day(g["id"], date_str, all_girls,
+                                hint=hints.get(g["id"]))
              for g in all_girls}
     girl_map = {g["id"]: g for g in all_girls}
     claimed: set[str] = set()
@@ -778,7 +816,8 @@ def generate_for_user_girl(user_id: str, girl_id: str,
 
         if plan is None:
             all_girls = _get_all_girls()
-            plan = _plan_day(gid, date_str, all_girls)
+            plan = _plan_day(gid, date_str, all_girls,
+                             hint=_world_hints(date_str, [gid]).get(gid))
 
         posts = []
         for (moment_key, is_group, pids, pnames) in plan:
@@ -821,6 +860,25 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                 _wf = _world.her_day_flavor(conn, gid, date_str, pids)
                 if _wf:
                     _story = (_story + " " + _wf).strip()
+                # Improvement #4: her world activity at this post's
+                # slot rides into the caption too — the post reads
+                # like a moment from the day she's actually living.
+                try:
+                    from datetime import timezone as _tz
+                    _slot_dt = datetime.strptime(
+                        _slot_for(gid, date_str), "%Y-%m-%d %H:%M:%S")
+                    _ctx = _world.moment_context(
+                        conn, gid, date_str,
+                        block_idx=_world._block_index(
+                            _slot_dt.replace(tzinfo=_tz.utc)
+                            .astimezone(_world.TZ).hour))
+                    if _ctx:
+                        _story = (
+                            _story + f" In that part of her day she "
+                            f"is {_ctx['activity']} at "
+                            f"{_ctx['place']}.").strip()
+                except Exception:
+                    pass
             except Exception:
                 pass
             caption = _generate_caption(girl_name, moment_key, desc,
@@ -867,7 +925,9 @@ def generate_for_all_girls(user_id: str) -> int:
     """
     all_girls = _get_all_girls()
     date_str = datetime.now().strftime("%Y-%m-%d")
-    plans = _build_all_plans(all_girls, date_str)
+    plans = _build_all_plans(
+        all_girls, date_str,
+        hints=_world_hints(date_str, [g["id"] for g in all_girls]))
     girl_map = {g["id"]: g for g in all_girls}
     total = 0
     for g in all_girls:
@@ -1006,7 +1066,9 @@ def backfill_today_media(date_str: str | None = None,
     """
     date_str = date_str or datetime.now().strftime("%Y-%m-%d")
     all_girls = _get_all_girls()
-    plans = _build_all_plans(all_girls, date_str)
+    plans = _build_all_plans(
+        all_girls, date_str,
+        hints=_world_hints(date_str, [g["id"] for g in all_girls]))
     girl_map = {g["id"]: g for g in all_girls}
     report: dict[str, Any] = {
         "date": date_str, "pairs_processed": 0, "pairs_skipped": 0,
