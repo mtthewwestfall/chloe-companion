@@ -2322,7 +2322,11 @@ async def girl_videos(girl_id: str, request: Request):
 # delivered instead, or `failed`), the reason recorded on the row;
 # session/throttle transients park it back in `pending` with a waiting
 # note. POST /api/v1/admin/custom-videos/sweep-backlog runs the one-shot
-# backlog sweep over every pending request.
+# backlog sweep over every pending request. Improvement #6 (2026-10-19):
+# submit also delivers an instant taste clip from her own library into
+# the chat (custom_video.deliver_taste_clip), so a parked render never
+# leaves him staring at nothing; the response carries taste_url when
+# one was delivered.
 # POST /api/v1/custom-videos [auth] {girl_id, description} -> {id, status}
 # GET  /api/v1/custom-videos [auth] -> {requests:[...]}
 # GET  /api/v1/admin/custom-videos (admin) -> {requests:[...]}
@@ -2345,13 +2349,22 @@ def create_custom_video(body: CustomVideoIn, request: Request):
         character = characters.get_character(body.girl_id, user_id)
         cid = character["id"]
         req = store.save_custom_request(conn, user_id, cid, description)
+        # Improvement #6: land the instant taste clip in his chat with
+        # her NOW — the render below can park behind Sogni for hours,
+        # and he shouldn't stare at an empty thread meanwhile.
+        # Best-effort (deliver_taste_clip never raises); the request
+        # itself proceeds exactly as before.
+        taste_url = custom_video.deliver_taste_clip(conn, req)
         # Attempt Sogni generation in the background when configured;
         # otherwise it stays pending for manual fulfillment.
         if assist.stored_sogni_session(conn):
             custom_video.spawn_custom_generation_with_login(req["id"])
         elif config.SOGNI_API_KEY:
             custom_video.spawn_custom_generation(req["id"])
-        return {"id": req["id"], "status": req["status"]}
+        resp = {"id": req["id"], "status": req["status"]}
+        if taste_url:
+            resp["taste_url"] = taste_url
+        return resp
     finally:
         conn.close()
 
