@@ -1071,6 +1071,12 @@ def _gemini_system_text(context: dict[str, Any], character_id: str) -> str:
     _wl = (context.get("world_line") or "").strip()
     if _wl:
         parts.append(_wl)
+    # Improvement #8 (2026-10-19): cross-surface continuity — set by
+    # the chat endpoint only when stored session facts prove his last
+    # activity before this turn was on the other surface.
+    _cs = (context.get("cross_surface_line") or "").strip()
+    if _cs:
+        parts.append(_cs)
     mems = [m for m in (context.get("relevant_memories") or []) if m]
     if mems:
         parts.append(

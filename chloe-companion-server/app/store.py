@@ -447,11 +447,26 @@ def set_user_name(conn: sqlite3.Connection, user_id: str, name: str) -> None:
     conn.commit()
 
 
-def create_session(conn: sqlite3.Connection, user_id: str, token: str) -> None:
-    conn.execute(
-        "INSERT INTO auth_sessions (token, user_id) VALUES (?, ?)",
-        (token, user_id),
-    )
+def create_session(conn: sqlite3.Connection, user_id: str, token: str,
+                   origin: str = "") -> None:
+    """Mint a session. `origin` records the surface that minted it
+    (improvement #8, 2026-10-19): 'telegram' for /auth/telegram,
+    'web' for email login/verify and app-link redeem, '' when the
+    caller doesn't know (legacy). The minting endpoint is the one
+    place the backend knows the surface for certain, so the fact is
+    stored here and never guessed later."""
+    try:
+        conn.execute(
+            "INSERT INTO auth_sessions (token, user_id, origin, "
+            "last_seen_at) VALUES (?, ?, ?, datetime('now'))",
+            (token, user_id, origin or ""),
+        )
+    except sqlite3.OperationalError:
+        # Pre-migration table (no origin columns yet): mint as before.
+        conn.execute(
+            "INSERT INTO auth_sessions (token, user_id) VALUES (?, ?)",
+            (token, user_id),
+        )
     conn.commit()
 
 
@@ -460,6 +475,113 @@ def get_session_user_id(conn: sqlite3.Connection, token: str) -> str | None:
         "SELECT user_id FROM auth_sessions WHERE token = ?", (token,)
     ).fetchone()
     return row["user_id"] if row else None
+
+
+def get_session(conn: sqlite3.Connection, token: str) -> dict[str, Any] | None:
+    """Full session row with surface facts; missing columns on a
+    pre-migration table read as '' (no surface knowledge)."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM auth_sessions WHERE token = ?", (token,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    d = dict(row)
+    return {"user_id": d.get("user_id"),
+            "origin": d.get("origin") or "",
+            "last_seen_at": d.get("last_seen_at") or "",
+            "created_at": d.get("created_at") or ""}
+
+
+def note_session_activity(conn: sqlite3.Connection,
+                          token: str) -> tuple[str, str]:
+    """Record an authenticated use of a session (improvement #8):
+    bumps last_seen_at to now and returns (origin, previous
+    last_seen_at) — the caller needs the PREVIOUS value to know what
+    his last activity on this surface was before this request.
+    Fail-open: any storage problem returns ('', '') and changes
+    nothing; activity stamping must never break a request."""
+    try:
+        row = conn.execute(
+            "SELECT origin, last_seen_at FROM auth_sessions "
+            "WHERE token = ?", (token,)
+        ).fetchone()
+        if not row:
+            return "", ""
+        origin = row["origin"] or ""
+        prev = row["last_seen_at"] or ""
+        conn.execute(
+            "UPDATE auth_sessions SET last_seen_at = datetime('now') "
+            "WHERE token = ?", (token,))
+        conn.commit()
+        return origin, prev
+    except Exception:
+        return "", ""
+
+
+# How recent other-surface activity must be for her to remark on the
+# switch (improvement #8). A day covers "earlier" / "last night"
+# without letting a week-old session mint a false sense of continuity.
+CROSS_SURFACE_WINDOW_HOURS = 24
+
+
+def _parse_session_ts(ts: str) -> datetime | None:
+    try:
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def cross_surface_hint(conn: sqlite3.Connection, user_id: str,
+                       current_surface: str, current_token: str,
+                       current_prev_seen: str,
+                       now: datetime | None = None) -> dict[str, Any] | None:
+    """The cross-surface continuity fact for this chat turn
+    (improvement #8, 2026-10-19), or None.
+
+    Returns {"surface": <other surface>, "last_seen_at": <ts>} when
+    the stored session facts say his most recent activity before
+    this request was on the OTHER surface, within the last
+    CROSS_SURFACE_WINDOW_HOURS hours. Everything derives from
+    session rows minted by the surface's own auth endpoint — if the
+    data isn't there (legacy sessions, single-surface user, this
+    surface was his latest), there is no hint and she says nothing.
+
+    Synthetic Telegram group/event accounts (the give_stage_cap == 3
+    test) are shared accounts, not a person: never any hint.
+    """
+    if current_surface not in ("web", "telegram"):
+        return None
+    if give_stage_cap(user_id) == 3:
+        return None
+    other = "telegram" if current_surface == "web" else "web"
+    rows = conn.execute(
+        "SELECT token, origin, last_seen_at FROM auth_sessions "
+        "WHERE user_id = ?", (user_id,)).fetchall()
+    other_last: datetime | None = None
+    this_prev = _parse_session_ts(current_prev_seen or "")
+    for r in rows:
+        seen = _parse_session_ts(r["last_seen_at"] or "")
+        if seen is None:
+            continue
+        if r["origin"] == other:
+            if other_last is None or seen > other_last:
+                other_last = seen
+        elif r["origin"] == current_surface and r["token"] != current_token:
+            if this_prev is None or seen > this_prev:
+                this_prev = seen
+    if other_last is None:
+        return None
+    now = now or datetime.utcnow()
+    if (now - other_last).total_seconds() > (
+            CROSS_SURFACE_WINDOW_HOURS * 3600):
+        return None
+    if this_prev is not None and other_last <= this_prev:
+        return None
+    return {"surface": other,
+            "last_seen_at": other_last.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 def delete_session(conn: sqlite3.Connection, token: str) -> None:

@@ -238,6 +238,13 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     token      TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Improvement #8 (2026-10-19): which surface minted this session
+    -- ('telegram' via /auth/telegram, 'web' via email login / verify /
+    -- app-link redeem; '' for legacy rows) + last authenticated use.
+    -- This is the one moment the backend KNOWS the surface, so it is
+    -- recorded here and read back for cross-surface continuity.
+    origin     TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
@@ -500,6 +507,25 @@ def _migrate_auth_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_session_surface_columns(conn: sqlite3.Connection) -> None:
+    """Improvement #8 (2026-10-19): auth_sessions learns which surface
+    minted each session (origin) and when it was last used
+    (last_seen_at). Existing rows keep origin '' — a legacy session
+    simply never evidences cross-surface activity until it is
+    re-minted by a login on a known surface. Runs BEFORE the SCHEMA
+    script; on fresh installs the table does not exist yet and the
+    SCHEMA definition (which carries the columns) creates it."""
+    if _table_exists(conn, "auth_sessions"):
+        for column, ddl in (
+            ("origin", "TEXT NOT NULL DEFAULT ''"),
+            ("last_seen_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if not _column_exists(conn, "auth_sessions", column):
+                conn.execute(
+                    f"ALTER TABLE auth_sessions ADD COLUMN {column} {ddl}")
+    conn.commit()
+
+
 def connect(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or config.DB_PATH
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -696,6 +722,7 @@ def init_db(db_path: str | None = None) -> None:
         # them with the column directly.
         _migrate_character_columns(conn); trust_migration.migrate(conn)
         _migrate_auth_columns(conn)
+        _migrate_session_surface_columns(conn)
         _migrate_submission_columns(conn)
         _migrate_creator_columns(conn)
         _migrate_owner_column(conn)
