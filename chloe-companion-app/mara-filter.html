@@ -33,7 +33,7 @@
 <body>
 <header>
   <h1>💜 Mara Filter</h1>
-  <p>Live face morph v10 — Mara mirrors you: smile, talk, laugh and blink and she does it too. Runs entirely in your browser; nothing is uploaded. Runs entirely in your browser; nothing is uploaded.</p>
+  <p>Live face morph v11 — Mara mirrors you: smile, talk, laugh and blink and she does it too. Runs entirely in your browser; nothing is uploaded.</p>
 </header>
 
 <div id="stage">
@@ -237,6 +237,16 @@ function affineFrom(src, dst) {
   return { a, b, c, d, tx: d1.x - a * s1.x - b * s1.y, ty: d1.y - c * s1.x - d * s1.y };
 }
 const applyAff = (m, p) => ({ x: m.a * p.x + m.b * p.y + m.tx, y: m.c * p.x + m.d * p.y + m.ty });
+// Expand a destination triangle about its centroid: adjacent triangles then
+// overlap slightly instead of leaving hairline gaps (the visible wireframe).
+function expTri(d) {
+  const cx = (d[0].x + d[1].x + d[2].x) / 3, cy = (d[0].y + d[1].y + d[2].y) / 3;
+  return d.map(p => {
+    const vx = p.x - cx, vy = p.y - cy, L = Math.hypot(vx, vy) || 1;
+    const push = 0.05 * L + 0.8;
+    return { x: p.x + vx / L * push, y: p.y + vy / L * push };
+  });
+}
 
 // v2: piecewise-affine warp of Mara's texture across the face mesh.
 // srcPts are her texture pixels (offline landmarks + ellipse perimeter);
@@ -247,7 +257,7 @@ function drawMesh(dstPts, fade) {
   ctx.globalAlpha = alpha;
   for (const t of MESH.tris) {
     const s = [MESH.pts[t[0]], MESH.pts[t[1]], MESH.pts[t[2]]];
-    const d = [dstPts[t[0]], dstPts[t[1]], dstPts[t[2]]];
+    const d = expTri([dstPts[t[0]], dstPts[t[1]], dstPts[t[2]]]);
     const m = affineFrom(
       s.map(p => ({ x: p[0], y: p[1] })), d);
     if (!m) continue;
@@ -272,7 +282,7 @@ function drawLayer(dstPts, fade, triIdx, weights, amt, texImg) {
     const w = weights ? weights[k] : 1;
     if (w <= 0) continue;
     const s = [MESH.pts[t[0]], MESH.pts[t[1]], MESH.pts[t[2]]];
-    const d = [dstPts[t[0]], dstPts[t[1]], dstPts[t[2]]];
+    const d = expTri([dstPts[t[0]], dstPts[t[1]], dstPts[t[2]]]);
     const m = affineFrom(s.map(p => ({ x: p[0], y: p[1] })), d);
     if (!m) continue;
     ctx.save();
