@@ -51,6 +51,7 @@ GET  /api/v1/her-day [auth] ?girl_id= -> {posts:[...]}
 POST /api/v1/her-day/view [auth] {post_id} -> {ok:true}
 POST /api/v1/her-day/generate [auth] -> {generated:N} (all girls)
 POST /api/v1/admin/her-day/generate-all (admin) -> {ok, generated, skipped, failed, errors}
+POST /api/v1/admin/her-day/event-moment (admin) {girl_id} -> {ok, created, ...} (live-event Her Day moment)
 POST /api/v1/admin/her-day/backfill-media (admin) -> pool-first repair of today's posts
 POST /api/v1/admin/her-day/set-media (admin) {post_id, media_url?, voice_url?} -> {ok, post}
 """
@@ -3645,6 +3646,31 @@ def admin_her_day_generate_all(request: Request):
             "skipped": report.get("skipped", 0),
             "failed": len(errors),
             "errors": errors}
+
+
+class HerDayEventMomentIn(BaseModel):
+    girl_id: str
+
+
+@app.post("/api/v1/admin/her-day/event-moment")
+def admin_her_day_event_moment(body: HerDayEventMomentIn,
+                               request: Request):
+    """Admin: post ONE global Her Day moment about a live group event
+    that just ended (improvement #9, 2026-10-20). Called by the
+    Telegram bot at event end with the host girl's id. The moment is
+    rendered and gated exactly like a daily moment (likeness lock,
+    clean-photo prompt, Gemini fallback) via
+    her_day.generate_event_moment; a girl who is not on the public
+    roster (private/owner-scoped) is refused with a 400 — she never
+    gets a public moment. When no image passes the gates the moment
+    posts as a text card.
+    """
+    _require_admin(request)
+    out = her_day.generate_event_moment(body.girl_id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=400,
+                            detail=out.get("error") or "event moment failed")
+    return out
 
 
 @app.post("/api/v1/admin/her-day/backfill-media")
