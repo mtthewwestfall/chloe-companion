@@ -762,6 +762,7 @@ def _fallback_caption(girl_name: str, moment_key: str,
         "coffee_date": f"coffee date{partner_bit}, she stole my fries lol",
         "night_out": f"out tonight{partner_bit}, living our best lives",
         "cooking_together": f"cooking{partner_bit}, taste tester needed",
+        "live_event": f"went live with my favorite people tonight 💜 that was SO fun — thank you for hanging out with me",
         "voice_rant": f"okay I need to vent about my day",
         "shower_thought": f"had the weirdest thought in the shower today",
         "craving": f"I'm craving something so bad right now",
@@ -1073,6 +1074,85 @@ def generate_for_user_girl(user_id: str, girl_id: str,
                       flush=True)
             posts.append(post)
         return posts
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Live-event moments (improvement #9, 2026-10-20): when a Telegram group
+# live event ends, the host girl posts ONE global Her Day moment about
+# the night. The image goes through the same gates as every other
+# moment — _generate_sfw_image (Sogni first, Gemini fallback per
+# PR #75, the PR #82 likeness lock, the PR #79 clean-photo prompt) —
+# and the post is a single global row (HER_DAY_GLOBAL_USER), like the
+# other public moments. Only public-roster girls can host one:
+# _get_all_girls() is the no-user-context roster, which never includes
+# owner-scoped (private) characters. If no image passes the gates the
+# moment posts as a text card — never an ungated image. The caption
+# talks about the event itself; it never names individual members.
+# ---------------------------------------------------------------------------
+EVENT_MOMENT_KEY = "live_event"
+_EVENT_SCENE = ("selfie at a cozy house party with friends in a warm "
+                "living room at night, laughing together, stylish "
+                "casual evening outfit, everyone having a great time")
+_EVENT_DESC = ("she just finished hosting a live hangout where a whole "
+               "group of her favorite people were all chatting with "
+               "her at once — she had the best time and is still "
+               "buzzing from it")
+
+
+def generate_event_moment(girl_id: str) -> dict[str, Any]:
+    """Post one global Her Day moment about tonight's live event.
+
+    Returns {ok: True, created: 1, post_id, post_type, media_url,
+    caption} on success; {ok: True, created: 0, skipped: ...} when
+    this girl already has a pictured event moment from the last few
+    hours; {ok: False, error: ...} for a girl who is not on the
+    public roster (private/unknown girls never get a public moment).
+    Never raises.
+    """
+    gid = (girl_id or "").strip().lower()
+    if not gid:
+        return {"ok": False, "error": "girl_id required"}
+    girls = {g["id"]: g for g in _get_all_girls()}
+    ginfo = girls.get(gid)
+    if ginfo is None:
+        return {"ok": False, "error": "not a public character"}
+    girl_name = ginfo.get("name") or "Chloe"
+    avatar_url = ginfo.get("avatar_url") or ""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    conn = db.connect()
+    try:
+        # One pictured event moment per girl per evening: the bot
+        # fires event-end exactly once per event, but a second event
+        # (or a double-fired end) must not stack duplicates.
+        recent = conn.execute(
+            "SELECT id FROM her_day_posts WHERE user_id = ?"
+            " AND girl_id = ? AND media_url LIKE ?"
+            " AND created_at > datetime('now', '-6 hours')",
+            (store.HER_DAY_GLOBAL_USER, gid, "%_live_event.%"),
+        ).fetchone()
+        if recent:
+            return {"ok": True, "created": 0,
+                    "skipped": "event moment already posted"}
+        media_url = _generate_sfw_image(
+            [girl_name], avatar_url, [gid], EVENT_MOMENT_KEY,
+            _EVENT_SCENE, date_str)
+        caption = _generate_caption(girl_name, EVENT_MOMENT_KEY,
+                                    _EVENT_DESC, [])
+        post = store.save_her_day_post(
+            conn, store.HER_DAY_GLOBAL_USER, gid,
+            post_type="image" if media_url else "text",
+            media_url=media_url, caption=caption)
+        print(f"[her_day] event moment for {gid}: "
+              f"{'pictured' if media_url else 'text-only'}",
+              flush=True)
+        return {"ok": True, "created": 1, "post_id": post["id"],
+                "post_type": post["post_type"],
+                "media_url": media_url, "caption": caption}
+    except Exception as e:  # noqa: BLE001
+        print(f"[her_day] event moment failed ({gid}): {e}", flush=True)
+        return {"ok": False, "error": str(e)[:200]}
     finally:
         conn.close()
 
