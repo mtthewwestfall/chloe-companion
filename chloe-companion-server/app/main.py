@@ -1416,6 +1416,14 @@ def chat(body: ChatIn, request: Request):
         # characters — fall back to Chloe).
         character = characters.get_character(body.character_id, user_id)
         cid = character["id"]
+        # Routing proof (2026-10-20): if resolution ever falls back to a
+        # different character than the client asked for, it must be loud
+        # in the logs — a silent fallback puts one girl's replies, voice
+        # notes and gives inside another girl's thread.
+        if cid != (body.character_id or "").strip().lower():
+            print(f"[chat] FALLBACK user={user_id} requested={body.character_id!r} resolved={cid}", flush=True)
+        else:
+            print(f"[chat] user={user_id} character={cid}", flush=True)
 
         user = store.get_or_create_user(conn, user_id)
         # Conversion fix plan (2026-10-18): lifetime count BEFORE this
