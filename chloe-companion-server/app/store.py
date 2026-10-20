@@ -1582,12 +1582,15 @@ def update_custom_request(conn: sqlite3.Connection, request_id: int,
                           status: str,
                           video_url: str | None = None,
                           error: str | None = None,
-                          fallback_url: str | None = None) -> dict[str, Any] | None:
+                          fallback_url: str | None = None,
+                          taste_url: str | None = None) -> dict[str, Any] | None:
     """Update a custom video request's status (and optionally its video
-    URL, its recorded failure/park reason, and the preset URL delivered
-    as fallback). Terminal states since 2026-10-14: `fallback` (render
-    definitively refused/failed, a preset from her own library was
-    delivered instead) and `failed` (same, but no preset available)."""
+    URL, its recorded failure/park reason, the preset URL delivered
+    as fallback, and — improvement #6 — the instant taste clip's URL
+    recorded at submit time). Terminal states since 2026-10-14:
+    `fallback` (render definitively refused/failed, a preset from her
+    own library was delivered instead) and `failed` (same, but no
+    preset available)."""
     if status not in ("pending", "generating", "fulfilled", "manual",
                       "fallback", "failed"):
         raise ValueError(f"invalid status: {status}")
@@ -1602,6 +1605,9 @@ def update_custom_request(conn: sqlite3.Connection, request_id: int,
     if fallback_url is not None:
         sets.append("fallback_url = ?")
         params.append(fallback_url)
+    if taste_url is not None:
+        sets.append("taste_url = ?")
+        params.append(taste_url)
     params.append(request_id)
     conn.execute(
         f"UPDATE custom_video_requests SET {', '.join(sets)} WHERE id = ?",

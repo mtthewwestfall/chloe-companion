@@ -360,6 +360,7 @@ CREATE TABLE IF NOT EXISTS custom_video_requests (
     video_url   TEXT NOT NULL DEFAULT '',
     error       TEXT NOT NULL DEFAULT '',
     fallback_url TEXT NOT NULL DEFAULT '',
+    taste_url   TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_custom_video_requests_user ON custom_video_requests(user_id);
@@ -658,10 +659,12 @@ def _migrate_custom_video_columns(conn: sqlite3.Connection) -> None:
     """Custom-video fallback fix (2026-10-14): a refused render records
     its reason (`error`) and the preset delivered instead
     (`fallback_url`) on the request row instead of leaving it an
-    eternal, unexplained `pending`."""
+    eternal, unexplained `pending`. Improvement #6 (2026-10-19) adds
+    `taste_url`: the instant taste clip delivered at submit time."""
     for col, ddl in [
         ("error", "TEXT NOT NULL DEFAULT ''"),
         ("fallback_url", "TEXT NOT NULL DEFAULT ''"),
+        ("taste_url", "TEXT NOT NULL DEFAULT ''"),
     ]:
         try:
             conn.execute(

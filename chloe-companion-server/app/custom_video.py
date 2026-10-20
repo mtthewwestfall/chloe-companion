@@ -26,6 +26,17 @@ detected.") while the client sheet kept saying "queued". Now:
   "waiting: ..." note in `error` (give_gen's parking semantics), ready
   for the next admin run or the backlog sweep.
 
+Improvement #6 (2026-10-19, "custom videos never dead-end"): a park
+can last hours (Sogni's Fast network exhausted its monthly fair-use
+capacity), so the create endpoint now delivers an INSTANT taste clip
+the moment a request is submitted — `deliver_taste_clip` sends the
+ask-closest preset from the girl's own give library into the chat
+with her taste line and records it on the row (`taste_url`). The
+render then proceeds exactly as before: success delivers the real
+custom video as the one follow-up, and a definitive refusal closes
+WITHOUT a second preset — the taste already in his chat stands as
+the request's fallback (`fallback_url` = the taste URL).
+
 The two runners return an outcome token — "fulfilled" / "fallback" /
 "failed" / "parked" / "skipped" — which the backlog sweep
 (`run_custom_video_backlog_sweep`) tallies. Spawn wrappers ignore it.
@@ -58,6 +69,13 @@ from .media_gen import (
 # voice, with no system-speak and no mention of filters or errors.
 _FALLBACK_LINE = ("that one got away from me, babe — wasn't about to "
                   "leave you waiting, so here's one of mine instead. 💋")
+
+# The line she sends with the instant taste clip at submit time
+# (improvement #6): one of hers, right now, while the custom renders.
+# No delivery-time promise — renders are Sogni-bound and can stall
+# indefinitely, so she says "while I make yours", never "in a bit".
+_TASTE_LINE = ("couldn't leave you just waiting, babe — here's a "
+               "little taste of me while I make yours. 💋")
 
 # give_gen's waiting words for a session park (row stays `pending`,
 # the reason rides in `error`).
@@ -102,6 +120,50 @@ def _deliver_preset_fallback(conn, req: dict[str, Any]) -> str:
     return preset["url"]
 
 
+def deliver_taste_clip(conn, req: dict[str, Any]) -> str:
+    """Improvement #6 (2026-10-19): the instant closest match, sent
+    the moment a custom request is submitted. The render can park
+    for hours behind Sogni's session/throttle/capacity states, so
+    he must not stare at an empty chat meanwhile: the ask-closest
+    preset from THIS GIRL'S OWN give library — the same selection
+    the refusal fallback uses (stage read from the request
+    description via live_give.stage_for_ask_text, clamped to
+    store.give_stage_cap inside live_give._pick_preset) — lands in
+    the chat at once with her taste line, and its URL is recorded
+    on the row (`taste_url`) so the refusal close never sends a
+    second preset and the fulfilled render stays the one follow-up.
+    Costs nothing extra: custom requests are free up front and
+    preset delivery is give bookkeeping only, exactly like the
+    fallback path — no media-request pool is touched. Best-effort
+    by design: any failure returns "" and the request proceeds
+    untouched, and a row already carrying a taste_url returns it
+    unsent (idempotent per request). Returns the delivered URL."""
+    request_id = req["id"]
+    existing = (req.get("taste_url") or "").strip()
+    if existing:
+        return existing
+    try:
+        from . import live_give
+        preset = live_give._pick_preset(
+            conn, req["user_id"], req["girl_id"], "video",
+            live_give.stage_for_ask_text(req.get("description") or ""))
+        if not preset:
+            return ""
+        live_give._deliver_preset(
+            conn, req["user_id"], req["girl_id"], preset,
+            during_render=False, line=_TASTE_LINE)
+    except Exception as e:  # noqa: BLE001 — a taste must never
+        # break the submit that carries it.
+        print(f"[custom_video] request {request_id} taste delivery "
+              f"failed: {e}", flush=True)
+        return ""
+    store.update_custom_request(conn, request_id, "pending",
+                                taste_url=preset["url"])
+    print(f"[custom_video] request {request_id} taste delivered: "
+          f"{preset['url']}", flush=True)
+    return preset["url"]
+
+
 def _close_request_with_fallback(conn, req: dict[str, Any],
                                  error_text: str) -> str:
     """Definitive refusal/failure: close the request honestly and send
@@ -109,6 +171,19 @@ def _close_request_with_fallback(conn, req: dict[str, Any],
     records the reason and the preset URL) or "failed" (no preset
     available; row records the reason)."""
     request_id = req["id"]
+    taste_url = (req.get("taste_url") or "").strip()
+    if taste_url:
+        # Improvement #6: he already holds her taste clip from submit
+        # time — a second preset here would double-deliver. The
+        # taste stands as this request's fallback; record the reason
+        # and close.
+        store.update_custom_request(
+            conn, request_id, "fallback",
+            error=error_text, fallback_url=taste_url)
+        print(f"[custom_video] request {request_id} closed as fallback: "
+              f"{error_text}; taste clip already delivered {taste_url}",
+              flush=True)
+        return "fallback"
     fallback_url = ""
     try:
         fallback_url = _deliver_preset_fallback(conn, req)
