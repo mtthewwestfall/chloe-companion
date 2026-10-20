@@ -305,6 +305,21 @@ def _current_user_id(request: Request) -> str:
     conn = _conn()
     try:
         user_id = store.get_session_user_id(conn, token)
+        if user_id:
+            # Improvement #8 (2026-10-19): stamp this authenticated
+            # use on the session and stash the surface facts on the
+            # request — the chat endpoint reads them for the
+            # cross-surface continuity hint. Fail-open by design.
+            try:
+                _origin, _prev_seen = store.note_session_activity(
+                    conn, token)
+                _state = getattr(request, "state", None)
+                if _state is not None:
+                    _state.session_origin = _origin
+                    _state.session_prev_seen = _prev_seen
+                    _state.session_token = token
+            except Exception:
+                pass
     finally:
         conn.close()
     if not user_id:
@@ -1160,7 +1175,7 @@ def auth_telegram(body: dict):
         # Create a session token for API calls
         import secrets
         token = secrets.token_urlsafe(32)
-        store.create_session(conn, user_id, token)
+        store.create_session(conn, user_id, token, origin="telegram")
         return {"ok": True, "user_id": user_id, "token": token, "name": name}
     finally:
         conn.close()
@@ -1240,7 +1255,7 @@ def auth_redeem_link(body: dict):
         user_id = row["user_id"]
         user = store.get_or_create_user(conn, user_id)
         token = _secrets.token_urlsafe(32)
-        store.create_session(conn, user_id, token)
+        store.create_session(conn, user_id, token, origin="web")
         return {"ok": True, "token": token, "user_id": user_id,
                 "name": user.get("name") or ""}
     finally:
@@ -1498,6 +1513,43 @@ def chat(body: ChatIn, request: Request):
         # Memory is namespaced per character: each one remembers separately.
         context = brain.build_brain_context(conn, user_id, user,
                                             effective_message, character)
+
+        # Improvement #8 (2026-10-19): one identity across surfaces.
+        # If his most recent activity before this turn was on the
+        # OTHER surface (Telegram vs the web app), her context carries
+        # that fact so the switch feels like one continuous
+        # relationship. The fact comes only from stored session rows
+        # (origin stamped at mint + last_seen_at) — no hint, no line.
+        try:
+            _state8 = getattr(request, "state", None)
+            _hint8 = store.cross_surface_hint(
+                conn, user_id,
+                getattr(_state8, "session_origin", "") or "",
+                getattr(_state8, "session_token", "") or "",
+                getattr(_state8, "session_prev_seen", "") or "")
+            if _hint8:
+                from datetime import datetime as _xdt
+                _other_name = ("Telegram" if _hint8["surface"] == "telegram"
+                               else "the Whispr app")
+                _seen8 = _xdt.strptime(_hint8["last_seen_at"],
+                                       "%Y-%m-%d %H:%M:%S")
+                _mins8 = max(0.0, (_xdt.utcnow() - _seen8
+                                   ).total_seconds() / 60.0)
+                if _mins8 < 90:
+                    _when8 = "a little while ago"
+                elif _seen8.date() == _xdt.utcnow().date():
+                    _when8 = "earlier today"
+                else:
+                    _when8 = "yesterday"
+                context["cross_surface_line"] = (
+                    f"Continuity: you and he are mid-relationship, not "
+                    f"starting over — before this conversation he was "
+                    f"with you on {_other_name} ({_when8}). If it fits "
+                    f"naturally you may acknowledge the switch (like "
+                    f"you're glad he found you here too); don't force "
+                    f"it and don't mention surfaces every turn.")
+        except Exception:
+            pass
 
         # Conversion fix Item E (2026-10-18): first-session package.
         # While his lifetime count is under FIRST_SESSION_MESSAGES,
@@ -4777,7 +4829,7 @@ def auth_signup(body: SignupIn, request: Request):
             if not store.recent_turns(conn, user_id, 1, "chloe"):
                 store.log_turn(conn, user_id, "chloe", onboarding.greeting_line({"id": "chloe", "name": "Chloe"}), "chloe")
             session = auth.new_token()
-            store.create_session(conn, user_id, session)
+            store.create_session(conn, user_id, session, origin="web")
             summary = _user_summary(user)
             summary.update({"ok": True, "verify_sent": True,
                             "token": session, "email_verified": False})
@@ -4814,7 +4866,7 @@ def auth_verify(token: str = ""):
         if _user.get("email"):
             store.apply_jvzoo_pending(conn, user_id, _user["email"])
         session = auth.new_token()
-        store.create_session(conn, user_id, session)
+        store.create_session(conn, user_id, session, origin="web")
     finally:
         conn.close()
     # Land back in the app, handing it the session in the URL hash (the
@@ -4938,7 +4990,7 @@ def auth_login(body: LoginIn, request: Request):
         # verification click. The flag rides along so the app can still
         # nudge him to verify (recovery anchor + referral gate).
         session = auth.new_token()
-        store.create_session(conn, user["user_id"], session)
+        store.create_session(conn, user["user_id"], session, origin="web")
         summary = _user_summary(user)
         summary.update({"ok": True, "token": session,
                         "email_verified": bool(user.get("email_verified_at"))})
