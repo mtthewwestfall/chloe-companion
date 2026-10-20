@@ -2627,6 +2627,64 @@ def set_public_package_status(conn: "sqlite3.Connection", girl_id: str,
     conn.commit()
     return cur.rowcount > 0
 
+# ---------------------------------------------------------------------------
+# Roster engagement (improvement #10, 2026-10-20): the roster surfaces
+# rank girls by the engagement the system ALREADY records — chat turns
+# in `conversation` and media/give asks in `media_requests`. No new
+# tracking: this is one aggregate read over existing rows.
+# ---------------------------------------------------------------------------
+
+# Synthetic group/event accounts (same predicate as give_stage_cap):
+# tg_<n> with n >= 900_000_000_000. Their turns are many strangers'
+# messages funneled through ONE shared account, so they must not
+# distort the per-girl ranking.
+_SYNTHETIC_USER_SQL = (
+    "(user_id LIKE 'tg\\_%' ESCAPE '\\' "
+    "AND CAST(SUBSTR(user_id, 4) AS INTEGER) >= 900000000000)"
+)
+
+
+def engagement_scores(conn: sqlite3.Connection,
+                      user_id: str | None = None) -> dict[str, int]:
+    """Per-girl engagement score from existing rows only.
+
+    score(girl) = the user's chat turns to her (conversation rows with
+    role='user') + his media/give requests for her (media_requests
+    rows). With user_id=None the counts span every real account —
+    synthetic group/event accounts are excluded (see above), so a
+    loud group event cannot crown a girl nobody bonds with 1:1.
+
+    Girls with no recorded engagement are simply absent (score 0).
+    Never raises on a missing table — a fresh/partial DB ranks as
+    all-zero rather than breaking the roster.
+    """
+    scores: dict[str, int] = {}
+    scope = ""
+    params: list = []
+    if user_id:
+        scope = " AND user_id = ?"
+        params = [user_id]
+    try:
+        for girl, n in conn.execute(
+                "SELECT character_id, COUNT(*) FROM conversation "
+                "WHERE role = 'user' AND NOT " + _SYNTHETIC_USER_SQL
+                + scope + " GROUP BY character_id", params).fetchall():
+            if girl:
+                scores[girl] = scores.get(girl, 0) + int(n)
+    except sqlite3.Error:
+        pass
+    try:
+        for girl, n in conn.execute(
+                "SELECT girl_id, COUNT(*) FROM media_requests "
+                "WHERE NOT " + _SYNTHETIC_USER_SQL
+                + scope + " GROUP BY girl_id", params).fetchall():
+            if girl:
+                scores[girl] = scores.get(girl, 0) + int(n)
+    except sqlite3.Error:
+        pass
+    return scores
+
+
 def give_stage_cap(user_id: str | None) -> int:
     """Stage ceiling for give serving. Group/event traffic runs on
     synthetic shared accounts (tg_<id> with id >= 900_000_000_000,

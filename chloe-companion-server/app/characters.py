@@ -288,10 +288,87 @@ def visible_to(character_id: str | None, user_id: str | None) -> bool:
     return _gallery_public(character_id)
 
 
+# ---------------------------------------------------------------------------
+# Engagement ranking (improvement #10, 2026-10-20): the public roster
+# orders girls by the engagement already recorded for them
+# (store.engagement_scores — chat turns + media/give requests), so the
+# girls people actually bond with stand at the front and the rest fade
+# back. Nobody is removed or hidden: a girl with zero engagement keeps
+# her current relative place after the engaged girls. Chloe stays
+# pinned first — the flagship invariant every roster surface assumes.
+# Scores are cached briefly; any failure falls back to the plain
+# roster order, because the roster must never break.
+# ---------------------------------------------------------------------------
+SCORES_TTL_S = 60.0
+_scores_cache: dict[str, Any] = {"ts": 0.0, "global": None, "users": {}}
+
+
+def _engagement(user_id: str | None = None) -> dict[str, int]:
+    """Cached engagement scores: the global map, or one user's map
+    when user_id is given. {} on any failure (ranking then no-ops)."""
+    now = time.time()
+    if now - float(_scores_cache.get("ts") or 0.0) > SCORES_TTL_S:
+        _scores_cache["ts"] = now
+        _scores_cache["global"] = None
+        _scores_cache["users"] = {}
+    users = _scores_cache["users"]
+    if user_id and user_id in users:
+        return users[user_id]
+    if not user_id and _scores_cache.get("global") is not None:
+        return _scores_cache["global"]
+    try:
+        from . import db as _db
+        from . import store as _store
+        conn = _db.connect()
+        try:
+            scores = _store.engagement_scores(conn, user_id)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — ranking must never break the roster
+        print(f"[characters] engagement read failed: {e}", flush=True)
+        scores = {}
+    if user_id:
+        if len(users) > 512:  # bound the per-user cache
+            users.clear()
+        users[user_id] = scores
+    else:
+        _scores_cache["global"] = scores
+    return scores
+
+
+def _rank_by_engagement(chars: list[dict[str, Any]],
+                        user_id: str | None = None) -> list[dict[str, Any]]:
+    """Order an ALREADY privacy-filtered roster by engagement.
+
+    The privacy filter runs inside get_characters before this sees the
+    list, so a private girl can never be ranked into a public surface.
+    For a signed-in user his own engagement outranks the global counts
+    (the girls HE bonds with lead his roster); the global counts break
+    his ties. Equal scores keep the incoming relative order (stable),
+    so zero-engagement girls simply hold their places at the back.
+    """
+    if len(chars) < 2:
+        return chars
+    glob = _engagement()
+    own = _engagement(user_id) if user_id else {}
+    if not glob and not own:
+        return chars
+    indexed = list(enumerate(chars))
+    indexed.sort(key=lambda p: (
+        0 if p[1]["id"] == "chloe" else 1,
+        -int(own.get(p[1]["id"], 0)),
+        -int(glob.get(p[1]["id"], 0)),
+        p[0],
+    ))
+    return [c for _, c in indexed]
+
+
 def public_list(user_id: str | None = None) -> list[dict[str, Any]]:
     """The shape served by GET /api/v1/characters (owner-scoped characters
-    appear only for their owner)."""
+    appear only for their owner), ordered by engagement (see
+    _rank_by_engagement) so the most-bonded girls stand first."""
+    chars = _rank_by_engagement(get_characters(user_id=user_id), user_id)
     return [
         {"id": c["id"], "name": c["name"], "avatar_url": c["avatar_url"]}
-        for c in get_characters(user_id=user_id)
+        for c in chars
     ]
