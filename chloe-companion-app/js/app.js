@@ -196,7 +196,7 @@
       }
       if (isOpen && currentGirl.id === item.characterId) {
         typingRow.classList.add('hidden');
-        addText('her', reply);
+        addText('her', reply, {}, statusName(item.characterId));
       } else {
         showToast(statusName(item.characterId) + "'s status update is ready in their chat", 4200);
       }
@@ -265,10 +265,8 @@
   /* ---------- roster (server-driven picker) ---------- */
   // The picker list comes from GET /api/v1/characters (with the auth token
   // when signed in; owner-scoped characters appear only for their owner —
-  // the server decides). The SERVER's order is the display order (it ranks
-  // the roster by real engagement, improvement #10); curated cards only
-  // contribute their look/copy to the girl the server placed there.
-  // Anything else on the roster (creations, future girls) is built from
+  // the server decides). Curated cards keep their look/copy and come first;
+  // anything else on the roster (creations, future girls) is appended from
   // server fields. On any fetch failure the curated list stays as-is
   // (offline/demo fallback).
   async function loadRoster() {
@@ -281,15 +279,13 @@
       const data = await res.json();
       const roster = (data && data.characters) || [];
       if (!Array.isArray(roster) || !roster.length) return;
-      const curatedById = new Map(CURATED_CHARACTERS.map((c) => [c.id, c]));
-      const merged = [];
-      const known = new Set();
+      const onRoster = new Set(roster.map((c) => String(c.id || '').toLowerCase()));
+      const merged = CURATED_CHARACTERS.filter((c) => onRoster.has(c.id));
+      const known = new Set(merged.map((c) => c.id));
       roster.forEach((rc) => {
         const id = String(rc.id || '').toLowerCase();
         if (!id || known.has(id)) return;
         known.add(id);
-        const curated = curatedById.get(id);
-        if (curated) { merged.push(curated); return; }
         merged.push({
           id,
           name: rc.name || id,
@@ -353,7 +349,7 @@
           if (Array.isArray(t.attachments) && t.attachments.length) {
             addAttachments(who, t.attachments);
           }
-          if ((t.text || '').trim()) addText(who, t.text || '');
+          if ((t.text || '').trim()) addText(who, t.text || '', {}, who === 'her' ? girl.name : undefined);
         });
         // Her stored login ask (or a failed attempt) is the last word:
         // re-offer the secure entry box under it.
@@ -930,10 +926,18 @@ let presetSheetGirl = null;
       setCharacterStatus(targetCharacterId, inferCharacterStatus(res.reply_text, text));
       if (requestedUpdateDelay) scheduleCharacterUpdate(targetCharacterId, requestedUpdateDelay);
       typingRow.classList.add('hidden');
-  if (currentGirl.id !== targetCharacterId) {
-    // She replied while another chat was open: don't paint her reply into
-    // the wrong thread. The reply is already saved in her own history.
-    showToast(targetCharacterName + ' replied in her chat', 3200);
+  // Cross-character guard (2026-10-20): if the server resolved this reply
+  // to a different character than the one this message was sent to, her
+  // reply, voice note, photos and gives must never paint into this thread.
+  // The turn is stored under the responder's own history server-side.
+  const responderId = (res && res.character_id) || targetCharacterId;
+  const mismatched = responderId !== targetCharacterId;
+  const responderName = (CHARACTERS.find((c) => c.id === responderId) || {}).name || targetCharacterName;
+  if (currentGirl.id !== targetCharacterId || mismatched) {
+    // She replied while another chat was open — or as another character:
+    // don't paint her reply into the wrong thread. The reply is already
+    // saved in her own history.
+    showToast(responderName + ' replied in her chat', 3200);
   } else {
     if (res.voice_note_url) {
       addVoiceNote(res.voice_note_url, res.reply_text);
@@ -944,7 +948,7 @@ let presetSheetGirl = null;
     if (res.image_url) addGeneratedImage(res.image_url, targetCharacterName);
     if (res.sogni_login_box) addSogniLoginButton();
   }
-      lastHerReply = { text: res.reply_text || '', voiceUrl: res.voice_note_url || '', girl: targetCharacterId, at: Date.now() };
+      lastHerReply = { text: res.reply_text || '', voiceUrl: res.voice_note_url || '', girl: responderId, at: Date.now() };
       setMessagesRemaining(res.messages_remaining);
       // Conversion fix Item D (2026-10-18): she offered the trial at
       // real depth — show the soft paywall once; its trial CTA is
@@ -955,16 +959,16 @@ let presetSheetGirl = null;
       }
       // Conversion fix Item E3 (2026-10-18): her early taste — she
       // sent him something in character, unprompted.
-      if (res.give_media && res.give_media.url) {
+      if (!mismatched && res.give_media && res.give_media.url) {
         addPresetMediaBubble(res.give_media.url, res.give_media.media_type || 'video', 'just for you 💛', targetCharacterName);
       }
       maybeReferralAsk(res, text);
-      if (typeof res.streak_current === 'number') {
+      if (!mismatched && typeof res.streak_current === 'number') {
         const prev = myStreaks[targetCharacterId] || {};
         myStreaks[targetCharacterId] = { current: res.streak_current, longest: Math.max(res.streak_current, prev.longest || 0) };
         paintStreak();
       }
-      if (res.world_status) { worldStatusByGirl[targetCharacterId] = res.world_status; paintWorld(); }
+      if (!mismatched && res.world_status) { worldStatusByGirl[targetCharacterId] = res.world_status; paintWorld(); }
       maybePeakPaywall(res, text);
       if (typeof res.voice_notes_remaining === 'number') $('statVoice').textContent = res.voice_notes_remaining;
     } catch (e) {
