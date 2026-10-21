@@ -14,6 +14,7 @@ logged so one bad pair never stops the tick.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import traceback
@@ -107,6 +108,9 @@ def start_scheduler() -> bool:
     when the scheduler is running (or was already). Called from
     main._startup; never on import."""
     global _thread, _started
+    if os.environ.get("PROACTIVE_SCHEDULER_ENABLED", "1") != "1":
+        print("[proactive-scheduler] disabled by PROACTIVE_SCHEDULER_ENABLED=0", flush=True)
+        return False
     with _lock:
         if _started and _thread is not None and _thread.is_alive():
             return True
