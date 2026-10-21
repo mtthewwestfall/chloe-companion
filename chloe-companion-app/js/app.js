@@ -61,6 +61,20 @@
       desc: 'Free-spirited, playful, and a little bit chaotic.',
       bestFor: 'Mini-adventures, laughing voice notes, and talks with zero filter.' },
   ];
+  // Card copy for public girls who joined after the curated list was
+  // written. loadRoster() merges them in from the server roster; without
+  // an entry here their cards render blank (no desc, no Best for) --
+  // that is what left Isabella, Brittany, Rina and Sabrina empty.
+  const CARD_INFO = {
+    isabella: { desc: 'Warm, passionate, and impossible to ignore.',
+      bestFor: 'Slow-burn chemistry, heartfelt talks, and evenings that end too soon.' },
+    brittany: { desc: 'Warm, radiant, and easy to be yourself with.',
+      bestFor: 'Real conversation, gentle teasing, and company that feels like home.' },
+    rina: { desc: 'Dreamy, curious, and quietly devoted.',
+      bestFor: 'Cozy anime nights, soft-spoken chats, and stories that never have to end.' },
+    sabrina: { desc: 'Cheerful, bookish, and full of energy.',
+      bestFor: 'Cafe mornings, study-break chats, and adventures planned on a whim.' },
+  };
   // The live picker list: starts as the curated cards, then loadRoster()
   // reconciles it with the server roster (see below).
   let CHARACTERS = CURATED_CHARACTERS.slice();
@@ -291,8 +305,8 @@
           name: rc.name || id,
           avatar: rc.avatar_url || '',
           videos: [],
-          desc: '',
-          bestFor: '',
+          desc: (CARD_INFO[id] || {}).desc || '',
+          bestFor: (CARD_INFO[id] || {}).bestFor || '',
         });
       });
       if (!merged.length) return;
