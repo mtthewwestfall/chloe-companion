@@ -162,11 +162,13 @@
     <div class="girl-card">
       <div class="girl-name">Gemini API Keys</div>
       <div class="sub" style="margin-bottom:12px;">Free keys are tried first &mdash; paid keys are fallback only. Failover is automatic, no delay. <span id="keyActiveNote" style="color:#51cf66;"></span></div>
+      <div id="keyRollup" class="sub" style="margin-bottom:12px;"></div>
       <div id="keyList"></div>
       <div class="add-girl" style="margin-top:16px;">
         <div style="font-weight:700;margin-bottom:8px;">Add Key</div>
         <input type="password" id="newKeyValue" placeholder="Gemini API key" style="width:100%;margin-bottom:8px;">
         <input id="newKeyLabel" placeholder="Label (e.g. free-1)" style="margin-bottom:8px;">
+        <input id="newKeyProject" placeholder="Google Cloud project (optional — quotas are per project)" style="margin-bottom:8px;">
         <select id="newKeyPaid" style="padding:10px;border-radius:8px;border:1px solid #333;background:#0a0a0f;color:#fff;font-size:14px;">
           <option value="free">Free</option>
           <option value="paid">Paid (fallback)</option>
@@ -897,6 +899,39 @@ async function loadGeminiKeys() {
     geminiKeys = [];
   }
   renderGeminiKeys();
+  try {
+    const health = await api('GET', '/api/v1/admin/gemini-health');
+    renderKeyRollup(health);
+  } catch (e) { /* older backend: no rollup, keys still render */ }
+}
+
+// Key Manager v2 rollup: per-project remaining budget, paid usage vs
+// ceiling, and the pool-exhaustion projection from /admin/gemini-health.
+function renderKeyRollup(health) {
+  const el = document.getElementById('keyRollup');
+  if (!el || !health || !health.v2) { if (el) el.innerHTML = ''; return; }
+  const v2 = health.v2;
+  const lines = [];
+  const resetH = health.burn && health.burn.seconds_to_reset != null
+    ? ' &middot; quota reset in ' + Math.round(health.burn.seconds_to_reset / 360) / 10 + 'h' : '';
+  lines.push('<b>Projects</b> (quotas are per project)' + resetH);
+  for (const pr of (v2.projects || [])) {
+    const states = Object.entries(pr.keys_by_state || {}).map(([s, n]) => n + ' ' + s).join(', ');
+    const budget = pr.daily_limit == null ? 'no known limit'
+      : (pr.remaining + ' / ' + pr.daily_limit + ' left today');
+    lines.push('&middot; ' + escapeHtml(pr.project) + ': ' + budget + ' &middot; ' + pr.keys + ' keys (' + escapeHtml(states) + ')' + (pr.paid ? ' &middot; paid' : ''));
+  }
+  if (health.paid) {
+    lines.push('<b>Paid fallback</b>: ' + health.paid.calls_today + ' calls today' +
+      (health.paid.ceiling ? ' &middot; ceiling ' + health.paid.ceiling : '') +
+      (health.paid.ceiling_hit ? ' &middot; <span style="color:#ff6b6b;">CEILING HIT</span>' : '') +
+      (health.paid.trickle_exceeded ? ' &middot; past trickle' : ''));
+  }
+  const proj = v2.projection || {};
+  if (proj.status === 'ok') {
+    lines.push('<b>Projection</b>: ~' + proj.hours + 'h of pool left at the current burn (' + proj.burn_rate_per_hour + ' calls/h, ' + proj.remaining_calls + ' calls of budget)');
+  }
+  el.innerHTML = lines.join('<br>');
 }
 
 function keyStatusLabel(s) {
@@ -928,9 +963,11 @@ function renderGeminiKeys() {
         Requests: ${k.total_requests ?? 0} &middot; Failures: ${k.total_failures ?? 0} &middot; Consecutive fails: ${k.consecutive_failures ?? 0}
         <br>Last success: ${fmtTime(k.last_success_at)} &middot; Last failure: ${fmtTime(k.last_failure_at)}
         ${k.quota_exhausted_until ? `<br>Cooldown until: ${fmtTime(k.quota_exhausted_until)}` : ''}
+        ${k.project ? `<br>Project: ${escapeHtml(k.project)}${k.project_assigned ? '' : ' (own project — unset)'}` : ''}
       </div>
       <div class="key-actions">
         <button class="key-btn" onclick="testGeminiKey(${k.id})">Test</button>
+        <button class="key-btn" onclick="setGeminiKeyProject(${k.id})">Project</button>
         <button class="key-btn" onclick="toggleGeminiKey(${k.id}, ${k.is_active ? 'false' : 'true'})">${k.is_active ? 'Disable' : 'Enable'}</button>
         <button class="key-btn danger" onclick="delGeminiKey(${k.id})">Delete</button>
       </div>
@@ -942,14 +979,24 @@ function renderGeminiKeys() {
 async function addGeminiKey() {
   const key = document.getElementById('newKeyValue').value.trim();
   const label = document.getElementById('newKeyLabel').value.trim();
+  const project = (document.getElementById('newKeyProject').value || '').trim();
   const is_paid = document.getElementById('newKeyPaid').value === 'paid';
   if (!key) return alert('Enter the API key');
-  const res = await api('POST', '/api/v1/admin/gemini-keys', { key, label, is_paid });
+  const res = await api('POST', '/api/v1/admin/gemini-keys', { key, label, is_paid, project });
   if (res.key) {
     document.getElementById('newKeyValue').value = '';
     document.getElementById('newKeyLabel').value = '';
+    document.getElementById('newKeyProject').value = '';
     loadGeminiKeys();
   } else if (res.detail) alert('Error: ' + res.detail);
+}
+
+async function setGeminiKeyProject(id) {
+  const k = geminiKeys.find(x => x.id === id) || {};
+  const project = prompt('Google Cloud project for this key (blank = its own project). Keys in the same project share one quota:', k.project_assigned ? k.project : '');
+  if (project === null) return;
+  await api('PATCH', `/api/v1/admin/gemini-keys/${id}`, { is_active: !!k.is_active, project: project.trim() });
+  loadGeminiKeys();
 }
 
 async function testGeminiKey(id) {

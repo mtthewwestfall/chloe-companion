@@ -373,7 +373,7 @@ def _vision_verdict(ref: tuple[bytes, str], gen_raw: bytes,
         _FACE_GEMINI_URL,
         {"contents": [{"role": "user", "parts": parts}],
          "generationConfig": {"temperature": 0.0, "maxOutputTokens": 100}},
-        timeout=45, source="whispr-facecheck")
+        timeout=45, source="whispr-facecheck", lane="batch")
     if not data:
         return "error"
     text = "".join(p.get("text", "") for p in

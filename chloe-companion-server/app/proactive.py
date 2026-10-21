@@ -818,7 +818,13 @@ def _generate_proactive_message_live(conn: sqlite3.Connection,
                 "he messaged you and you miss him. 1-2 short sentences, in your "
                 "voice, like a text. Do not mention being an AI."
             )
-        draft = brain.gemini_generate(prompt, ctx, cid)
+        # Key Manager v2 priority lane: the morning message is
+        # time-critical (interactive class at the pool); every other
+        # proactive class is ambient and yields first under pressure.
+        draft = brain.gemini_generate(
+            prompt, ctx, cid,
+            lane=("proactive_morning" if mtype == "morning"
+                  else "proactive_ambient"))
         if draft and draft.strip():
             if cid == "rocky":
                 draft = brain._sanitize_rocky_reply(draft)
