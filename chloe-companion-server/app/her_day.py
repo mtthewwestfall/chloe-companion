@@ -467,6 +467,16 @@ def _render_herday_once(session: dict | None, names: list[str],
 _LIKENESS_MEMO: dict[str, str] = {}
 
 
+def _generate_enabled() -> bool:
+    """Master switch for automatic Her Day generation (Roof, 2026-10-21:
+    the overnight generator is cancelled). HER_DAY_GENERATE=off makes
+    every generation entry point a no-op — the 6 AM cron and the admin
+    generate-all can still call, they just generate nothing. Manual
+    admin injects are a separate path and are NOT gated: hand-approved
+    moments still post. Unset = generation on (previous behavior)."""
+    return os.environ.get("HER_DAY_GENERATE", "").strip().lower() != "off"
+
+
 def _likeness_disabled() -> bool:
     return os.environ.get("HER_DAY_LIKENESS", "").strip().lower() == "off"
 
@@ -1164,6 +1174,11 @@ def generate_for_all_girls(user_id: str) -> int:
 
     Returns the total number of posts created.
     """
+    if not _generate_enabled():
+        print("[her_day] generate_for_all_girls refused: "
+              "HER_DAY_GENERATE=off (overnight generator cancelled)",
+              flush=True)
+        return 0
     all_girls = _get_all_girls()
     date_str = datetime.now().strftime("%Y-%m-%d")
     plans = _build_all_plans(
@@ -1248,6 +1263,11 @@ def generate_daily() -> dict[str, Any]:
     text posts / reuse — posts still exist by morning. The window
     facts ride on the report so a badly-timed run is visible.
     """
+    if not _generate_enabled():
+        print("[her_day] generate_daily refused: HER_DAY_GENERATE=off "
+              "(overnight generator cancelled)", flush=True)
+        return {"generated": 0, "skipped": 0, "failed": 0,
+                "errors": [], "disabled": True}
     try:
         from . import gemini_keys as _gk
         _window = _gk.batch_window()
