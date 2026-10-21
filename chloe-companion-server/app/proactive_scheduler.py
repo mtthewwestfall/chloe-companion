@@ -108,7 +108,7 @@ def start_scheduler() -> bool:
     when the scheduler is running (or was already). Called from
     main._startup; never on import."""
     global _thread, _started
-    if os.environ.get("PROACTIVE_SCHEDULER_ENABLED", "1") != "1":
+    if os.environ.get("PROACTIVE_SCHEDULER_ENABLED", "0") != "1":
         print("[proactive-scheduler] disabled by PROACTIVE_SCHEDULER_ENABLED=0", flush=True)
         return False
     with _lock:
