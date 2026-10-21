@@ -391,6 +391,11 @@ def give_caption(conn: Any, user_id: str, girl_id: str, *,
                    f"pick the moment up, don't restart it or change "
                    f"the subject. Warm and wanting, one line, no "
                    f"quotation marks, no labels.")
+        # Key Manager v2: give captions are batch work at the pool.
+        # The lane rides the context dict (see brain.gemini_generate)
+        # so the established 3-argument generate seam stays intact.
+        if isinstance(context, dict):
+            context["pool_lane"] = "batch"
         line = brain.gemini_generate(ask, context, girl_id)
         if line:
             line = " ".join(line.strip().strip('"').split())

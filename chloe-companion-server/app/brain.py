@@ -1246,7 +1246,8 @@ def _gemini_contents(user_text: str,
 
 
 def gemini_generate(user_text: str, context: dict[str, Any],
-                    character_id: str = "chloe") -> str | None:
+                    character_id: str = "chloe",
+                    lane: str | None = None) -> str | None:
     """Live Gemini reply, or None on ANY failure (caller falls back)."""
     payload = {
         "system_instruction": {
@@ -1266,8 +1267,15 @@ def gemini_generate(user_text: str, context: dict[str, Any],
     # paid fallback, transparent failover on 429/402/errors and on model
     # overload (the primary model segment above is rewritten to the chain
     # model currently serving traffic). None when pool is exhausted.
+    # Key Manager v2: `lane` is the pool priority class (interactive
+    # chat by default; proactive passes its class explicitly, other
+    # batch callers may carry "pool_lane" in the context instead —
+    # that keeps the long-standing 3-argument generate seam intact
+    # for the callers/tests that fake it).
+    if lane is None and isinstance(context, dict):
+        lane = context.get("pool_lane")
     data = gemini_keys.post_json(_GEMINI_URL, payload, timeout=30,
-                                     source="whispr-chat")
+                                     source="whispr-chat", lane=lane)
     if not data:
         return None
     try:

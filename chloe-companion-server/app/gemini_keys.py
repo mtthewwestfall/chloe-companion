@@ -222,6 +222,60 @@ Stage 3 — get smart (key-manager overhaul, 2026-10-18):
     are never reported — no per-call price exists in this codebase,
     so the ledger counts paid calls, not invented money.
     GEMINI_SPEND_LEDGER=0 off.
+
+Key Manager v2 (2026-10-20) — project-aware capacity:
+- Project grouping: Gemini quotas are PER PROJECT, not per key. Each
+  key row carries a `project` tag (admin-set; empty = the key is its
+  own project, effective id "key-<id>"). An RPD (per-day) park lands
+  on the key's WHOLE project group until the Pacific reset, and the
+  day's summed burn is learned as the project's observed limit in
+  gemini_project_limits. GEMINI_KEY_PROJECTS="label=project,..."
+  can seed tags by label at ensure-table time.
+- Pre-call quota ledger: per-(project, model) daily + per-minute
+  usage is checked BEFORE selection against configured limits
+  (GEMINI_DAILY_LIMITS / GEMINI_RPM_LIMITS JSON, learned project
+  limits, and a built-in free-tier default for flash-lite models:
+  500 RPD / 10 RPM). Projects at/over a limit are filtered out of
+  every selection phase; when nothing remains, the call gets the
+  typed local verdict pool_busy/"ledger" instead of a provider 429.
+- Circuit breakers: per-key rolling 60 s outcomes (real traffic).
+  >= GEMINI_BREAKER_MIN_ATTEMPTS (5) attempts with > 50% failures
+  benches the key for GEMINI_BREAKER_COOLDOWN_S (60 s). A success
+  clears the bench and the outcome window — and also clears
+  needs_attention: a key that just served (e.g. the funded paid key
+  via an admin test) is rehabilitated, not parked forever.
+  GEMINI_BREAKER=0 disables.
+- Retry discipline: a post_json call makes at most
+  1 + GEMINI_CROSS_KEY_RETRIES (default 1) key attempts across the
+  fast + sweep phases (an explicit caller max_attempts still wins).
+  The reserve-fallback pass keeps its bounded quota-only extension,
+  but only when it reaches a project not yet tried — a different
+  project's quota is the one retry that carries information.
+- Usage-based selection: candidate ordering ranks by the project's
+  remaining daily-budget fraction (ledger-aware) ahead of the
+  classic health/day-count/LRU signals.
+- Priority lanes: post_json(lane=...) — "interactive" (default),
+  "proactive_morning", "proactive_ambient", "batch". Morning maps
+  to the interactive reserve class (time-critical); ambient/batch
+  map to bulk. When the pool's remaining budget fraction (projects
+  with known limits, primary model) falls below the lane's floor
+  (GEMINI_LANE_MIN_BUDGET_BATCH 0.15 / _AMBIENT 0.08 /
+  _MORNING 0.03), the call is refused up front with the typed
+  pool_busy/"lane_budget" signal + retry_after — batch yields
+  first, chat last (interactive has no floor).
+- Paid guardrails: the paid tier is a funded overflow lane with a
+  daily ceiling (GEMINI_PAID_DAILY_CEILING, default 1000 attempts
+  per Pacific day across paid keys; 0 = no ceiling). At the ceiling
+  paid keys leave every candidate list. Crossing
+  GEMINI_PAID_TRICKLE_DAILY (25) logs a once-a-day alert; both are
+  surfaced in degradation_info()["paid"].
+- Admin rollup: degradation_info()["v2"] carries per-project
+  remaining budget, keys-by-state, paid usage vs ceiling, and a
+  pool-exhaustion projection at the current burn rate; burn gains
+  seconds_to_reset + preferred_batch_window (the 3 h after the
+  Pacific reset — when the Her Day batch belongs).
+  GEMINI_KEY_V2=0 turns the v2 selection/ledger/lane behaviors off
+  (schema + reporting stay).
 """
 from __future__ import annotations
 
@@ -1676,6 +1730,19 @@ def degradation_info() -> dict:
             }
         except Exception:
             pass
+        # Key Manager v2 (additive): paid guardrail state, reset
+        # extras on the burn block, and the per-project rollup.
+        try:
+            info["paid"] = _paid_state()
+            _win = batch_window()
+            if isinstance(info.get("burn"), dict):
+                info["burn"]["seconds_to_reset"] = \
+                    _win["seconds_until_reset"]
+                info["burn"]["preferred_batch_window"] = \
+                    _win["in_preferred_window"]
+            info["v2"] = _v2_rollup()
+        except Exception:
+            pass
         # Per-model fallback-chain status (outside the lock above:
         # _model_health_info takes it itself).
         info["models"] = _model_health_info()
@@ -1760,6 +1827,27 @@ def _ensure_table(conn) -> None:
         conn.execute(
             "ALTER TABLE gemini_keys ADD COLUMN quota_park_kind TEXT")
         conn.commit()
+    # Key Manager v2 (2026-10-20): which Google Cloud project a key
+    # belongs to. Gemini quotas are per project, so this tag drives
+    # project grouping (RPD parks), the quota ledger, and usage-based
+    # selection. Empty = unassigned: the key is treated as its own
+    # project ("key-<id>") until an admin assigns a real project.
+    if "project" not in cols:
+        conn.execute(
+            "ALTER TABLE gemini_keys ADD COLUMN project"
+            " TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    _seed_projects_from_env(conn)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gemini_project_limits (
+            project     TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            daily_limit INTEGER NOT NULL,
+            learned_from TEXT,
+            updated_at  TEXT,
+            PRIMARY KEY (project, model)
+        )
+    """)
     # Stage 1 health grid: one row per (key, model, capability) cell
     # that has ever been observed non-ok (plus ok rows written on
     # success to clear a cell). status: 'ok' / 'cooling' / 'dead';
@@ -2016,7 +2104,7 @@ def _eligible_rows(conn, only_ids: set[int] | None = None):
     if only_ids is not None and not only_ids:
         return []
     query = """SELECT id, key_value, is_paid, consecutive_failures, last_used_at,
-                    day_requests, day_stamp
+                    day_requests, day_stamp, project
            FROM gemini_keys
            WHERE is_active = 1
              AND needs_attention = 0
@@ -2038,15 +2126,38 @@ def _order_by_health(rows) -> list[tuple[int, str]]:
     """Order eligible keys: free keys first, then healthiest first,
     then fewest requests served today (pacing: spread the day's load
     so per-project quotas drain evenly instead of in a clump), then
-    least-recently-used."""
+    least-recently-used.
+
+    Key Manager v2: within each tier the LEADING signal is the key's
+    project remaining daily-budget fraction for the chain's primary
+    model (ledger-aware usage-based selection) — the project with
+    the most budget left serves first, so quotas drain evenly across
+    projects instead of in id order. Projects with no known limit
+    count as fully available (they have never exhausted)."""
+    fracs = _remaining_fractions(None) if _v2_on() else {}
+
     def keyfn(r):
-        return (_health_score(r["id"], r["consecutive_failures"]),
+        frac = fracs.get(_project_of(r))
+        return (-(1.0 if frac is None else frac),
+                _health_score(r["id"], r["consecutive_failures"]),
                 _day_count(r),
                 r["last_used_at"] or "")
 
     free = sorted((r for r in rows if not r["is_paid"]), key=keyfn)
     paid = sorted((r for r in rows if r["is_paid"]), key=keyfn)
     return [(r["id"], r["key_value"]) for r in free + paid]
+
+
+def _v2_tuple_filter(cands):
+    """Key Manager v2 candidate hygiene for the tuple pickers:
+    circuit-breaker benches and the paid daily ceiling remove keys
+    before any caller sees them."""
+    if not _v2_on():
+        return cands
+    cands = _filter_benched(cands, _benched_ids())
+    state = _paid_state()
+    _note_paid_state_alerts(state)
+    return _filter_paid_capped(cands, state["ceiling_hit"])
 
 
 def get_candidate_keys() -> list[tuple[int, str]]:
@@ -2071,7 +2182,7 @@ def get_candidate_keys() -> list[tuple[int, str]]:
             active_rows = _eligible_rows(conn, active_ids)
             rows = _under_limit(active_rows)
             if rows:
-                return _order_by_health(rows)
+                return _v2_tuple_filter(_order_by_health(rows))
             # Tier 2: reserve pool — active pool exhausted or rate-limited
             if reserve_ids:
                 rows = _under_limit(_eligible_rows(conn, reserve_ids))
@@ -2084,7 +2195,7 @@ def get_candidate_keys() -> list[tuple[int, str]]:
                         reason,
                         len(rows),
                     )
-                    return _order_by_health(rows)
+                    return _v2_tuple_filter(_order_by_health(rows))
             return []
         finally:
             conn.close()
@@ -2120,10 +2231,14 @@ def _fast_candidates() -> list[tuple[int, str]]:
                 return False
             return not _key_over_limit(r["id"])
 
+        fracs = _remaining_fractions(None) if _v2_on() else {}
+
         def rank(r):
             b = _belief.get(r["id"]) or {}
             lat = b.get("lat")
+            frac = fracs.get(_project_of(r))
             return (0 if not r["is_paid"] else 1,
+                    -(1.0 if frac is None else frac),
                     _day_count(r),
                     lat if lat is not None else _UNKNOWN_LATENCY_S,
                     r["last_used_at"] or "")
@@ -2139,7 +2254,7 @@ def _fast_candidates() -> list[tuple[int, str]]:
                 logger.warning(
                     "gemini_keys: no active key believed healthy, "
                     "fast path tapping reserve pool")
-        return [(r["id"], r["key_value"]) for r in pool]
+        return _v2_tuple_filter([(r["id"], r["key_value"]) for r in pool])
 
 
 def get_key(source: str = "unknown") -> tuple[int, str] | None:
@@ -2190,7 +2305,9 @@ def report_success(key_id: int) -> None:
                        total_requests = total_requests + 1,
                        """ + _DAY_BUMP_SQL + """
                        quota_exhausted_until = NULL,
-                       quota_park_kind = NULL
+                       quota_park_kind = NULL,
+                       needs_attention = 0,
+                       attention_reason = ''
                    WHERE id = ?""",
                 (_now_str(), _now_str(), key_id),
             )
@@ -2200,6 +2317,14 @@ def report_success(key_id: int) -> None:
         # A success fully restores the key: any transient streak is
         # forgiven along with the failure counters.
         _transient_streaks.pop(key_id, None)
+        # Key Manager v2: a success also rehabilitates the per-key
+        # circuit breaker — bench and rolling outcome window cleared.
+        # (The needs_attention clear in the UPDATE above is the same
+        # principle for the admin park: a key that just served a real
+        # request — e.g. the funded paid key via an admin test — is
+        # rehabilitated, not parked forever.)
+        _bench_until.pop(key_id, None)
+        _outcomes.pop(key_id, None)
         entry = _belief_entry_locked(key_id)
         entry["ok"] = True
         entry["at"] = time.time()
@@ -2323,6 +2448,27 @@ def report_failure(key_id: int, error_type: str,
                 )
                 _note_failure_locked(key_id)
                 parked_until = until_epoch
+                if park_kind == "rpd" and _v2_on():
+                    # Key Manager v2: a daily-quota exhaustion is a
+                    # PROJECT event — every key in the project draws
+                    # on the same quota, so the whole group cools
+                    # until the same Pacific reset. Unassigned keys
+                    # are their own project (no-op until tagged).
+                    rows = conn.execute(
+                        "SELECT id, project FROM gemini_keys").fetchall()
+                    kmap = {r["id"]: _project_of(r) for r in rows}
+                    mine = kmap.get(key_id)
+                    if mine:
+                        for other_id, proj in kmap.items():
+                            if other_id != key_id and proj == mine:
+                                conn.execute(
+                                    """UPDATE gemini_keys
+                                       SET quota_exhausted_until = ?,
+                                           quota_park_kind = 'rpd'
+                                       WHERE id = ? AND
+                                           (quota_exhausted_until IS NULL
+                                            OR quota_exhausted_until < ?)""",
+                                    (until, other_id, until))
             elif error_type == "payment":
                 conn.execute(
                     """UPDATE gemini_keys
@@ -2518,6 +2664,8 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
         # pool's weather.
         if source != "prober" and error_type not in ("model", "request"):
             _note_storm_event_locked(error_type is None)
+            # Key Manager v2 per-key circuit breaker: same population.
+            _note_outcome_locked(key_id, error_type is None)
     model = _model_from_url(url)
     capability = _request_capability(url, payload)
     if error_type is None:
@@ -2541,6 +2689,9 @@ def _attempt(key_id: int, key_value: str, url: str, payload: dict,
         # The day's burn for this (key, model) at the moment of an
         # RPD exhaustion is an observed daily limit (Stage 3a).
         _learn_limit_from_rpd(key_id, model)
+        # Key Manager v2: the PROJECT's summed burn is its observed
+        # daily limit (the quota the keys were all drawing on).
+        _learn_project_limit_from_rpd(key_id, model)
     if _health_grid_on():
         # Mirror the outcome into this request's health-grid cell.
         if error_type == "quota":
@@ -2599,6 +2750,20 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
         for key_id, key_value in candidates:
             if key_id in tried:
                 continue
+            if state.get("v2_retry_cap") is not None:
+                # Key Manager v2 retry discipline: the walk stops
+                # once KEY-FAULT attempts (transient/payment — the
+                # classes that indict a key) exceed the budget of
+                # 1 + GEMINI_CROSS_KEY_RETRIES. Quota and model
+                # outcomes are the pool's designed failover signals
+                # (per-project quotas; the model chain) — they never
+                # consume the retry budget and stay bounded by the
+                # overall attempt cap + time budget instead.
+                key_faults = (state["n"]
+                              - state.get("quota_failures", 0)
+                              - state.get("model_failures", 0))
+                if key_faults >= state["v2_retry_cap"]:
+                    break
             if state["n"] >= state.get("max_n", _max_attempts()) or time.monotonic() >= state["deadline"]:
                 break
             if not _charge_lease_or_stop(state):
@@ -2616,6 +2781,7 @@ def _try_candidates(candidates, url, payload, timeout, source, tried,
             if error_type == "quota":
                 state["quota_failures"] = state.get("quota_failures", 0) + 1
             if error_type == "model":
+                state["model_failures"] = state.get("model_failures", 0) + 1
                 # The model went hot mid-walk: reroute the rest of this
                 # walk to the model now serving traffic. The failures so
                 # far blamed the model, not the keys, so the tried set is
@@ -2701,6 +2867,8 @@ def _try_hedged(candidates, url, payload, timeout, source, tried,
                     state["quota_failures"] = \
                         state.get("quota_failures", 0) + 1
                 if error_type == "model":
+                    state["model_failures"] = \
+                        state.get("model_failures", 0) + 1
                     # The model went hot mid-race: subsequently launched
                     # attempts target the model now serving traffic.
                     # (Hedged mode does not re-try already-tried keys on
@@ -2771,7 +2939,8 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
                     fail_fast: bool = False,
                     lease_id: str | None = None,
                     status_out: dict | None = None,
-                    session_id: str | None = None) -> dict | None:
+                    session_id: str | None = None,
+                    lane: str | None = None) -> dict | None:
     """POST JSON to a Gemini endpoint with transparent key rotation.
 
     Fail-fast phases (no sleeping anywhere on the request path):
@@ -2831,7 +3000,11 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
     tried: set[int] = set()
 
     # --- Stage 2: storm breaker, lanes, leases -------------------------
-    sclass = _source_class(source)
+    # Key Manager v2: the request's priority lane (explicit lane, else
+    # derived from the source) decides the Stage-2 class — morning
+    # proactive rides interactive, ambient/batch ride bulk.
+    v2lane = _resolve_lane(source, lane)
+    sclass = _lane_sclass(v2lane) if _v2_on() else _source_class(source)
     storm = _storm_stats()
     if _storm_breaker_on() and storm["open"]:
         if sclass == "bulk":
@@ -2850,6 +3023,37 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
         # full key list and amplify the storm.
         state["max_n"] = max(2, min(state["max_n"],
                                     storm["successes_60s"]))
+    if _v2_on() and max_attempts is None \
+            and "GEMINI_MAX_ATTEMPTS" not in os.environ:
+        # Key Manager v2 retry discipline: at most ONE cross-key
+        # retry per request on key-fault failures (see
+        # _try_candidates). An explicit caller max_attempts — or an
+        # explicitly configured GEMINI_MAX_ATTEMPTS — still wins:
+        # the v2 budget is the default posture, not an override of
+        # a deliberate configuration.
+        state["v2_retry_cap"] = 1 + _cross_key_retries()
+    else:
+        state["v2_retry_cap"] = None
+    if _v2_on():
+        # Priority-lane budget floor: when the pool's remaining
+        # daily budget (projects with known limits) runs low, the
+        # cheap-to-defer classes are refused up front — batch first,
+        # chat never (interactive has no floor).
+        floor = _lane_floor(v2lane)
+        if floor is not None:
+            frac = pool_remaining_fraction()
+            if frac is not None and frac < floor:
+                if status_out is not None:
+                    status_out.update({
+                        "error": "pool_busy", "reason": "lane_budget",
+                        "lane": v2lane,
+                        "retry_after_s": int(min(
+                            seconds_until_reset(), 900.0)) + 1})
+                logger.warning(
+                    "gemini_keys: lane %s refused for source=%s — "
+                    "pool budget %.3f below floor %.2f",
+                    v2lane, source, frac, floor)
+                return None
     lane_ids: set[int] = set()
     if sclass == "bulk" and _lanes_on():
         with _lock:
@@ -2903,8 +3107,43 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
             return cands
         return [c for c in cands if c[0] not in lane_ids]
 
+    # --- Key Manager v2: pre-call ledger, breakers, paid ceiling ---
+    _v2_blocked: set[str] = set()
+    _v2_kmap: dict[int, str] = {}
+    if _v2_on():
+        _v2_blocked = _ledger_blocked_projects(_model_from_url(url))
+        if _v2_blocked:
+            with _lock:
+                conn = db.connect()
+                try:
+                    _ensure_table(conn)
+                    _v2_kmap = _key_project_map(conn)
+                finally:
+                    conn.close()
+    _v2_benched = _benched_ids()
+    _v2_paid = _paid_state() if _v2_on() else {"ceiling_hit": False}
+    if _v2_on():
+        _note_paid_state_alerts(_v2_paid)
+
+    def _v2_filter(cands):
+        cands = _filter_projects(cands, _v2_blocked, _v2_kmap)
+        cands = _filter_benched(cands, _v2_benched)
+        return _filter_paid_capped(cands, bool(_v2_paid["ceiling_hit"]))
+
+    def _set_ledger_verdict():
+        # Nothing was even attempted and the ledger had every project
+        # at a limit: the caller gets the local verdict (typed
+        # pool_busy) instead of a provider 429 walk.
+        if (status_out is not None and state["n"] == 0 and _v2_blocked
+                and status_out.get("error") != "lease_exhausted"):
+            status_out.update({
+                "error": "pool_busy", "reason": "ledger",
+                "retry_after_s": int(min(seconds_until_reset(),
+                                         3600.0)) + 1})
+
     fast = _pin_first(
-        _only_general(_only_free(_fast_candidates())), pin_id)
+        _v2_filter(_only_general(_only_free(_fast_candidates()))),
+        pin_id)
     if fast:
         url = _route_url(url)
         fast = _filter_cells(fast, _model_from_url(url),
@@ -2921,7 +3160,8 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
         if state.get("fatal"):
             return None
     sweep = _pin_first(
-        _only_general(_only_free(get_candidate_keys())), pin_id)
+        _v2_filter(_only_general(_only_free(get_candidate_keys()))),
+        pin_id)
     if not sweep:
         # Nothing believed healthy (phase 1 empty or all its attempts
         # just failed into a pause/backoff) and nothing eligible for
@@ -2934,6 +3174,7 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
             "keys), failing fast for source=%s", source)
         _set_lease_exhausted(status_out, state)
         _set_pool_busy(status_out, sclass, lane_ids)
+        _set_ledger_verdict()
         return None
     url = _route_url(url)
     sweep = _filter_cells(sweep, _model_from_url(url),
@@ -2973,13 +3214,24 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
                          if r["is_paid"] and r["id"] not in tried]
         finally:
             conn.close()
-    fallback = _only_general(_only_free(
-        _order_by_health(reserve_rows + paid_rows)))
+    fallback = _v2_filter(_only_general(_only_free(
+        _order_by_health(reserve_rows + paid_rows))))
     if fallback:
         if state["n"] > 0 \
                 and state.get("quota_failures", 0) >= state["n"]:
-            state["max_n"] = max(state["max_n"], state["n"] + min(
-                len(fallback), _RESERVE_FALLBACK_MAX_EXTRA))
+            grant = True
+            if _v2_on():
+                # v2 retry discipline: this extension is the ONE
+                # sanctioned cross-key retry — it must reach a
+                # project whose quota has not already answered.
+                fb_map = {r["id"]: _project_of(r) for r in eligible}
+                tried_projects = {fb_map[t] for t in tried
+                                  if t in fb_map}
+                grant = any(fb_map.get(c[0]) not in tried_projects
+                            for c in fallback)
+            if grant:
+                state["max_n"] = max(state["max_n"], state["n"] + min(
+                    len(fallback), _RESERVE_FALLBACK_MAX_EXTRA))
         url = _route_url(url)
         fallback = _pin_first(
             _filter_cells(fallback, _model_from_url(url),
@@ -2990,6 +3242,7 @@ def _post_json_core(url: str, payload: dict, timeout: int = 30,
             return data
     _set_lease_exhausted(status_out, state)
     _set_pool_busy(status_out, sclass, lane_ids)
+    _set_ledger_verdict()
     return None
 
 
@@ -2999,7 +3252,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
               fail_fast: bool = False,
               lease_id: str | None = None,
               status_out: dict | None = None,
-              session_id: str | None = None) -> dict | None:
+              session_id: str | None = None,
+              lane: str | None = None) -> dict | None:
     """POST JSON through the shared key pool (see _post_json_core for
     the rotation/failover semantics).
 
@@ -3020,7 +3274,13 @@ def post_json(url: str, payload: dict, timeout: int = 30,
     - session_id (GEMINI_STICKY_SESSIONS): the session's pinned key
       is tried first; after the call the pin re-forms on the key
       that actually served, and a fully failed call drops the pin
-      (clean fallback next call)."""
+      (clean fallback next call).
+
+    Key Manager v2:
+    - lane: the request's priority class ("interactive",
+      "proactive_morning", "proactive_ambient", "batch"); defaults
+      from the source when omitted. Low-budget refusal hits batch
+      first and interactive last (see _post_json_core)."""
     global _flight_hits, _flight_leader_runs
     sticky = bool(session_id) and _sticky_on()
     # The wrapper always passes a dict down so the serving key can
@@ -3041,7 +3301,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
             url, payload, timeout=timeout, source=source,
             free_only=free_only, max_attempts=max_attempts,
             fail_fast=fail_fast, lease_id=lease_id,
-            status_out=so, session_id=session_id if sticky else None))
+            status_out=so, session_id=session_id if sticky else None,
+            lane=lane))
     fkey = _flight_key(source + "\n" + (session_id or ""), url, payload)
     with _flight_lock:
         entry = _flights.get(fkey)
@@ -3061,7 +3322,8 @@ def post_json(url: str, payload: dict, timeout: int = 30,
                 free_only=free_only, max_attempts=max_attempts,
                 fail_fast=fail_fast, lease_id=None,
                 status_out=so,
-                session_id=session_id if sticky else None)
+                session_id=session_id if sticky else None,
+                lane=lane)
         except Exception:
             result = None
             entry["result"] = None
@@ -3090,7 +3352,7 @@ def post_json(url: str, payload: dict, timeout: int = 30,
         url, payload, timeout=timeout, source=source,
         free_only=free_only, max_attempts=max_attempts,
         fail_fast=fail_fast, lease_id=None, status_out=so,
-        session_id=session_id if sticky else None))
+        session_id=session_id if sticky else None, lane=lane))
 
 
 # ---------------------------------------------------------------------------
@@ -3286,6 +3548,613 @@ def _log_usage_conn(key_id: int | None, source: str, success: bool,
         pass
 
 
+
+# --- Key Manager v2: projects, ledger, breakers, lanes, paid (2026-10-20) ---
+
+def _v2_on() -> bool:
+    return _flag("GEMINI_KEY_V2", "1")
+
+
+def _project_of(row) -> str:
+    """Effective project identity for a key row: the admin-set
+    `project` tag when present, else "key-<id>" (an unassigned key is
+    its own project — grouping is a no-op until tags are assigned)."""
+    try:
+        tag = (row["project"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        tag = ""
+    if tag:
+        return tag
+    try:
+        return "key-%s" % row["id"]
+    except (KeyError, IndexError, TypeError):
+        return "key-?"
+
+
+def _key_project_map(conn) -> dict[int, str]:
+    """key_id -> effective project for every key row."""
+    _ensure_table(conn)
+    out: dict[int, str] = {}
+    for r in conn.execute("SELECT id, project FROM gemini_keys").fetchall():
+        out[r["id"]] = _project_of(r)
+    return out
+
+
+def _seed_projects_from_env(conn) -> None:
+    """GEMINI_KEY_PROJECTS="label=project,label2=project2": assign a
+    project tag to keys whose label matches and whose tag is still
+    empty. Idempotent and conservative: never overwrites a tag an
+    admin already set."""
+    raw = (os.environ.get("GEMINI_KEY_PROJECTS") or "").strip()
+    if not raw:
+        return
+    pairs = {}
+    for part in raw.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k and v:
+                pairs[k] = v
+    if not pairs:
+        return
+    try:
+        cols = [r["name"] for r in
+                conn.execute("PRAGMA table_info(gemini_keys)").fetchall()]
+        if "project" not in cols:
+            return
+        for label, project in pairs.items():
+            conn.execute(
+                """UPDATE gemini_keys SET project = ?
+                   WHERE label = ? AND (project IS NULL OR project = '')""",
+                (project, label))
+        conn.commit()
+    except Exception:
+        pass
+
+
+def set_project(key_id: int, project: str) -> dict | None:
+    """Admin: set (or clear, with "") a key's project tag."""
+    with _lock:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            conn.execute(
+                "UPDATE gemini_keys SET project = ? WHERE id = ?",
+                ((project or "").strip(), key_id))
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM gemini_keys WHERE id = ?", (key_id,)
+            ).fetchone()
+            return _row_to_public(row) if row else None
+        finally:
+            conn.close()
+
+
+# Model-class free-tier defaults for the ledger (per project+model).
+# Only the well-known free-tier shape is defaulted; anything else has
+# no pre-call cap until a limit is configured or learned from a real
+# RPD exhaustion. GEMINI_DAILY_LIMITS / GEMINI_RPM_LIMITS JSON maps
+# override per "project:model", "model", or "*".
+_MODEL_DAILY_DEFAULTS = (("flash-lite", 500),)
+_MODEL_RPM_DEFAULTS = (("flash-lite", 10),)
+
+
+def _limits_env(name: str) -> dict:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _configured_limit(name: str, project: str, model: str | None) -> int | None:
+    table = _limits_env(name)
+    if not table:
+        return None
+    model = model or ""
+    for key in ("%s:%s" % (project, model), model, "*"):
+        if key in table:
+            try:
+                return int(table[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _learned_project_limit(conn, project: str, model: str) -> int | None:
+    try:
+        row = conn.execute(
+            """SELECT daily_limit FROM gemini_project_limits
+               WHERE project = ? AND model = ?""",
+            (project, model)).fetchone()
+        return int(row["daily_limit"]) if row else None
+    except Exception:
+        return None
+
+
+def _daily_limit_for(conn, project: str, model: str | None) -> int | None:
+    """The (project, model) daily request limit the ledger enforces:
+    configured (env) first, then the limit learned from a real RPD
+    exhaustion, then the model-class free-tier default, else None
+    (no pre-call daily cap for this pair)."""
+    model = model or ""
+    cfg = _configured_limit("GEMINI_DAILY_LIMITS", project, model)
+    if cfg is not None:
+        return cfg
+    learned = _learned_project_limit(conn, project, model)
+    if learned is not None:
+        return learned
+    low = model.lower()
+    for needle, limit in _MODEL_DAILY_DEFAULTS:
+        if needle in low:
+            return limit
+    return None
+
+
+def _rpm_limit_for(project: str, model: str | None) -> int | None:
+    model = model or ""
+    cfg = _configured_limit("GEMINI_RPM_LIMITS", project, model)
+    if cfg is not None:
+        return cfg
+    low = model.lower()
+    for needle, limit in _MODEL_RPM_DEFAULTS:
+        if needle in low:
+            return limit
+    return None
+
+
+def _project_usage_today(conn, model: str | None) -> dict[str, int]:
+    """project -> upstream attempts today (Pacific day) against
+    `model`, summed over the project's keys from the burn table."""
+    day = _pt_day_str()
+    kmap = _key_project_map(conn)
+    used: dict[str, int] = {}
+    try:
+        q = """SELECT key_id, calls FROM gemini_key_model_day
+               WHERE pt_day = ?"""
+        params: list = [day]
+        if model:
+            q += " AND model = ?"
+            params.append(model)
+        for r in conn.execute(q, params).fetchall():
+            proj = kmap.get(r["key_id"])
+            if proj:
+                used[proj] = used.get(proj, 0) + int(r["calls"] or 0)
+    except Exception:
+        pass
+    return used
+
+
+def _project_minute_usage(kmap: dict[int, str]) -> dict[str, int]:
+    """project -> dispatches in the last 60 s (in-memory dispatch
+    windows summed over the project's keys). Caller holds _lock or
+    accepts a racy snapshot."""
+    cutoff = time.monotonic() - _DISPATCH_WINDOW_S
+    out: dict[str, int] = {}
+    for key_id, dq in _dispatch_times.items():
+        proj = kmap.get(key_id)
+        if not proj:
+            continue
+        n = sum(1 for ts in dq if ts > cutoff)
+        if n:
+            out[proj] = out.get(proj, 0) + n
+    return out
+
+
+def _ledger_blocked_projects(model: str | None) -> set[str]:
+    """Projects the pre-call ledger refuses for `model` right now:
+    daily usage at/over the (project, model) limit, or the last
+    minute's dispatches at/over the per-minute limit. Empty when v2
+    is off or nothing is at a limit."""
+    if not _v2_on():
+        return set()
+    blocked: set[str] = set()
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            kmap = _key_project_map(conn)
+            used = _project_usage_today(conn, model)
+            projects = set(kmap.values())
+            for proj in projects:
+                limit = _daily_limit_for(conn, proj, model)
+                if limit is not None and used.get(proj, 0) >= limit:
+                    blocked.add(proj)
+            minute = _project_minute_usage(kmap)
+            for proj in projects:
+                rpm = _rpm_limit_for(proj, model)
+                if rpm is not None and minute.get(proj, 0) >= rpm:
+                    blocked.add(proj)
+        finally:
+            conn.close()
+    except Exception:
+        return set()
+    return blocked
+
+
+def _filter_projects(cands, blocked: set[str], kmap: dict[int, str]):
+    if not blocked:
+        return cands
+    return [c for c in cands if kmap.get(c[0]) not in blocked]
+
+
+def _remaining_fractions(model: str | None) -> dict[str, float | None]:
+    """project -> remaining daily-budget fraction for `model`
+    (1.0 = untouched, 0.0 = exhausted; None = no known limit, which
+    ordering treats as fully available — unmeasured projects have
+    never exhausted)."""
+    if not model:
+        chain = model_chain()
+        model = chain[0] if chain else None
+    out: dict[str, float | None] = {}
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            kmap = _key_project_map(conn)
+            used = _project_usage_today(conn, model)
+            for proj in set(kmap.values()):
+                limit = _daily_limit_for(conn, proj, model)
+                if not limit:
+                    out[proj] = None
+                else:
+                    out[proj] = max(
+                        0.0, (limit - used.get(proj, 0)) / float(limit))
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return out
+
+
+def pool_remaining_fraction(model: str | None = None) -> float | None:
+    """Pool-wide remaining daily budget fraction for `model`
+    (default: the chain primary): summed remaining / summed limits
+    over projects WITH a known limit. None when no project has a
+    known limit (nothing to budget against)."""
+    model = model or (model_chain()[0] if model_chain() else None)
+    fracs = _remaining_fractions(model)
+    known = {p: f for p, f in fracs.items() if f is not None}
+    if not known:
+        return None
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            kmap = _key_project_map(conn)
+            used = _project_usage_today(conn, model)
+            total_limit = 0
+            total_remaining = 0.0
+            for proj in known:
+                limit = _daily_limit_for(conn, proj, model) or 0
+                total_limit += limit
+                total_remaining += max(0.0, limit - used.get(proj, 0))
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if total_limit <= 0:
+        return None
+    return total_remaining / float(total_limit)
+
+
+def next_reset_epoch() -> float:
+    """Epoch of the next Pacific-midnight quota reset."""
+    return _next_pt_midnight_epoch()
+
+
+def seconds_until_reset() -> float:
+    return max(0.0, _next_pt_midnight_epoch() - time.time())
+
+
+def batch_window() -> dict:
+    """Reset-aware scheduling facts for batch work: the preferred
+    window is the 3 hours right after the Pacific reset (03:00 ET),
+    when every project's daily budget is full again — the Her Day
+    batch belongs there, not stacked on the 08:00-10:00 wave."""
+    reset = _next_pt_midnight_epoch()
+    since_reset = 86400.0 - (reset - time.time())
+    return {
+        "next_reset_epoch": reset,
+        "seconds_until_reset": max(0.0, reset - time.time()),
+        "seconds_since_reset": max(0.0, since_reset),
+        "in_preferred_window": 0.0 <= since_reset <= 3 * 3600.0,
+    }
+
+
+# --- v2 circuit breakers -----------------------------------------------------
+# Rolling per-key outcome window (real traffic only; prober checks and
+# model/request-class outcomes excluded, same as the storm breaker).
+_outcomes: dict[int, deque] = {}
+_bench_until: dict[int, float] = {}
+
+
+def _breaker_on() -> bool:
+    return _v2_on() and _flag("GEMINI_BREAKER", "1")
+
+
+def _breaker_min_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("GEMINI_BREAKER_MIN_ATTEMPTS", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _breaker_cooldown_s() -> float:
+    return max(1.0, _env_float("GEMINI_BREAKER_COOLDOWN_S", 60.0))
+
+
+def _note_outcome_locked(key_id: int, ok: bool) -> None:
+    """Record one real attempt outcome; trip the per-key breaker
+    when the rolling minute goes bad. Caller holds _lock."""
+    if not _breaker_on():
+        return
+    now = time.monotonic()
+    dq = _outcomes.setdefault(key_id, deque())
+    dq.append((now, ok))
+    cutoff = now - 120.0
+    while dq and dq[0][0] <= cutoff:
+        dq.popleft()
+    if ok:
+        return
+    recent = [(ts, o) for ts, o in dq if ts > now - 60.0]
+    if len(recent) >= _breaker_min_attempts():
+        fails = sum(1 for _ts, o in recent if not o)
+        if fails / len(recent) > 0.5:
+            _bench_until[key_id] = now + _breaker_cooldown_s()
+            logger.warning(
+                "gemini_keys: circuit breaker benched key %s for "
+                "%.0fs (%d/%d failures in the last minute)",
+                key_id, _breaker_cooldown_s(), fails, len(recent))
+
+
+def _benched_ids() -> set[int]:
+    if not _breaker_on():
+        return set()
+    now = time.monotonic()
+    return {k for k, until in _bench_until.items() if until > now}
+
+
+def _filter_benched(cands, benched: set[int]):
+    if not benched:
+        return cands
+    return [c for c in cands if c[0] not in benched]
+
+
+# --- v2 priority lanes ---------------------------------------------------------
+_LANES = ("interactive", "proactive_morning", "proactive_ambient", "batch")
+_LANE_FLOOR_ENV = {
+    "batch": ("GEMINI_LANE_MIN_BUDGET_BATCH", 0.15),
+    "proactive_ambient": ("GEMINI_LANE_MIN_BUDGET_AMBIENT", 0.08),
+    "proactive_morning": ("GEMINI_LANE_MIN_BUDGET_MORNING", 0.03),
+}
+
+
+def _resolve_lane(source: str | None, lane: str | None) -> str:
+    """The request's priority lane: an explicit valid lane wins;
+    otherwise bulk-class sources are batch and everything else is
+    interactive (the safe default for unmarked callers)."""
+    if lane and lane in _LANES:
+        return lane
+    return "batch" if _source_class(source) == "bulk" else "interactive"
+
+
+def _lane_sclass(lane: str) -> str:
+    """Map a v2 lane onto the Stage-2 source class: morning
+    proactive is time-critical and rides the interactive class
+    (reserve access); ambient + batch are bulk."""
+    return "interactive" if lane in ("interactive", "proactive_morning") \
+        else "bulk"
+
+
+def _lane_floor(lane: str) -> float | None:
+    spec = _LANE_FLOOR_ENV.get(lane)
+    if spec is None:
+        return None
+    return max(0.0, min(1.0, _env_float(spec[0], spec[1])))
+
+
+# --- v2 paid guardrails ---------------------------------------------------------
+
+def _paid_ceiling() -> int:
+    try:
+        return max(0, int(os.environ.get("GEMINI_PAID_DAILY_CEILING",
+                                         "1000")))
+    except (TypeError, ValueError):
+        return 1000
+
+
+def _paid_trickle() -> int:
+    try:
+        return max(0, int(os.environ.get("GEMINI_PAID_TRICKLE_DAILY",
+                                         "25")))
+    except (TypeError, ValueError):
+        return 25
+
+
+_paid_alert_day: dict[str, str] = {}
+
+
+def _paid_calls_today() -> int:
+    """Upstream attempts served by paid keys today (Pacific day),
+    from the burn table; falls back to the spend ledger's paid
+    count when burn tracking has nothing yet."""
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            day = _pt_day_str()
+            row = conn.execute(
+                """SELECT COALESCE(SUM(kmd.calls), 0) AS n
+                   FROM gemini_key_model_day kmd
+                   JOIN gemini_keys k ON k.id = kmd.key_id
+                   WHERE kmd.pt_day = ? AND k.is_paid = 1""",
+                (day,)).fetchone()
+            n = int(row["n"] or 0) if row else 0
+            if n:
+                return n
+            row = conn.execute(
+                """SELECT COALESCE(SUM(paid_calls), 0) AS n
+                   FROM gemini_source_day WHERE pt_day = ?""",
+                (day,)).fetchone()
+            return int(row["n"] or 0) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+def _paid_state() -> dict:
+    calls = _paid_calls_today()
+    ceiling = _paid_ceiling()
+    trickle = _paid_trickle()
+    return {
+        "calls_today": calls,
+        "ceiling": ceiling,
+        "ceiling_hit": bool(ceiling and calls >= ceiling),
+        "trickle": trickle,
+        "trickle_exceeded": bool(trickle and calls > trickle),
+    }
+
+
+def _note_paid_state_alerts(state: dict) -> None:
+    """Once-a-day (Pacific) log alerts for trickle/ceiling crossings
+    — the guardrail is only real if a human hears about it."""
+    day = _pt_day_str()
+    if state["trickle_exceeded"] and _paid_alert_day.get("trickle") != day:
+        _paid_alert_day["trickle"] = day
+        logger.warning(
+            "gemini_keys: paid fallback past trickle (%d calls today "
+            "> %d) — free pool is leaking into the paid lane",
+            state["calls_today"], state["trickle"])
+    if state["ceiling_hit"] and _paid_alert_day.get("ceiling") != day:
+        _paid_alert_day["ceiling"] = day
+        logger.warning(
+            "gemini_keys: paid daily ceiling hit (%d/%d) — paid keys "
+            "leave rotation until the Pacific reset",
+            state["calls_today"], state["ceiling"])
+
+
+def _filter_paid_capped(cands, paid_capped: bool):
+    if not paid_capped:
+        return cands
+    # Lock-free on purpose: this filter runs inside selection paths
+    # that already hold _lock, and the public paid_key_ids() takes
+    # that (non-reentrant) lock — calling it here deadlocked the
+    # pool the first time the ceiling was hit. A direct read is
+    # fine: the paid id set changes only on admin key add/delete.
+    paid: set[int] = set()
+    try:
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            paid = {r["id"] for r in conn.execute(
+                "SELECT id FROM gemini_keys WHERE is_paid = 1"
+            ).fetchall()}
+        finally:
+            conn.close()
+    except Exception:
+        return cands
+    return [c for c in cands if c[0] not in paid]
+
+
+def _cross_key_retries() -> int:
+    try:
+        return max(0, int(os.environ.get("GEMINI_CROSS_KEY_RETRIES", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _v2_rollup() -> dict:
+    """Admin rollup for Key Manager v2: per-project remaining daily
+    budget (chain primary model), keys-by-state counts, paid usage
+    vs ceiling, and a pool-exhaustion projection at the last hour's
+    burn rate. Best-effort like the rest of degradation_info."""
+    out: dict = {"projects": [], "keys_by_state": {},
+                 "paid": _paid_state(), "projection": None,
+                 "pool_remaining_fraction": None}
+    try:
+        chain = model_chain()
+        primary = chain[0] if chain else None
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            kmap = _key_project_map(conn)
+            used = _project_usage_today(conn, primary)
+            rows = conn.execute("SELECT * FROM gemini_keys").fetchall()
+            by_project: dict[str, list] = {}
+            for r in rows:
+                by_project.setdefault(_project_of(r), []).append(r)
+            total_limit = 0
+            total_remaining = 0.0
+            for proj in sorted(by_project):
+                members = by_project[proj]
+                states: dict[str, int] = {}
+                for r in members:
+                    st = _row_to_public(r)["status"]
+                    states[st] = states.get(st, 0) + 1
+                    out["keys_by_state"][st] = \
+                        out["keys_by_state"].get(st, 0) + 1
+                limit = _daily_limit_for(conn, proj, primary)
+                u = int(used.get(proj, 0))
+                remaining = (None if limit is None
+                             else max(0, limit - u))
+                if limit:
+                    total_limit += limit
+                    total_remaining += float(remaining or 0)
+                out["projects"].append({
+                    "project": proj,
+                    "assigned": any(
+                        (r["project"] or "").strip() for r in members),
+                    "keys": len(members),
+                    "keys_by_state": states,
+                    "paid": any(bool(r["is_paid"]) for r in members),
+                    "model": primary,
+                    "used_today": u,
+                    "daily_limit": limit,
+                    "remaining": remaining,
+                    "remaining_fraction": (
+                        None if not limit else
+                        round(float(remaining or 0) / limit, 3)),
+                })
+            rate = 0
+            try:
+                row = conn.execute(
+                    """SELECT COUNT(*) AS n FROM gemini_key_usage
+                       WHERE created_at >= datetime('now', '-1 hour')"""
+                ).fetchone()
+                rate = int(row["n"] or 0) if row else 0
+            except Exception:
+                rate = 0
+        finally:
+            conn.close()
+        out["pool_remaining_fraction"] = pool_remaining_fraction(primary)
+        if total_limit and rate > 0:
+            hours = total_remaining / rate
+            out["projection"] = {
+                "status": "ok", "model": primary,
+                "remaining_calls": int(total_remaining),
+                "burn_rate_per_hour": rate,
+                "hours": round(hours, 1),
+                "exhaust_at_epoch": time.time() + hours * 3600.0,
+            }
+        elif total_limit:
+            out["projection"] = {
+                "status": "no_recent_burn", "model": primary,
+                "remaining_calls": int(total_remaining), "hours": None}
+        else:
+            out["projection"] = {
+                "status": "learning",
+                "reason": "no project has a known daily limit yet",
+                "hours": None}
+    except Exception:
+        pass
+    return out
+
+
 # --- Stage 3 recording: burn counters + spend ledger -------------------------
 
 def _record_attempt_stats(key_id: int, model: str | None, source: str,
@@ -3371,6 +4240,59 @@ def _learn_limit_from_rpd(key_id: int, model: str | None) -> None:
                        learned_from = 'observed_rpd',
                        updated_at = datetime('now')""",
                 (key_id, model, observed),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _learn_project_limit_from_rpd(key_id: int, model: str | None) -> None:
+    """Key Manager v2: an RPD park just landed for (key, model);
+    today's summed burn across the key's PROJECT is the project's
+    observed daily limit (the shared quota the keys drew on). Kept
+    at the smallest observation; best-effort like the per-key
+    learner it sits beside."""
+    if not _burn_on() or not model:
+        return
+    try:
+        day = _pt_day_str()
+        conn = db.connect()
+        try:
+            _ensure_table(conn)
+            me = conn.execute(
+                "SELECT id, project FROM gemini_keys WHERE id = ?",
+                (key_id,)).fetchone()
+            if me is None:
+                return
+            project = _project_of(me)
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id, project FROM gemini_keys").fetchall()
+                if _project_of(r) == project]
+            if not ids:
+                return
+            marks = ",".join("?" for _ in ids)
+            total = 0
+            for r in conn.execute(
+                    f"""SELECT calls FROM gemini_key_model_day
+                        WHERE pt_day = ? AND model = ?
+                          AND key_id IN ({marks})""",
+                    [day, model] + ids).fetchall():
+                total += int(r["calls"] or 0)
+            if total <= 0:
+                return
+            conn.execute(
+                """INSERT INTO gemini_project_limits
+                       (project, model, daily_limit, learned_from,
+                        updated_at)
+                   VALUES (?, ?, ?, 'observed_rpd', datetime('now'))
+                   ON CONFLICT(project, model) DO UPDATE SET
+                       daily_limit = MIN(daily_limit,
+                                         excluded.daily_limit),
+                       learned_from = 'observed_rpd',
+                       updated_at = datetime('now')""",
+                (project, model, total),
             )
             conn.commit()
         finally:
@@ -3554,6 +4476,10 @@ def _row_to_public(row) -> dict:
         # and WHICH quota dimension parked it ('rpm'/'rpd'/None).
         "attention_reason": _row_get(row, "attention_reason"),
         "quota_park_kind": _row_get(row, "quota_park_kind"),
+        # Key Manager v2: the key's project identity (the tag an
+        # admin assigned; the effective id falls back to "key-<id>").
+        "project": _project_of(row),
+        "project_assigned": bool((_row_get(row, "project") or "").strip()),
         "created_at": row["created_at"],
     }
 
@@ -3572,7 +4498,8 @@ def list_keys() -> list[dict]:
             conn.close()
 
 
-def add_key(key_value: str, label: str = "", is_paid: bool = False) -> dict:
+def add_key(key_value: str, label: str = "", is_paid: bool = False,
+            project: str = "") -> dict:
     key_value = (key_value or "").strip()
     if not key_value:
         raise ValueError("key is required")
@@ -3588,10 +4515,11 @@ def add_key(key_value: str, label: str = "", is_paid: bool = False) -> dict:
             if exists:
                 raise ValueError("key already exists")
             cur = conn.execute(
-                """INSERT INTO gemini_keys (key_hash, key_value, label, is_paid)
-                   VALUES (?, ?, ?, ?)""",
+                """INSERT INTO gemini_keys
+                       (key_hash, key_value, label, is_paid, project)
+                   VALUES (?, ?, ?, ?, ?)""",
                 (_key_hash(key_value), key_value, (label or "").strip(),
-                 1 if is_paid else 0),
+                 1 if is_paid else 0, (project or "").strip()),
             )
             conn.commit()
             row = conn.execute(

@@ -6867,7 +6867,8 @@ def gemini_image_render(prompt: str, ref_path: str | None = None) -> dict:
     }
     try:
         data = gemini_keys.post_json(_IMAGE_URL, payload, timeout=120,
-                                     source="image-fallback")
+                                     source="image-fallback",
+                                     lane="batch")
     except Exception as e:  # noqa: BLE001
         return {"status": "pool_error", "detail": str(e)}
     if not data:

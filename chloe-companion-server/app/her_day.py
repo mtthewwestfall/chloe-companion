@@ -731,7 +731,9 @@ def _generate_caption(girl_name: str, moment_key: str, desc: str,
             req = urllib.request.Request(
                 url, data=payload,
                 headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {token}"},
+                         "Authorization": f"Bearer {token}",
+                         # Key Manager v2: captions are batch work.
+                         "X-Pool-Lane": "batch"},
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = _json.loads(resp.read())
@@ -1236,8 +1238,27 @@ def reuse_fill_for_pair(user_id: str, girl_id: str,
 def generate_daily() -> dict[str, Any]:
     """Generate Whispr Feed posts for all users x all girls.
 
-    Called by the 6 AM cron.
+    Called by the 6 AM cron — which already lands AFTER the
+    midnight-Pacific quota reset (03:00 ET), inside the pool's
+    preferred batch window, instead of stacked on the 08:00-10:00
+    proactive/chat wave. Key Manager v2: the batch's pool calls all
+    ride the "batch" lane, so whenever the run happens while the
+    pool's remaining budget is low, the pool refuses batch work
+    first (typed pool_busy) and the affected moments fall back to
+    text posts / reuse — posts still exist by morning. The window
+    facts ride on the report so a badly-timed run is visible.
     """
+    try:
+        from . import gemini_keys as _gk
+        _window = _gk.batch_window()
+        _budget = _gk.pool_remaining_fraction()
+    except Exception:  # noqa: BLE001 — reporting must never break the batch
+        _window, _budget = {}, None
+    if _window and not _window.get("in_preferred_window"):
+        print(f"[her_day] daily batch running outside the preferred "
+              f"post-reset window (reset in "
+              f"{_window.get('seconds_until_reset', 0):.0f}s, pool "
+              f"budget {_budget})", flush=True)
     conn = db.connect()
     try:
         users = [r["user_id"] for r in conn.execute(
@@ -1245,6 +1266,8 @@ def generate_daily() -> dict[str, Any]:
     finally:
         conn.close()
     report: dict[str, Any] = {"generated": 0, "skipped": 0, "errors": []}
+    report["pool_window"] = _window
+    report["pool_budget_fraction"] = _budget
     for uid in users:
         try:
             n = generate_for_all_girls(uid)

@@ -204,10 +204,15 @@ class GeminiKeyIn(BaseModel):
     key: str
     label: str = ""
     is_paid: bool = False
+    # Key Manager v2: Google Cloud project this key belongs to
+    # (quotas are per project). Empty = the key is its own project.
+    project: str = ""
 
 
 class GeminiKeyPatch(BaseModel):
     is_active: bool
+    # Key Manager v2: when present, (re)assign the key's project tag.
+    project: str | None = None
 
 
 class FootageIn(BaseModel):
@@ -1046,7 +1051,8 @@ def admin_gemini_keys(request: Request):
 def admin_add_gemini_key(body: GeminiKeyIn, request: Request):
     _require_admin(request)
     try:
-        return {"key": gemini_keys.add_key(body.key, body.label, body.is_paid)}
+        return {"key": gemini_keys.add_key(body.key, body.label,
+                                           body.is_paid, body.project)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1062,6 +1068,9 @@ def admin_delete_gemini_key(key_id: int, request: Request):
 @app.patch("/api/v1/admin/gemini-keys/{key_id}")
 def admin_patch_gemini_key(key_id: int, body: GeminiKeyPatch, request: Request):
     _require_admin(request)
+    if body.project is not None:
+        if gemini_keys.set_project(key_id, body.project) is None:
+            raise HTTPException(status_code=404, detail="not_found")
     key = gemini_keys.set_active(key_id, body.is_active)
     if key is None:
         raise HTTPException(status_code=404, detail="not_found")
@@ -5706,6 +5715,11 @@ def proxy_pool_status(request: Request):
         "storm": info.get("storm") or {},
         "burn": {"forecast":
                  (info.get("burn") or {}).get("forecast") or {}},
+        # Key Manager v2 (additive): reset timing + paid guardrails,
+        # so bulk callers can schedule around the Pacific reset.
+        "next_reset_epoch": (info.get("burn") or {}).get("pt_reset_epoch"),
+        "seconds_to_reset": (info.get("burn") or {}).get("seconds_to_reset"),
+        "paid": info.get("paid") or {},
     }
 
 
@@ -5744,11 +5758,15 @@ def proxy_gemini_generate_content(model: str, body: dict, request: Request):
     lease_id = (request.headers.get("x-pool-lease") or "").strip() or None
     session_id = (request.headers.get("x-pool-session")
                   or "").strip() or None
+    # Key Manager v2: optional priority lane (interactive |
+    # proactive_morning | proactive_ambient | batch). Invalid values
+    # are ignored by the pool, which derives the lane from the source.
+    lane = (request.headers.get("x-pool-lane") or "").strip() or None
     status_out: dict = {}
     data = gemini_keys.post_json(url, body, timeout=60, source=source,
                                  free_only=free_only, lease_id=lease_id,
                                  status_out=status_out,
-                                 session_id=session_id)
+                                 session_id=session_id, lane=lane)
     if data is None:
         _raise_pool_status(status_out)
         raise HTTPException(status_code=502, detail="all_keys_failed")
@@ -5812,11 +5830,13 @@ def proxy_openai_chat_completions(body: dict, request: Request):
     lease_id = (request.headers.get("x-pool-lease") or "").strip() or None
     session_id = (request.headers.get("x-pool-session")
                   or "").strip() or None
+    # Key Manager v2: optional priority lane (see the native route).
+    lane = (request.headers.get("x-pool-lane") or "").strip() or None
     status_out: dict = {}
     data = gemini_keys.post_json(url, payload, timeout=60, source=source,
                                  free_only=free_only, lease_id=lease_id,
                                  status_out=status_out,
-                                 session_id=session_id)
+                                 session_id=session_id, lane=lane)
     if data is None:
         _raise_pool_status(status_out)
         raise HTTPException(status_code=502, detail="all_keys_failed")
