@@ -64,6 +64,18 @@ AMBIENT_EARLIEST_HOUR = 9
 AMBIENT_LATEST_HOUR = 21
 
 
+def _ambient_enabled() -> bool:
+    """Master switch for the ambient class (nudge / ambient / winback /
+    warmhour). Roof ordered the nudge system OFF on 2026-10-22 after it
+    kept burning Gemini keys. PROACTIVE_AMBIENT=off makes
+    deliver_proactive_message refuse every non-morning send BEFORE any
+    generation happens, so a disabled nudge costs zero API calls. The
+    morning message is a separate class and is NOT touched by this
+    switch. Unset = on (previous behavior)."""
+    return os.environ.get("PROACTIVE_AMBIENT", "on").strip().lower() \
+        not in ("off", "0", "false", "no")
+
+
 def _owner_ids() -> set[str]:
     raw = os.environ.get("ASSIST_OWNER_IDS", "")
     return {p.strip() for p in raw.split(",") if p.strip()}
@@ -1105,6 +1117,11 @@ def deliver_proactive_message(conn: sqlite3.Connection, user_id: str,
     scheduler ticks inside its window."""
     _ensure_tables(conn)
     mtype = message_type if message_type in MESSAGE_TYPES else "nudge"
+    if mtype != "morning" and not _ambient_enabled():
+        print(f"[proactive] ambient disabled "
+              f"(PROACTIVE_AMBIENT=off): {mtype} for "
+              f"{user_id}/{character_id} skipped", flush=True)
+        return False
     user = _get_user(conn, user_id)
     local = _user_local_now(user.get("timezone"))
     today_str = local.strftime("%Y-%m-%d")
